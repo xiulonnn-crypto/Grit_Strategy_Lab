@@ -1,0 +1,74 @@
+{
+  "url": "http://127.0.0.1:4173/?v=1779351294001#/factors?layer=F3",
+  "capturedAt": "2026-05-21T08:15:02.258Z",
+  "desktop": {
+    "name": "desktop",
+    "viewport": {
+      "width": 1440,
+      "height": 1000
+    },
+    "screenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factors-f3-lineage-quality\\factors-f3-pending-metrics-desktop.png",
+    "metrics": {
+      "headers": [
+        "因子基本信息",
+        "血缘溯源",
+        "信号质量",
+        "组合质量",
+        "容量/摩擦",
+        "风格暴露",
+        "因子级别↕?因子级别：Rank IC 均值和 IR (稳定性) 先取绝对值，再按较弱一项保守评级。S顶级: Rank IC > 0.03, IR > 2.0; 你的因子在此！极其罕见，具备极高的实战价值，建议作为组合的核心权重。A优秀: Rank IC 0.02 ~ 0.03, IR 1.0 ~ 2.0; 非常优秀的因子，可以稳定贡献超额收益。B合格: Rank IC 0.01 ~ 0.02, IR 0.5 ~ 1.0; 中规中矩，可以作为辅助因子增加组合的多元化。C微弱: Rank IC 0.005 ~ 0.01, IR 0.2 ~ 0.5; 信号较弱，容易被交易成本吞噬，需观察长期表现。D噪声: Rank IC < 0.005, IR < 0.2; 基本属于统计噪声，不建议在实盘中使用。其他: F1 原始因子作为上层因子的底层水源，只按数据质量状态治理，不参与 Rank IC/IR 投资评级。未完成真实或预览诊断的因子显示为未评级，不参与等级排序。",
+        "生命周期",
+        "创建时间↓",
+        "操作"
+      ],
+      "rows": [
+        "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined]估值?s_val_cfp_ltm_raw / s_vol_downside_252d_ranka_alpha_custom_cur_raw查看血缘RankIC 0.345丨IC_IR 6.91丨衰减 252日增量IR 0.55最大回撤 45.5%Capacity 容量通过Turnover 18.00%/周Cost 9.0 bps风格中性Style Corr 0.260S顶级线上5月19日 下午05:53生成组合策略详情",
+        "[综合] - FF3 风格复合基石 (等权) [Beta-Free]估值?Rank(ZScore(Residual(Winsorize(FFBlend(Momentum252, ValueEP, QualityROE, Size), 3), s_beta_market_252d_raw)))s_alpha_ffblend_resid_mkt_rank查看血缘RankIC 0.013丨IC_IR 0.51丨衰减 252日Sharpe 0.63最大回撤 12.3%Capacity 容量通过Turnover 1.38%/周Cost 9.0 bps风格中性Style Corr 0.000B合格线上5月19日 下午02:56生成组合策略详情"
+      ],
+      "rowCount": 2,
+      "visiblePending": false,
+      "hasIncrementalIr": true,
+      "hasCost": true,
+      "hasStyleZero": true,
+      "hasSharpe063": true,
+      "hasSignalBeforeCombo": true,
+      "text": "因子基本信息血缘溯源信号质量组合质量容量/摩擦风格暴露因子级别↕?因子级别：Rank IC 均值和 IR (稳定性) 先取绝对值，再按较弱一项保守评级。S顶级: Rank IC > 0.03, IR > 2.0; 你的因子在此！极其罕见，具备极高的实战价值，建议作为组合的核心权重。A优秀: Rank IC 0.02 ~ 0.03, IR 1.0 ~ 2.0; 非常优秀的因子，可以稳定贡献超额收益。B合格: Rank IC 0.01 ~ 0.02, IR 0.5 ~ 1.0; 中规中矩，可以作为辅助因子增加组合的多元化。C微弱: Rank IC 0.005 ~ 0.01, IR 0.2 ~ 0.5; 信号较弱，容易被交易成本吞噬，需观察长期表现。D噪声: Rank IC < 0.005, IR < 0.2; 基本属于统计噪声，不建议在实盘中使用。其他: F1 原始因子作为上层因子的底层水源，只按数据质量状态治理，不参与 Rank IC/IR 投资评级。未完成真实或预览诊断的因子显示为未评级，不参与等级排序。生命周期创建时间↓操作[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined]估值?s_val_cfp_ltm_raw / s_vol_downside_252d_ranka_alpha_custom_cur_raw查看血缘RankIC 0.345丨IC_IR 6.91丨衰减 252日增量IR 0.55最大回撤 45.5%Capacity 容量通过Turnover 18.00%/周Cost 9.0 bps风格中性Style Corr 0.260S顶级线上5月19日 下午05:53生成组合策略详情[综合] - FF3 风格复合基石 (等权) [Beta-Free]估值?Rank(ZScore(Residual(Winsorize(FFBlend(Momentum252, ValueEP, QualityROE, Size), 3), s_beta_market_252d_raw)))s_alpha_ffblend_resid_mkt_rank查看血缘RankIC 0.013丨IC_IR 0.51丨衰减 252日Sharpe 0.63最大回撤 12.3%Capacity 容量通过Turnover 1.38%/周Cost 9.0 bps风格中性Style Corr 0.000B合格线上5月19日 下午02:56生成组合策略详情"
+    }
+  },
+  "mobile": {
+    "name": "mobile",
+    "viewport": {
+      "width": 390,
+      "height": 844
+    },
+    "screenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factors-f3-lineage-quality\\factors-f3-pending-metrics-mobile.png",
+    "metrics": {
+      "headers": [
+        "因子基本信息",
+        "血缘溯源",
+        "信号质量",
+        "组合质量",
+        "容量/摩擦",
+        "风格暴露",
+        "因子级别↕?因子级别：Rank IC 均值和 IR (稳定性) 先取绝对值，再按较弱一项保守评级。S顶级: Rank IC > 0.03, IR > 2.0; 你的因子在此！极其罕见，具备极高的实战价值，建议作为组合的核心权重。A优秀: Rank IC 0.02 ~ 0.03, IR 1.0 ~ 2.0; 非常优秀的因子，可以稳定贡献超额收益。B合格: Rank IC 0.01 ~ 0.02, IR 0.5 ~ 1.0; 中规中矩，可以作为辅助因子增加组合的多元化。C微弱: Rank IC 0.005 ~ 0.01, IR 0.2 ~ 0.5; 信号较弱，容易被交易成本吞噬，需观察长期表现。D噪声: Rank IC < 0.005, IR < 0.2; 基本属于统计噪声，不建议在实盘中使用。其他: F1 原始因子作为上层因子的底层水源，只按数据质量状态治理，不参与 Rank IC/IR 投资评级。未完成真实或预览诊断的因子显示为未评级，不参与等级排序。",
+        "生命周期",
+        "创建时间↓",
+        "操作"
+      ],
+      "rows": [
+        "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined]估值?s_val_cfp_ltm_raw / s_vol_downside_252d_ranka_alpha_custom_cur_raw查看血缘RankIC 0.345丨IC_IR 6.91丨衰减 252日增量IR 0.55最大回撤 45.5%Capacity 容量通过Turnover 18.00%/周Cost 9.0 bps风格中性Style Corr 0.260S顶级线上5月19日 下午05:53生成组合策略详情",
+        "[综合] - FF3 风格复合基石 (等权) [Beta-Free]估值?Rank(ZScore(Residual(Winsorize(FFBlend(Momentum252, ValueEP, QualityROE, Size), 3), s_beta_market_252d_raw)))s_alpha_ffblend_resid_mkt_rank查看血缘RankIC 0.013丨IC_IR 0.51丨衰减 252日Sharpe 0.63最大回撤 12.3%Capacity 容量通过Turnover 1.38%/周Cost 9.0 bps风格中性Style Corr 0.000B合格线上5月19日 下午02:56生成组合策略详情"
+      ],
+      "rowCount": 2,
+      "visiblePending": false,
+      "hasIncrementalIr": true,
+      "hasCost": true,
+      "hasStyleZero": true,
+      "hasSharpe063": true,
+      "hasSignalBeforeCombo": true,
+      "text": "因子基本信息血缘溯源信号质量组合质量容量/摩擦风格暴露因子级别↕?因子级别：Rank IC 均值和 IR (稳定性) 先取绝对值，再按较弱一项保守评级。S顶级: Rank IC > 0.03, IR > 2.0; 你的因子在此！极其罕见，具备极高的实战价值，建议作为组合的核心权重。A优秀: Rank IC 0.02 ~ 0.03, IR 1.0 ~ 2.0; 非常优秀的因子，可以稳定贡献超额收益。B合格: Rank IC 0.01 ~ 0.02, IR 0.5 ~ 1.0; 中规中矩，可以作为辅助因子增加组合的多元化。C微弱: Rank IC 0.005 ~ 0.01, IR 0.2 ~ 0.5; 信号较弱，容易被交易成本吞噬，需观察长期表现。D噪声: Rank IC < 0.005, IR < 0.2; 基本属于统计噪声，不建议在实盘中使用。其他: F1 原始因子作为上层因子的底层水源，只按数据质量状态治理，不参与 Rank IC/IR 投资评级。未完成真实或预览诊断的因子显示为未评级，不参与等级排序。生命周期创建时间↓操作[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined]估值?s_val_cfp_ltm_raw / s_vol_downside_252d_ranka_alpha_custom_cur_raw查看血缘RankIC 0.345丨IC_IR 6.91丨衰减 252日增量IR 0.55最大回撤 45.5%Capacity 容量通过Turnover 18.00%/周Cost 9.0 bps风格中性Style Corr 0.260S顶级线上5月19日 下午05:53生成组合策略详情[综合] - FF3 风格复合基石 (等权) [Beta-Free]估值?Rank(ZScore(Residual(Winsorize(FFBlend(Momentum252, ValueEP, QualityROE, Size), 3), s_beta_market_252d_raw)))s_alpha_ffblend_resid_mkt_rank查看血缘RankIC 0.013丨IC_IR 0.51丨衰减 252日Sharpe 0.63最大回撤 12.3%Capacity 容量通过Turnover 1.38%/周Cost 9.0 bps风格中性Style Corr 0.000B合格线上5月19日 下午02:56生成组合策略详情"
+    }
+  },
+  "errors": [],
+  "failedRequests": []
+}

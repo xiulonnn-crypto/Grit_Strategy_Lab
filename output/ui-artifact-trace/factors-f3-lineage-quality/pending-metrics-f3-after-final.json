@@ -1,0 +1,131 @@
+{
+  "capturedAt": "2026-05-21T08:10:21.509Z",
+  "count": 4,
+  "rows": [
+    {
+      "id": "s_alpha_valvol_blend_resid_std_rk",
+      "name": "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined-Rank]",
+      "ui_state": "sandbox",
+      "lifecycle": "to_be_verified",
+      "quality_primary": null,
+      "quality_primary_kind": "sharpe",
+      "max_drawdown_pct": null,
+      "turnover_rate_weekly": null,
+      "cost_bps": null,
+      "style_corr": 0,
+      "labels": {
+        "sharpe": "待补",
+        "max_drawdown": "待补",
+        "turnover": "待补",
+        "cost": "待补",
+        "style": "0.000",
+        "style_label": "风格中性",
+        "capacity": "待评估"
+      },
+      "source": {
+        "summary_run_id": null,
+        "scoring_detail": false,
+        "data_health_coverage": null,
+        "sharpe_source": "summary",
+        "cost_source": "summary",
+        "style_source": "residualized_identity"
+      },
+      "missing": [
+        "quality_primary",
+        "max_drawdown_pct",
+        "cost_bps",
+        "turnover_rate_weekly"
+      ]
+    },
+    {
+      "id": "s_alpha_ffblend_resid_mkt_rank",
+      "name": "[综合] - FF3 风格复合基石 (等权) [Beta-Free]",
+      "ui_state": "needs_calibration",
+      "lifecycle": "online",
+      "quality_primary": 0.631,
+      "quality_primary_kind": "sharpe",
+      "max_drawdown_pct": 12.35,
+      "turnover_rate_weekly": 1.38,
+      "cost_bps": 9,
+      "style_corr": 0,
+      "labels": {
+        "sharpe": "0.63",
+        "max_drawdown": "12.35%",
+        "turnover": "1.38%/周",
+        "cost": "9.0 bps",
+        "style": "0.000",
+        "style_label": "风格中性",
+        "capacity": "容量通过"
+      },
+      "source": {
+        "summary_run_id": "fdiag_0c036b0717c7",
+        "scoring_detail": false,
+        "data_health_coverage": 64.33,
+        "sharpe_source": "return_spread_series",
+        "cost_source": "turnover_decay",
+        "style_source": "residualized_identity"
+      },
+      "missing": []
+    },
+    {
+      "id": "a_alpha_custom_cur_raw",
+      "name": "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined]",
+      "ui_state": "needs_calibration",
+      "lifecycle": "online",
+      "quality_primary": 0.5527,
+      "quality_primary_kind": "incremental_ir",
+      "max_drawdown_pct": 45.53,
+      "turnover_rate_weekly": 18,
+      "cost_bps": 9,
+      "style_corr": 0.26,
+      "labels": {
+        "sharpe": "待补",
+        "max_drawdown": "45.53%",
+        "turnover": "18.00%/周",
+        "cost": "9.0 bps",
+        "style": "0.260",
+        "style_label": "风格中性",
+        "capacity": "容量通过"
+      },
+      "source": {
+        "summary_run_id": "fdiag_a_alpha_custom_cur_raw_publish",
+        "scoring_detail": true,
+        "data_health_coverage": 100,
+        "sharpe_source": "summary",
+        "cost_source": "turnover_decay",
+        "style_source": "summary"
+      },
+      "missing": []
+    },
+    {
+      "id": "s_alpha_ffblend_blend_resid_mkt_std_rk",
+      "name": "[综合] - FF3 风格复合基石 (等权) [Refined-Rank]",
+      "ui_state": "sandbox",
+      "lifecycle": "to_be_verified",
+      "quality_primary": 0.0462,
+      "quality_primary_kind": "incremental_ir",
+      "max_drawdown_pct": 8,
+      "turnover_rate_weekly": 13,
+      "cost_bps": 9,
+      "style_corr": 0.18,
+      "labels": {
+        "sharpe": "待补",
+        "max_drawdown": "8.00%",
+        "turnover": "13.00%/周",
+        "cost": "9.0 bps",
+        "style": "0.180",
+        "style_label": "风格中性",
+        "capacity": "容量通过"
+      },
+      "source": {
+        "summary_run_id": "fdiag_s_alpha_ffblend_blend_resid_mkt_std_rk_publish",
+        "scoring_detail": true,
+        "data_health_coverage": 99.6,
+        "sharpe_source": "summary",
+        "cost_source": "turnover_decay",
+        "style_source": "summary"
+      },
+      "missing": []
+    }
+  ]
+}

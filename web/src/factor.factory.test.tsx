@@ -556,19 +556,21 @@ describe('FactorFactoryPage', () => {
   it('highlights duplicated structured factor names and exposes naming audit details', async () => {
     const overview = factoryOverview();
     const base = overview.quarantine.items[0]!;
+    const makeDisplayName = (windowLabel: string) => `[估值] - 下行风险调节-现金流回报比 (${windowLabel}) [Refined-Rank]`;
     const makeCandidate = (id: string, windowLabel: string, score: number, rankIc: number, ir: number) => ({
       ...base,
       id,
-      display_name_cn: `现金流回报 - ${windowLabel} [Refined]`,
-      factor_name: `现金流回报 - ${windowLabel} [Refined]`,
-      base_display_name_cn: `现金流回报 - ${windowLabel} [Refined]`,
+      display_name_cn: makeDisplayName(windowLabel),
+      factor_name: makeDisplayName(windowLabel),
+      base_display_name_cn: makeDisplayName(windowLabel),
       name_collision_key: 'cashflow-risk-return',
       name_dedupe_suffix: '参数/治理链',
       name_collision_group: ['fq_collision_ltm', 'fq_collision_21d'],
       name_audit: {
         structured_components: {
           parameter_label: windowLabel,
-          governance_level: 'Refined',
+          governance_level: 'Refined-Rank',
+          governance_tag: 'Refined-Rank',
           benchmark_label: '对标 SP500',
         },
       },
@@ -583,8 +585,8 @@ describe('FactorFactoryPage', () => {
         ...(base.scoring_detail ?? {}),
         candidate_id: id,
         quarantine_candidate_id: id,
-        display_name_cn: `现金流回报 - ${windowLabel} [Refined]`,
-        base_display_name_cn: `现金流回报 - ${windowLabel} [Refined]`,
+        display_name_cn: makeDisplayName(windowLabel),
+        base_display_name_cn: makeDisplayName(windowLabel),
         name_collision_key: 'cashflow-risk-return',
         name_dedupe_suffix: '参数/治理链',
         name_collision_group: ['fq_collision_ltm', 'fq_collision_21d'],
@@ -592,8 +594,8 @@ describe('FactorFactoryPage', () => {
         predictive_power: { rank_ic: rankIc, rank_icir: ir, monotonicity_score: 0.8 },
       },
     });
-    const first = makeCandidate('fq_collision_ltm', 'LTM/波动比', 0.83, 0.044, 1.72);
-    const second = makeCandidate('fq_collision_21d', '21d/波动比', 0.79, 0.039, 1.44);
+    const first = makeCandidate('fq_collision_ltm', 'LTM/252d', 0.83, 0.044, 1.72);
+    const second = makeCandidate('fq_collision_21d', 'FY1/252d', 0.79, 0.039, 1.44);
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({
       ...overview,
       quarantine: { ...overview.quarantine, items: [first, second], summary: { total: 2, page: 1, page_size: 50, total_pages: 1 } },
@@ -638,8 +640,8 @@ describe('FactorFactoryPage', () => {
     expect(document.querySelectorAll('.factor-factory-publish-card.is-name-collision')).toHaveLength(2);
     expect(document.querySelectorAll('.factor-factory-result-row.is-name-collision')).toHaveLength(0);
     expect(document.querySelectorAll('.factor-factory-result-row .factor-name-diff-chips')).toHaveLength(0);
-    expect(screen.getAllByText('LTM/波动比').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText('21d/波动比').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('LTM/252d').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('FY1/252d').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('RankIC 0.044').length).toBeGreaterThanOrEqual(1);
 
     fireEvent.click(screen.getAllByRole('button', { name: '详情' })[0]);
@@ -671,6 +673,31 @@ describe('FactorFactoryPage', () => {
     expect(dialog).toHaveTextContent('0.061');
     expect(dialog).toHaveTextContent('1.620');
     expect(dialog).toHaveTextContent('99.4%');
+  });
+
+  it('does not rebuild the publish queue from quarantine rows when the API returns an empty canonical list', async () => {
+    const overview = factoryOverview({
+      task_summary: {
+        total_tasks: 2,
+        delivered_candidates: 3,
+        submitted_to_quarantine: 1,
+        publishable_count: 0,
+        rejected_history_count: 0,
+        hard_blocked_count: 0,
+      },
+      monitor_summary: {
+        ...factoryOverview().monitor_summary,
+        s_grade_promotion_count: 1,
+      },
+      publishable_factors: [],
+    });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(overview));
+
+    renderFactory();
+
+    await waitFor(() => expect(document.querySelector('[data-page-root="factor-factory"]')).toBeInTheDocument());
+    expect(document.querySelector('.factor-factory-publish-queue')).not.toBeInTheDocument();
+    expect(document.querySelector('.factor-factory-publish-card')).not.toBeInTheDocument();
   });
 
   it('sorts scoring and quarantine rows by latest task time and defaults to the newest completed submission date', async () => {

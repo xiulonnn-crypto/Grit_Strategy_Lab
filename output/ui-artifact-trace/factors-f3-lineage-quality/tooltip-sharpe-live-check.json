@@ -1,0 +1,104 @@
+{
+  "url": "http://127.0.0.1:4173/?v=1779352364505#/factors?layer=F3",
+  "capturedAt": "2026-05-21T08:32:52.262Z",
+  "desktop": {
+    "name": "desktop",
+    "viewport": {
+      "width": 1440,
+      "height": 1000
+    },
+    "screenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factors-f3-lineage-quality\\factors-f3-tooltip-sharpe-desktop.png",
+    "tooltipOpenScreenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factors-f3-lineage-quality\\factors-f3-tooltip-open-desktop.png",
+    "metrics": {
+      "headers": [
+        "因子基本信息",
+        "血缘溯源",
+        "信号质量 ?",
+        "组合质量 ?",
+        "容量/摩擦 ?",
+        "风格暴露 ?",
+        "因子级别 ↕ ?",
+        "生命周期",
+        "创建时间 ↓",
+        "操作"
+      ],
+      "rowCount": 2,
+      "visibleText": "因子基本信息 血缘溯源 信号质量 ? 组合质量 ? 容量/摩擦 ? 风格暴露 ? 因子级别 ↕ ? 生命周期 创建时间 ↓ 操作 [估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined] 估值 ? a_alpha_custom_cur_raw 查看血缘 RankIC 0.345 丨 IC_IR 6.91 丨 衰减 252日 Sharpe 0.55 最大回撤 45.5% Capacity 容量通过 Turnover 18.00%/周 Cost 9.0 bps 风格中性 Style Corr 0.260 S 顶级 线上 5月19日 下午05:53 生成组合策略 详情 [综合] - FF3 风格复合基石 (等权) [Beta-Free] 估值 ? s_alpha_ffblend_resid_mkt_rank 查看血缘 RankIC 0.013 丨 IC_IR 0.51 丨 衰减 252日 Sharpe 0.63 最大回撤 12.3% Capacity 容量通过 Turnover 1.38%/周 Cost 9.0 bps 风格中性 Style Corr 0.000 B 合格 线上 5月19日 下午02:56 生成组合策略 详情",
+      "hasSharpe055": true,
+      "hasIncremental055": false,
+      "tooltipLabels": [
+        {
+          "label": "信号质量指标解释",
+          "exists": true
+        },
+        {
+          "label": "组合质量指标解释",
+          "exists": true
+        },
+        {
+          "label": "容量摩擦指标解释",
+          "exists": true
+        },
+        {
+          "label": "风格暴露指标解释",
+          "exists": true
+        }
+      ],
+      "signalHeaderIndex": 2,
+      "compositeHeaderIndex": 3,
+      "capacityHeaderIndex": 4,
+      "styleHeaderIndex": 5
+    }
+  },
+  "mobile": {
+    "name": "mobile",
+    "viewport": {
+      "width": 390,
+      "height": 844
+    },
+    "screenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factors-f3-lineage-quality\\factors-f3-tooltip-sharpe-mobile.png",
+    "tooltipOpenScreenshot": null,
+    "metrics": {
+      "headers": [
+        "因子基本信息",
+        "血缘溯源",
+        "信号质量 ?",
+        "组合质量 ?",
+        "容量/摩擦 ?",
+        "风格暴露 ?",
+        "因子级别 ↕ ?",
+        "生命周期",
+        "创建时间 ↓",
+        "操作"
+      ],
+      "rowCount": 2,
+      "visibleText": "因子基本信息 血缘溯源 信号质量 ? 组合质量 ? 容量/摩擦 ? 风格暴露 ? 因子级别 ↕ ? 生命周期 创建时间 ↓ 操作 [估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined] 估值 ? a_alpha_custom_cur_raw 查看血缘 RankIC 0.345 丨 IC_IR 6.91 丨 衰减 252日 Sharpe 0.55 最大回撤 45.5% Capacity 容量通过 Turnover 18.00%/周 Cost 9.0 bps 风格中性 Style Corr 0.260 S 顶级 线上 5月19日 下午05:53 生成组合策略 详情 [综合] - FF3 风格复合基石 (等权) [Beta-Free] 估值 ? s_alpha_ffblend_resid_mkt_rank 查看血缘 RankIC 0.013 丨 IC_IR 0.51 丨 衰减 252日 Sharpe 0.63 最大回撤 12.3% Capacity 容量通过 Turnover 1.38%/周 Cost 9.0 bps 风格中性 Style Corr 0.000 B 合格 线上 5月19日 下午02:56 生成组合策略 详情",
+      "hasSharpe055": true,
+      "hasIncremental055": false,
+      "tooltipLabels": [
+        {
+          "label": "信号质量指标解释",
+          "exists": true
+        },
+        {
+          "label": "组合质量指标解释",
+          "exists": true
+        },
+        {
+          "label": "容量摩擦指标解释",
+          "exists": true
+        },
+        {
+          "label": "风格暴露指标解释",
+          "exists": true
+        }
+      ],
+      "signalHeaderIndex": 2,
+      "compositeHeaderIndex": 3,
+      "capacityHeaderIndex": 4,
+      "styleHeaderIndex": 5
+    }
+  },
+  "errors": [],
+  "failedRequests": []
+}

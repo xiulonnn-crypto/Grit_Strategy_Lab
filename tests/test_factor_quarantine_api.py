@@ -239,7 +239,7 @@ def test_factor_quarantine_publish_uses_chinese_auto_mined_name_from_id_and_form
         )
     )
     factor = published["factor"]
-    expected_name = "ZScore-126日收益率 (精炼)"
+    expected_name = "收益率 (126d) [Refined]"
     assert factor["id"] == "s_f2_mom_ret_126d_px"
     assert factor["name"] == expected_name
     assert "[Auto-Mined]" not in factor["name"]

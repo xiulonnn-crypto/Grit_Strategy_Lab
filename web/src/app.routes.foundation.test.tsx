@@ -409,7 +409,7 @@ describe('App runtime routes', () => {
     await renderApp('#/factors/momentum_12m_1m');
 
     expect(document.querySelector('[data-page-root="factor-detail"]')).not.toBeNull();
-    expect(await screen.findByRole('heading', { level: 1, name: 'Rank-12-1月截面动量 (排序)诊断报告' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: '截面动量排名 (12-1m) [Rank]诊断报告' })).toBeInTheDocument();
     const verifyButton = screen.getByRole('button', { name: '重新诊断' });
     expect(verifyButton).toHaveClass('factor-detail-action-btn', 'factor-detail-action-btn--primary');
     expect(screen.getByRole('link', { name: '生成投委会 PDF' })).toHaveClass('factor-detail-action-btn');

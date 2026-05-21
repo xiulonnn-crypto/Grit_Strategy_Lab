@@ -224,31 +224,31 @@ const DEFAULT_COMPOSITE_EXECUTION_CONSTRAINTS: NonNullable<FactorModelPreviewPay
 
 const FACTOR_DESIGN: Record<string, { displayName: string; family: string; weightPct: number; direction: FactorDirection }> = {
   s_mom_12m1m_rank: {
-    displayName: 'Rank-12-1月截面动量 (排序)',
+    displayName: '截面动量排名 (12-1m) [Rank]',
     family: '动量',
     weightPct: 30,
     direction: 'HIGH_IS_GOOD',
   },
   s_val_ep_ltm_raw: {
-    displayName: '盈利收益率 (LTM) (原始)',
+    displayName: '盈利收益率 (LTM) [Raw]',
     family: '估值',
     weightPct: 20,
     direction: 'HIGH_IS_GOOD',
   },
   s_qlty_fcfy_ttm_raw: {
-    displayName: '自由现金流收益率 (TTM) (原始)',
+    displayName: '自由现金流收益率 (LTM) [Raw]',
     family: '质量',
     weightPct: 20,
     direction: 'HIGH_IS_GOOD',
   },
   s_vol_252d_rank: {
-    displayName: 'Rank-252日波动率 (排序)',
+    displayName: '波动率排名 (252d) [Rank]',
     family: '低波',
     weightPct: 15,
     direction: 'LOW_IS_GOOD',
   },
   s_size_cur_log: {
-    displayName: '对数市值 (当前) (原始)',
+    displayName: '对数市值 (当前) [Raw]',
     family: '规模',
     weightPct: 15,
     direction: 'LOW_IS_GOOD',

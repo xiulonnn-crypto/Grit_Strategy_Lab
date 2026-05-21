@@ -60,6 +60,7 @@ from .models import (
     FactorFactoryOnlineRawF2RefinementRequest,
     FactorFactoryRunNowRequest,
     FactorGovernanceExecuteRequest,
+    FactorPruneRecoveryApplyRequest,
     OperatorConfigRequest,
     FactorMiningJobCreateRequest,
     FactorModelSuggestionRequest,
@@ -1712,6 +1713,14 @@ def create_app(
     @app.post('/factor-governance/actions/{action_id}/execute')
     def factor_governance_action_execute(action_id: str, payload: FactorGovernanceExecuteRequest):
         return invoke(service.execute_factor_governance_action, action_id, payload)
+
+    @app.get('/factor-governance/prune-recovery/preview')
+    def factor_governance_prune_recovery_preview():
+        return invoke(service.preview_factor_prune_recovery)
+
+    @app.post('/factor-governance/prune-recovery/apply')
+    def factor_governance_prune_recovery_apply(payload: FactorPruneRecoveryApplyRequest):
+        return invoke(service.apply_factor_prune_recovery, payload)
 
     @app.post('/factor-models/preview')
     def preview_factor_model(payload: FactorModelPreviewRequest):

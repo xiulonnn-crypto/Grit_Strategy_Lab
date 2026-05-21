@@ -272,6 +272,14 @@ function Stop-TrackedProcesses {
     $script:TrackedProcessIds.Clear()
 }
 
+function Format-PowerShellLiteral {
+    param(
+        [string]$Value
+    )
+
+    return "'" + (([string]$Value) -replace "'", "''") + "'"
+}
+
 function Invoke-TrackedProcess {
     param(
         [string]$FilePath,
@@ -286,10 +294,46 @@ function Invoke-TrackedProcess {
     $stamp = Get-Date -Format 'yyyyMMddHHmmssfff'
     $stdoutPath = Join-Path $processReportDir "$reportPrefix-$safeLabel-$stamp.out.txt"
     $stderrPath = Join-Path $processReportDir "$reportPrefix-$safeLabel-$stamp.err.txt"
+    $exitCodePath = Join-Path $processReportDir "$reportPrefix-$safeLabel-$stamp.exit.txt"
+    $wrapperPath = Join-Path $processReportDir "$reportPrefix-$safeLabel-$stamp.ps1"
+
+    $commandLiteral = Format-PowerShellLiteral -Value $FilePath
+    $argumentLiterals = @($Arguments | ForEach-Object { Format-PowerShellLiteral -Value ([string]$_) })
+    $argumentExpression = if ($argumentLiterals.Count -gt 0) { $argumentLiterals -join ', ' } else { '' }
+    $wrapper = @(
+        '$ErrorActionPreference = "Continue"',
+        '$exitCode = 1',
+        'try {',
+        "    & $commandLiteral @($argumentExpression)",
+        '    if ($null -ne $LASTEXITCODE) {',
+        '        $exitCode = [int]$LASTEXITCODE',
+        '    } elseif ($?) {',
+        '        $exitCode = 0',
+        '    } else {',
+        '        $exitCode = 1',
+        '    }',
+        '} catch {',
+        '    Write-Error $_',
+        '    $exitCode = 1',
+        '} finally {',
+        "    Set-Content -LiteralPath $(Format-PowerShellLiteral -Value $exitCodePath) -Value ([string]`$exitCode) -Encoding ascii",
+        '}',
+        'exit $exitCode'
+    )
+    Set-Content -LiteralPath $wrapperPath -Value $wrapper -Encoding utf8
+
+    $powershellExe = Join-Path $PSHOME 'powershell.exe'
+    if (-not (Test-Path -LiteralPath $powershellExe)) {
+        $powershellCommand = Get-Command powershell.exe -ErrorAction SilentlyContinue
+        if ($null -eq $powershellCommand) {
+            throw 'PowerShell executable not found.'
+        }
+        $powershellExe = $powershellCommand.Source
+    }
 
     $process = Start-Process `
-        -FilePath $FilePath `
-        -ArgumentList $Arguments `
+        -FilePath $powershellExe `
+        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapperPath) `
         -WorkingDirectory $WorkingDirectory `
         -NoNewWindow `
         -PassThru `
@@ -310,6 +354,13 @@ function Invoke-TrackedProcess {
         [void]$script:TrackedProcessIds.Remove([int]$process.Id)
     }
 
+    $exitCode = 1
+    if (Test-Path -LiteralPath $exitCodePath) {
+        $rawExitCode = Get-Content -LiteralPath $exitCodePath -TotalCount 1 -ErrorAction SilentlyContinue
+        if ($rawExitCode -match '^-?\d+$') {
+            $exitCode = [int]$rawExitCode
+        }
+    }
     $output = [System.Collections.Generic.List[string]]::new()
     if (Test-Path -LiteralPath $stdoutPath) {
         foreach ($line in @(Get-Content -LiteralPath $stdoutPath -ErrorAction SilentlyContinue)) {
@@ -323,7 +374,7 @@ function Invoke-TrackedProcess {
     }
 
     return [pscustomobject]@{
-        ExitCode = [int]$process.ExitCode
+        ExitCode = $exitCode
         Output = [string[]]$output
     }
 }

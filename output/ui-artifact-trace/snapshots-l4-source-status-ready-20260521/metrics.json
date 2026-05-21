@@ -1,0 +1,77 @@
+{
+  "route": "http://127.0.0.1:4173/?v=1779359473952#/snapshots",
+  "api": {
+    "l4Sources": [
+      {
+        "id": "ds-macro-rates",
+        "status": "READY",
+        "blocker": null,
+        "row_count": 2586
+      },
+      {
+        "id": "ds-option-skew",
+        "status": "READY",
+        "blocker": null,
+        "row_count": 2262
+      }
+    ],
+    "l4SourcesReady": true
+  },
+  "consoleErrors": [
+    "Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ],
+  "failedRequests": [],
+  "desktop": {
+    "readyMs": 964,
+    "l4Class": "snapshots-ops-health-card snapshots-ops-health-card--ready",
+    "l4Text": "L4 宏观与衍生品\n已就绪\n10 / 10\n利率 Beta、IV Skew 可作为特征源；正式 IC 诊断依赖 L1 样本池门禁。\n可用\n利率、期权偏度\n上游依赖\nL1 样本池\n查看证据",
+    "sourceModules": [
+      {
+        "id": "ds-price",
+        "layer": "l1",
+        "text": "价格历史数据源下钻部分可用L1 基础行情 的 价格历史 目前需要单独复核；下方只列本数据源的证据、缺口和动作。已有数据6,486,913 行，窗口 1985-02-25 至 2026-05-20，来源 混合来源 / 混合补源。完整度1,266/1,482，85.4%缺少数据缺 216 个标的或序列。卡点价格快照覆盖不足下一步刷新价格主链，补齐缺失标的的 10Y 价格历史，再复核长周期补价队列。刷新价格历史"
+      },
+      {
+        "id": "ds-corporate-actions",
+        "layer": "l1",
+        "text": "公司行为数据源下钻部分可用L1 基础行情 的 公司行为 目前需要单独复核；下方只列本数据源的证据、缺口和动作。已有数据96,451 行，窗口 1996-01-02 至 2026-05-20，来源 混合来源 / 混合补源。完整度1,031/1,482，69.6%缺少数据缺 451 个标的或序列。卡点公司行动覆盖不足下一步补齐公司行为和复权链；若来源限流，查看底部凭据与重试窗口后再刷新。刷新公司行为"
+      }
+    ],
+    "oldLayerModules": 0,
+    "bodyOverflow": {
+      "width": 1960,
+      "scrollWidth": 1960,
+      "height": 1200,
+      "scrollHeight": 2813
+    }
+  },
+  "l4Click": {
+    "highlightedLedger": [
+      {
+        "id": "ds-macro-rates",
+        "text": "宏观利率ds-macro-ratesL4 宏观与衍生品可用10/10 · 2,586 行FRED Macro Series利率 Beta / IV Skew证据"
+      },
+      {
+        "id": "ds-option-skew",
+        "text": "期权偏斜ds-option-skewL4 宏观与衍生品可用729/729 · 2,262 行Polygon.io利率 Beta / IV Skew证据"
+      }
+    ],
+    "sourceModulesAfterClick": [
+      "ds-price",
+      "ds-corporate-actions"
+    ]
+  },
+  "mobile": {
+    "l4Class": "snapshots-ops-health-card snapshots-ops-health-card--ready",
+    "sourceModules": [
+      "ds-price",
+      "ds-corporate-actions"
+    ],
+    "bodyOverflow": {
+      "width": 390,
+      "scrollWidth": 390,
+      "height": 844,
+      "scrollHeight": 7312
+    }
+  }
+}

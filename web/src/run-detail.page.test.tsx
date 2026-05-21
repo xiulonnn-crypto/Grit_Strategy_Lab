@@ -1,4 +1,4 @@
-﻿import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunDetailPage } from './pages/run-detail-page';
 import type {
@@ -573,8 +573,8 @@ describe('RunDetailPage', () => {
       document.querySelectorAll<HTMLElement>('.run-detail-factor-attribution__bar-track span'),
     ).map((bar) => bar.style.width);
     expect(new Set(barWidths).size).toBeGreaterThan(1);
-    expect(screen.getByText('Rank-12-1月截面动量 (排序)')).toBeInTheDocument();
-    expect(screen.getByText('盈利收益率 (LTM) (原始)')).toBeInTheDocument();
+    expect(screen.getByText('截面动量排名 (12-1m) [Rank]')).toBeInTheDocument();
+    expect(screen.getByText('盈利收益率 (LTM) [Raw]')).toBeInTheDocument();
     expect(screen.queryByText('s_mom_12m1m_rank')).not.toBeInTheDocument();
     expect(screen.getByText('信息技术')).toBeInTheDocument();
     expect(screen.getByText('当前归因基于因子权重估算。')).toBeInTheDocument();

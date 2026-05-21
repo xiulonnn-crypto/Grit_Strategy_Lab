@@ -501,6 +501,19 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS factor_governance_events (
+        id TEXT PRIMARY KEY,
+        factor_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        action_id TEXT,
+        before_json TEXT NOT NULL DEFAULT '{}',
+        after_json TEXT NOT NULL DEFAULT '{}',
+        created_by TEXT NOT NULL DEFAULT 'system_rule',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (factor_id) REFERENCES factor_definitions(id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS factor_display_name_renames (
         id TEXT PRIMARY KEY,
         factor_id TEXT NOT NULL,
@@ -1016,6 +1029,10 @@ POST_MIGRATION_INDEX_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_factor_publish_events_candidate
     ON factor_publish_events(candidate_id, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_factor_governance_events_factor
+    ON factor_governance_events(factor_id, created_at)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_factor_display_name_renames_factor

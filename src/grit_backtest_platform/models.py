@@ -359,6 +359,13 @@ class FactorGovernanceExecuteRequest(BaseModel):
     reason: str = Field(min_length=1)
     keep_factor_id: str | None = None
     detail: dict[str, Any] = Field(default_factory=dict)
+    include_governance_overview: bool = True
+
+
+class FactorPruneRecoveryApplyRequest(BaseModel):
+    confirm: bool = False
+    factor_ids: list[str] = Field(default_factory=list)
+    reason: str = "Restore factors pruned without measured redundancy evidence."
 
 
 class FactorModelSuggestionRequest(BaseModel):

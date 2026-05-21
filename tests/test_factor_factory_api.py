@@ -539,6 +539,177 @@ def test_factor_factory_publishable_recomputes_complex_f2_identity_and_skips_exi
     assert by_candidate["fq_new_identity"]["factor_id"] != "s_f2_mom_raw_cur_px"
 
 
+def test_factor_factory_publishable_applies_online_prune_evidence_to_semantic_duplicates(monkeypatch) -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-factory-publishable-online-prune"))
+    service = client.app.state.service
+    storage = service.storage
+    source_job_id = "mine_publishable_online_prune"
+    now = "2026-05-21T09:30:00Z"
+    online_expression = (
+        'ZScore(Neutralize(Winsorize(TS_Rank(TS_Return(f1_financial_release_timing, 3), 3), '
+        'method="MAD"), by="industry,market_cap"))'
+    )
+    _seed_online_f2_factor(
+        client,
+        factor_id="s_f2_mom_raw_cur_px",
+        expression=online_expression,
+        name="平滑收益率 (当前) [Raw]",
+    )
+
+    def insert_candidate(candidate_id: str, expression: str, source_factor_id: str, score: float) -> None:
+        metrics = {
+            "rank_ic": 0.05,
+            "ir": 0.5,
+            "score": score,
+            "fitness_score": score,
+            "target_layer": "L2",
+            "source_factor_ids": [source_factor_id],
+            "raw_f2": True,
+            "refined_f2": True,
+            "wnzt_complete": True,
+            "pipeline_version": "raw_refined_f2_v2",
+            "raw_expression": expression,
+            "refined_expression": expression,
+        }
+        storage.insert_json_row(
+            "factor_quarantine_candidates",
+            {
+                "id": candidate_id,
+                "mining_candidate_id": candidate_id.replace("fq_", "rawf2_"),
+                "source_mining_job_id": source_job_id,
+                "expression": expression,
+                "status": "PASSED",
+                "publish_status": "ELIGIBLE",
+                "gate_summary_json": dumps({"redundancy_pruning": "PASSED"}),
+                "cluster_id": f"cluster_{candidate_id}",
+                "candidate_metrics_json": dumps(metrics),
+                "failure_samples_json": dumps([]),
+                "pit_evidence_json": dumps({"status": "READY"}),
+                "publish_eligibility_json": dumps({"status": "ELIGIBLE"}),
+                "target_factor_id": "s_f2_mom_raw_cur_px",
+                "created_at": now,
+                "updated_at": now,
+                "published_at": None,
+                "rejected_reason": None,
+            },
+        )
+
+    insert_candidate(
+        "fq_semantic_21d",
+        'TS_Rank(ZScore(Neutralize(Winsorize(TS_Return(f1_return_21d_base, 3), method="MAD"), by="industry,market_cap")), 3)',
+        "f1_return_21d_base",
+        0.061,
+    )
+    insert_candidate(
+        "fq_semantic_current",
+        'ZScore(Neutralize(Winsorize(TS_Rank(TS_Return(f1_price_close, 3), 3), method="MAD"), by="industry,market_cap"))',
+        "f1_price_close",
+        0.060,
+    )
+    insert_candidate(
+        "fq_threshold_survivor",
+        'ZScore(Neutralize(Winsorize(Rank(s_mom_6m_rank / s_vol_downside_126d_raw), method="MAD"), by="industry,market_cap"))',
+        "m_mom_longdra_126d_rank",
+        0.059,
+    )
+    storage.insert_json_row(
+        "factor_publish_events",
+        {
+            "id": "fpe_online_current",
+            "candidate_id": "fq_semantic_current",
+            "factor_id": "s_f2_mom_raw_cur_px",
+            "event_type": "AUTO_PUBLISH",
+            "rule_version": "factor_quarantine_v2_0",
+            "before_json": dumps({}),
+            "after_json": dumps({"factor_id": "s_f2_mom_raw_cur_px"}),
+            "created_by": "system_rule",
+            "created_at": "2026-05-20T09:08:52Z",
+        },
+    )
+
+    factor_service = service._factor_research_service()  # noqa: SLF001
+
+    def governance_overview_stub() -> dict:
+        return {
+            "actions": [
+                {
+                    "kind": "PRUNE",
+                    "command": "PRUNE",
+                    "factor_ids": ["s_f2_mom_ret_21d_px"],
+                    "criteria": {
+                        "correlation": 1.0,
+                        "threshold": 0.9,
+                        "evidence_source": "MEASURED_DIAGNOSTIC_IC_SERIES",
+                        "sample_count": 12,
+                    },
+                    "offline_detail": {
+                        "comparison": {
+                            "candidate": {
+                                "factor_id": "s_f2_mom_ret_21d_px",
+                                "factor_name": "平滑收益率 (21d) [Refined-Rank]",
+                            },
+                            "mvp": {
+                                "factor_id": "s_f2_mom_raw_cur_px",
+                                "factor_name": "平滑收益率 (当前) [Raw]",
+                            },
+                        },
+                    },
+                },
+                {
+                    "kind": "PRUNE",
+                    "command": "PRUNE",
+                    "factor_ids": ["s_f2_mom_raw_cur_m_mom_longdra_126d_rank"],
+                    "criteria": {
+                        "correlation": 0.9,
+                        "threshold": 0.9,
+                        "evidence_source": "MEASURED_DIAGNOSTIC_IC_SERIES",
+                        "sample_count": 12,
+                    },
+                    "offline_detail": {
+                        "comparison": {
+                            "candidate": {
+                                "factor_id": "s_f2_mom_raw_cur_m_mom_longdra_126d_rank",
+                                "factor_name": "风险调整回报比 (126d) [Refined-Rank]",
+                            },
+                        },
+                    },
+                },
+            ],
+        }
+
+    monkeypatch.setattr(factor_service, "get_factor_governance_overview", governance_overview_stub)
+
+    publishable = service._factor_factory_publishable_factors(  # noqa: SLF001
+        source_mining_job_id=source_job_id,
+        fallback_items=[],
+    )
+
+    by_candidate = {row["candidate_id"]: row for row in publishable}
+    assert "fq_semantic_21d" not in by_candidate
+    assert "fq_semantic_current" not in by_candidate
+    assert "fq_threshold_survivor" in by_candidate
+
+    pruning = service._apply_factor_factory_redundancy_pruning(source_mining_job_id=source_job_id)  # noqa: SLF001
+    assert pruning["library_pruned"] == 2
+
+    rows = storage.fetch_all(
+        """
+        SELECT id, status, publish_status, gate_summary_json
+        FROM factor_quarantine_candidates
+        WHERE source_mining_job_id = ?
+        """,
+        (source_job_id,),
+    )
+    by_status = {row["id"]: row for row in rows}
+    assert by_status["fq_semantic_21d"]["status"] == "REJECTED"
+    assert by_status["fq_semantic_21d"]["publish_status"] == "BLOCKED"
+    assert json.loads(by_status["fq_semantic_21d"]["gate_summary_json"])["redundancy_pruning"] == "FAILED"
+    assert by_status["fq_semantic_current"]["status"] == "REJECTED"
+    assert by_status["fq_semantic_current"]["publish_status"] == "BLOCKED"
+    assert by_status["fq_threshold_survivor"]["status"] == "PASSED"
+    assert by_status["fq_threshold_survivor"]["publish_status"] == "ELIGIBLE"
+
+
 def test_factor_factory_run_now_does_not_enable_daily_automation() -> None:
     client, _db_path = create_test_client(_runtime_dir("factor-factory-run-now"))
     seed_factor_mining_price_snapshot(client)

@@ -246,7 +246,7 @@ const OPERATOR_EXPLANATIONS: Record<string, string> = {
   Neutralize: '中性化：剥离行业、市值等共同暴露。',
   Correlation: '相关性：计算两个序列在窗口内同步变化的程度。',
   Log: '对数变换：降低数量级差异对模型的影响。',
-  Close: '收盘价：使用点时一致的交易所-复权收盘价 (原始)。',
+  Close: '收盘价：使用点时一致的交易所 - 前复权收盘价 (原始)。',
   Volume: '成交量：使用点时一致的交易量序列。',
 };
 
@@ -255,6 +255,20 @@ const DIAGNOSTIC_TOOLTIP_LINES = [
   'Rank IC: 因子排序与未来收益排序的相关性，越高说明截面排序越有效。',
   'IR: Rank IC 均值除以波动，衡量诊断稳定性。',
   '覆盖率: 本次诊断中有可用 PIT 样本的证券占比。',
+];
+const F3_SIGNAL_QUALITY_TOOLTIP_LINES = [
+  'RankIC: F3 信号与未来收益排序的截面相关性。',
+  'IC_IR: RankIC 均值除以波动，衡量信号稳定性。',
+  '衰减: 当前诊断或成本摘要里的半衰期窗口，通常以交易日展示。',
+];
+const F3_COMPOSITE_QUALITY_TOOLTIP_LINES = [
+  'Sharpe: 优先使用正式诊断或足够长收益序列；检疫发布重跑样本不足时使用增量 IR 代理并在 source 标记。',
+  '最大回撤: 来自检疫风险摘要、稳定性摘要或多空收益序列。',
+];
+const F3_CAPACITY_TOOLTIP_LINES = [
+  'Capacity: 按换手、容量状态和成本压力给出通过/观察/失败。',
+  'Turnover: 单周预估换手；缺周频值时由年换手折算。',
+  'Cost: 冲击成本 bps，优先读取 turnover_decay 证据。',
 ];
 const TURNOVER_DECAY_TOOLTIP_LINES = [
   '信号半衰期：Rank IC 衰减曲线降至初始边际贡献一半附近的交易日数。',
@@ -390,7 +404,7 @@ const FACTOR_LAYER_LABELS: Record<FactorTierFilter, string> = {
   F3: 'F3 组合库',
 };
 const RAW_FIELD_LINEAGE_LABELS: Record<string, string> = {
-  adj_close: '交易所-复权收盘价 (原始)',
+  adj_close: '交易所 - 前复权收盘价 (原始)',
   book_value_equity: '账面权益原始字段',
   capex: '资本开支原始字段',
   cash_and_equivalents: '现金及等价物原始字段',
@@ -492,6 +506,10 @@ function pct(value: unknown, digits = 1): string {
 
 function num(value: unknown, digits = 3): string {
   return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '待生成';
+}
+
+function compactNum(value: unknown, digits = 3): string {
+  return typeof value === 'number' && Number.isFinite(value) ? Number(value.toFixed(digits)).toString() : '待补';
 }
 
 function backendHref(path: string): string {
@@ -984,6 +1002,7 @@ function diagnosticSeries(factor: ApiFactorListItem): number[] {
 }
 
 function factorMetricValue(factor: ApiFactorListItem, key: 'rank_ic' | 'ir'): number | null {
+  if (key === 'ir' && factorIrMetric(factor, '', 2).referenceOnly) return null;
   const value = factor.latest_diagnostic_summary?.[key] ?? factor.batch_diagnostic_summary?.[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
@@ -1127,7 +1146,11 @@ function mergeDiagnosticPreview(
         ? {
             ...(factor.quality_view ?? {}),
             rank_ic: typeof latest.rank_ic === 'number' ? latest.rank_ic : factor.quality_view?.rank_ic ?? null,
-            ir: typeof latest.ir === 'number' ? latest.ir : factor.quality_view?.ir ?? null,
+            ir: diagnosticIrMetric(latest, factor.quality_view, '', 2).value,
+            raw_ir: typeof latest.ir === 'number' ? latest.ir : factor.quality_view?.raw_ir ?? null,
+            ir_label: typeof latest.ir_evidence?.label === 'string' ? latest.ir_evidence.label : factor.quality_view?.ir_label ?? null,
+            ir_reference_only: latest.ir_reference_only === true || factor.quality_view?.ir_reference_only === true,
+            ir_evidence: previewRecord(latest.ir_evidence) ?? factor.quality_view?.ir_evidence,
             coverage: typeof latest.coverage === 'number' ? latest.coverage : factor.quality_view?.coverage ?? null,
             sparkline: icSeries,
             sparkline_window: '真实口径最近12期',
@@ -1783,6 +1806,7 @@ const GOVERNANCE_KIND_LABELS: Record<string, string> = {
   SUSPENDED: '暂停纳入',
   FACTOR_MODEL_SUGGESTION: '策略草稿建议',
   FACTOR_OPTIMIZATION: '因子优化',
+  REDUNDANCY_RESTORE: '冗余裁剪-恢复',
 };
 
 function governanceKindLabel(kind: string): string {
@@ -1796,6 +1820,9 @@ function governanceOfflineEffectCopy(action: ApiFactorGovernanceAction): string 
   }
   if (command === 'PRUNE') {
     return '冗余裁剪会写入“冗余挂起”状态；冗余因子将从策略配置、因子模型预览和算力预览中排除。';
+  }
+  if (command === 'RESTORE_PRUNED') {
+    return '确认后只恢复该历史冗余裁剪任务中的当前最优因子，保留恢复审计，不自动下线当前因子。';
   }
   return '强制下线会写入“已强制下线”状态；因子将从策略配置、因子模型预览和算力预览中排除。';
 }
@@ -1845,7 +1872,7 @@ function FactorGovernanceIdentity({ name, id }: { name: string; id: string }): J
 function isGovernanceTaskAction(action: ApiFactorGovernanceAction): boolean {
   const kind = String(action.kind ?? '').toUpperCase();
   const command = String(action.command ?? '').toUpperCase();
-  return kind === 'FACTOR_MODEL_SUGGESTION' || kind === 'FACTOR_OPTIMIZATION' || ['DEPRECATE', 'PRUNE', 'PUBLISH_OPTIMIZED_FACTOR'].includes(command || kind);
+  return kind === 'FACTOR_MODEL_SUGGESTION' || kind === 'FACTOR_OPTIMIZATION' || ['DEPRECATE', 'PRUNE', 'PUBLISH_OPTIMIZED_FACTOR', 'RESTORE_PRUNED'].includes(command || kind);
 }
 
 function governanceActionClass(action: ApiFactorGovernanceAction): string {
@@ -2121,7 +2148,7 @@ function DiagnosticSummaryPopover({
     ? (summary?.factor_id ?? factor.id)
     : rawRunId;
   const rankIc = summary?.rank_ic ?? batch?.rank_ic;
-  const ir = summary?.ir ?? batch?.ir;
+  const irMetric = diagnosticIrMetric(summary, factor.quality_view, 'IR', 2, batch?.ir);
   const coverage = summary?.coverage ?? batch?.coverage;
   const diagnosedAt = recordString(summary?.compliance_trail, 'diagnosed_at') ?? batch?.latest_diagnostic_at ?? factorUpdatedAt(factor) ?? '待生成';
   const state = factorUiState(factor);
@@ -2137,7 +2164,7 @@ function DiagnosticSummaryPopover({
       </div>
       <dl className="factor-diagnostic-popover__grid">
         <div><dt>Rank IC</dt><dd>{num(rankIc)}</dd></div>
-        <div><dt>IR</dt><dd>{num(ir, 2)}</dd></div>
+        <div><dt>IR</dt><dd title={irMetric.title}>{irMetric.text.replace(/^IR\s*/, '')}</dd></div>
         <div><dt>覆盖率</dt><dd>{pct(coverage)}</dd></div>
         <div><dt>诊断时间</dt><dd>{diagnosedAt === '待生成' ? diagnosedAt : formatDateTime(diagnosedAt)}</dd></div>
       </dl>
@@ -2187,7 +2214,7 @@ function DiagnosticCell({ factor }: { factor: ApiFactorListItem }): JSX.Element 
   const quality = factor.quality_view;
   const gap = factor.diagnostic_gap_summary ?? {};
   const rankIc = typeof quality?.rank_ic === 'number' ? quality.rank_ic : summary?.rank_ic;
-  const ir = typeof quality?.ir === 'number' ? quality.ir : summary?.ir;
+  const irMetric = factorIrMetric(factor, 'IR', 2);
   const coverage = typeof quality?.coverage === 'number' ? quality.coverage : summary?.coverage;
   const rawDecayLabel = quality?.decay_label ?? (typeof quality?.decay_days === 'number' ? String(quality.decay_days) : null);
   const decayLabel = rawDecayLabel
@@ -2200,9 +2227,7 @@ function DiagnosticCell({ factor }: { factor: ApiFactorListItem }): JSX.Element 
   const rankText = typeof rankIc === 'number'
     ? `RankIC ${num(rankIc)}`
     : missingMetricText('Rank IC');
-  const irText = typeof ir === 'number'
-    ? `IR ${num(ir, 2)}`
-    : missingMetricText('IR');
+  const irText = irMetric.text;
   const decayText = `衰减 ${decayLabel}`;
   const coverageText = typeof coverage === 'number'
     ? `覆盖 ${pct(coverage)}`
@@ -2212,7 +2237,7 @@ function DiagnosticCell({ factor }: { factor: ApiFactorListItem }): JSX.Element 
       <div className="factor-diagnostic-cell__metrics">
         <span className="factor-diagnostic-cell__metric" title={metricTitle(rankText, rankGapDetail)}>{rankText}</span>
         <span className="factor-diagnostic-cell__separator" aria-hidden="true">丨</span>
-        <span className="factor-diagnostic-cell__metric" title={metricTitle(irText, irGapDetail)}>{irText}</span>
+        <span className="factor-diagnostic-cell__metric" title={metricTitle(irText, irGapDetail ?? irMetric.title)}>{irText}</span>
         <span className="factor-diagnostic-cell__separator" aria-hidden="true">丨</span>
         <span className="factor-diagnostic-cell__metric" title={decayText}>{decayText}</span>
         <span className="factor-diagnostic-cell__separator" aria-hidden="true">丨</span>
@@ -2240,11 +2265,108 @@ function compositeLabel(value: unknown, fallback = '待补'): string {
   return typeof value === 'string' && value.trim() ? value : fallback;
 }
 
+type FactorMetricDisplay = {
+  text: string;
+  title: string;
+  value: number | null;
+  referenceOnly: boolean;
+};
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function diagnosticIrMetric(
+  summary: ApiFactorDiagnosticSummary | null | undefined,
+  quality: ApiFactorListItem['quality_view'] | null | undefined,
+  label = 'IR',
+  digits = 2,
+  fallbackValue?: unknown,
+): FactorMetricDisplay {
+  const evidence = previewRecord(quality?.ir_evidence) ?? previewRecord(summary?.ir_evidence);
+  const referenceOnly = quality?.ir_reference_only === true ||
+    summary?.ir_reference_only === true ||
+    evidence?.reference_only === true;
+  const displayValue = finiteNumber(evidence?.display_value) ??
+    finiteNumber(summary?.ir_display_value) ??
+    finiteNumber(quality?.ir);
+  const rawValue = finiteNumber(evidence?.value) ??
+    finiteNumber(quality?.raw_ir) ??
+    finiteNumber(summary?.ir) ??
+    finiteNumber(fallbackValue);
+  const value = referenceOnly ? displayValue : (displayValue ?? finiteNumber(summary?.ir) ?? finiteNumber(fallbackValue));
+  const prefix = label ? `${label} ` : '';
+  const evidenceLabel = typeof quality?.ir_label === 'string' && quality.ir_label.trim()
+    ? quality.ir_label.trim()
+    : typeof evidence?.label === 'string' && evidence.label.trim()
+      ? evidence.label.trim()
+      : '待正式重算';
+  const missingText = label ? missingMetricText(label) : '缺失';
+  const text = value !== null ? `${prefix}${num(value, digits)}` : (referenceOnly ? `${prefix}${evidenceLabel}` : missingText);
+  const reason = typeof evidence?.reason === 'string' && evidence.reason.trim()
+    ? evidence.reason.trim()
+    : referenceOnly
+      ? '检疫发布摘要复用值缺少正式/调整后 IR 证据。'
+      : text;
+  const rawNote = referenceOnly && rawValue !== null ? ` 原始检疫摘要 IR ${num(rawValue, digits)}。` : '';
+  return {
+    text,
+    title: referenceOnly ? `${reason}${rawNote}` : text,
+    value,
+    referenceOnly,
+  };
+}
+
+function factorIrMetric(factor: ApiFactorListItem, label = 'IR', digits = 2): FactorMetricDisplay {
+  return diagnosticIrMetric(
+    factor.latest_diagnostic_summary,
+    factor.quality_view,
+    label,
+    digits,
+    factor.batch_diagnostic_summary?.ir,
+  );
+}
+
+function signalQualityText(label: string, value: unknown, digits = 3): string {
+  return typeof value === 'number' && Number.isFinite(value) ? `${label} ${compactNum(value, digits)}` : `${label} 待补`;
+}
+
+function SignalQualityCell({ factor }: { factor: ApiFactorListItem }): JSX.Element {
+  const summary = factor.latest_diagnostic_summary;
+  const quality = factor.quality_view;
+  const gap = factor.diagnostic_gap_summary ?? {};
+  const rankIc = typeof quality?.rank_ic === 'number' ? quality.rank_ic : summary?.rank_ic;
+  const irMetric = factorIrMetric(factor, 'IC_IR', 2);
+  const rawDecayLabel = quality?.decay_label ?? (typeof quality?.decay_days === 'number' ? String(quality.decay_days) : null);
+  const decayLabel = rawDecayLabel
+    ? (/^\d+$/.test(String(rawDecayLabel)) ? `${rawDecayLabel}日` : String(rawDecayLabel))
+    : '待补';
+  const rankText = signalQualityText('RankIC', rankIc);
+  const irText = irMetric.text;
+  const decayText = `衰减 ${decayLabel}`;
+  return (
+    <div className="factor-composite-cell factor-signal-quality-cell" aria-label={`${factor.name} F3 信号质量`}>
+      <span title={metricTitle(rankText, metricGapDetail(gap.rank_ic))}>{rankText}</span>
+      <span className="factor-diagnostic-cell__separator" aria-hidden="true">丨</span>
+      <span title={metricTitle(irText, metricGapDetail(gap.next_action) ?? irMetric.title)}>{irText}</span>
+      <span className="factor-diagnostic-cell__separator" aria-hidden="true">丨</span>
+      <span title={decayText}>{decayText}</span>
+    </div>
+  );
+}
+
 function CompositeQualityCell({ factor }: { factor: ApiFactorListItem }): JSX.Element {
   const quality = factor.composite_view?.quality;
+  const hasSharpe = typeof quality?.sharpe === 'number';
+  const incrementalIr = typeof quality?.incremental_ir === 'number' ? quality.incremental_ir : null;
+  const primaryLabel = hasSharpe
+    ? `Sharpe ${num(quality.sharpe, 2)}`
+    : incrementalIr !== null
+      ? `增量IR ${num(incrementalIr, 2)}`
+      : `Sharpe ${compositeLabel(quality?.sharpe_label)}`;
   return (
     <div className="factor-composite-cell factor-composite-cell--quality" aria-label={`${factor.name} F3 组合质量`}>
-      <span title={`Sharpe ${compositeLabel(quality?.sharpe_label)}`}>Sharpe {typeof quality?.sharpe === 'number' ? num(quality.sharpe, 2) : compositeLabel(quality?.sharpe_label)}</span>
+      <span title={primaryLabel}>{primaryLabel}</span>
       <span title={`Max Drawdown ${compositeLabel(quality?.max_drawdown_label)}`}>最大回撤 {typeof quality?.max_drawdown_pct === 'number' ? pct(quality.max_drawdown_pct, 1) : compositeLabel(quality?.max_drawdown_label)}</span>
     </div>
   );
@@ -2258,37 +2380,6 @@ function CompositeCapacityCell({ factor }: { factor: ApiFactorListItem }): JSX.E
       <span className={`factor-composite-status factor-composite-status--${String(capacity?.status ?? 'UNKNOWN').toLowerCase()}`}>Capacity {compositeLabel(capacity?.label, '待评估')}</span>
       <span>Turnover {compositeLabel(turnover?.turnover_rate_weekly_label)}</span>
       <span>Cost {compositeLabel(turnover?.cost_bps_label)}</span>
-    </div>
-  );
-}
-
-function CompositeStyleExposureCell({ factor }: { factor: ApiFactorListItem }): JSX.Element {
-  const exposure = factor.composite_view?.style_exposure;
-  return (
-    <div className="factor-composite-cell factor-composite-cell--style" aria-label={`${factor.name} F3 风格暴露`}>
-      <span className={`factor-composite-status factor-composite-status--${String(exposure?.status ?? 'UNKNOWN').toLowerCase()}`}>{compositeLabel(exposure?.label)}</span>
-      <span>Style Corr {compositeLabel(exposure?.style_corr_label)}</span>
-    </div>
-  );
-}
-
-function CompositeExecutionCell({ factor }: { factor: ApiFactorListItem }): JSX.Element {
-  const execution = factor.composite_view?.execution;
-  return (
-    <div className="factor-composite-cell factor-composite-cell--execution" aria-label={`${factor.name} F3 实盘身份`}>
-      <span>Portfolio {compositeLabel(execution?.portfolio_label, '未绑定')}</span>
-      <span>Tag {compositeLabel(execution?.execution_tag_label, '未绑定')}</span>
-    </div>
-  );
-}
-
-function BlendInfoCell({ factor }: { factor: ApiFactorListItem }): JSX.Element {
-  const blend = factor.composite_view?.blend_info;
-  const methods = blend?.method_labels?.length ? blend.method_labels.join(' / ') : 'Blend';
-  return (
-    <div className="factor-composite-cell factor-composite-cell--blend" aria-label={`${factor.name} Blend Info`}>
-      <span>{compositeLabel(blend?.label, `${factor.lineage_summary?.parent_count ?? 0} 个 F2 成分`)}</span>
-      <span>{methods}</span>
     </div>
   );
 }
@@ -2545,13 +2636,38 @@ function FactorLineagePreview({
     { tier: 'F2 改造库', name: refined?.name ?? (factor.tier_level === 'F1' ? '待改造' : factor.name) },
     { tier: 'F3 组合库', name: composite?.name ?? (factor.tier_level === 'F3' ? factor.name : '待组合') },
   ];
+  const blend = factor.composite_view?.blend_info;
+  const execution = factor.composite_view?.execution;
+  const blendComponentIds = blend?.component_ids?.length ? blend.component_ids : parentIds;
+  const componentCount = typeof blend?.component_count === 'number'
+    ? blend.component_count
+    : (blendComponentIds.length || factor.lineage_summary?.parent_count || 0);
+  const isCompositePreview = factor.tier_level === 'F3' || factor.tier_projection?.key === 'F3';
+  const blendLabel = compositeLabel(blend?.label, componentCount > 0 ? `${componentCount} 个 F2 成分` : '待补');
+  const methodLabel = blend?.method_labels?.length ? blend.method_labels.join(' / ') : 'Blend 待补';
+  const portfolioLabel = compositeLabel(execution?.portfolio_label, '未绑定');
+  const executionTagLabel = compositeLabel(execution?.execution_tag_label, '未绑定');
+  const componentEntries = blendComponentIds.reduce<Array<{ id: string; name: string; tier: string }>>((entries, parentId) => {
+    const normalizedParentId = normalizeLineageParentId(parentId);
+    const matched = factorById.get(normalizedParentId) ?? factorById.get(parentId);
+    const id = matched?.descriptor?.canonical_id ?? matched?.id ?? parentId;
+    if (entries.some((entry) => entry.id === id)) return entries;
+    entries.push({
+      id,
+      name: matched?.name ?? rawLineageLabel(parentId),
+      tier: matched?.tier_label ?? matched?.tier_level ?? '父级因子',
+    });
+    return entries;
+  }, []);
   return (
     <section className="factor-panel factor-lineage-preview" role="dialog" aria-modal="true" aria-label="血缘树预览">
-      <div className="factor-lineage-preview__copy">
-        <strong>血缘树预览</strong>
-        <p>当前预览：{factor.name}。完整版本、准入记录与因子解释可在详情页审计。</p>
+      <div className="factor-lineage-preview__header">
+        <div className="factor-lineage-preview__copy">
+          <strong>血缘树预览</strong>
+          <p>当前预览：{factor.name}。完整版本、准入记录与因子解释可在详情页审计。</p>
+        </div>
+        <button className="factor-lineage-preview__close" type="button" onClick={onClose}>收起</button>
       </div>
-      <button className="factor-lineage-preview__close" type="button" onClick={onClose}>收起</button>
       <div className="factor-lineage-tree" aria-label="因子血缘树预览">
         {nodes.map((node, index) => (
           <Fragment key={`${node.tier}-${index}`}>
@@ -2563,6 +2679,31 @@ function FactorLineagePreview({
           </Fragment>
         ))}
       </div>
+      {isCompositePreview ? (
+        <div className="factor-lineage-audit-grid" aria-label="F3 组合血缘审计">
+          <article className="factor-lineage-audit-card">
+            <span>Blend Info</span>
+            <strong>{blendLabel}</strong>
+            <small>{methodLabel}</small>
+          </article>
+          <article className="factor-lineage-audit-card">
+            <span>实盘身份</span>
+            <strong>Portfolio {portfolioLabel}</strong>
+            <small>Tag {executionTagLabel}</small>
+          </article>
+        </div>
+      ) : null}
+      {isCompositePreview && componentEntries.length ? (
+        <div className="factor-lineage-components" aria-label="F2 成分明细">
+          {componentEntries.map((entry) => (
+            <article className="factor-lineage-component" key={entry.id}>
+              <span>{entry.tier}</span>
+              <strong>{entry.name}</strong>
+              <code>{entry.id}</code>
+            </article>
+          ))}
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -4637,6 +4778,10 @@ export function FactorLibraryPage({
   const [governanceError, setGovernanceError] = useState<string | null>(null);
   const [confirmGovernanceAction, setConfirmGovernanceAction] = useState<ApiFactorGovernanceAction | null>(null);
   const [governanceExecuteBusy, setGovernanceExecuteBusy] = useState(false);
+  const [governanceLoadToken, setGovernanceLoadToken] = useState(0);
+  const governanceLoadRequestRef = useRef(0);
+  const governancePrefetchStartedRef = useRef(false);
+  const governanceOverviewRequestInFlightRef = useRef(false);
   const ledgerStatusMode: FactorLedgerStatusMode = tierFilter === 'F1' ? 'data_quality' : 'lifecycle';
   const isF3Ledger = tierFilter === 'F3';
   const ledgerStatusTabs = ledgerStatusMode === 'data_quality' ? F1_DATA_QUALITY_TABS : FACTOR_LIFECYCLE_TABS;
@@ -4720,20 +4865,27 @@ export function FactorLibraryPage({
     };
   }, [api, f1CatalogFilters.layer, f1CatalogFilters.q, f1CatalogFilters.status, f1CatalogReloadNonce, tierFilter]);
   useEffect(() => {
-    if (governanceOverview || !governanceOpen) return;
+    if (!governanceOpen || governanceLoadToken <= 0) return;
     const getFactorGovernanceOverview = (api as {
       getFactorGovernanceOverview?: () => Promise<ApiFactorGovernanceOverview>;
     }).getFactorGovernanceOverview;
     if (!getFactorGovernanceOverview) return;
+    if (governanceLoadRequestRef.current === governanceLoadToken) return;
+    if (governanceOverviewRequestInFlightRef.current) return;
+    governanceLoadRequestRef.current = governanceLoadToken;
     let alive = true;
-    const interactive = governanceOpen;
-    if (interactive) {
+    const blockingLoad = governanceOverview === null;
+    if (blockingLoad) {
       setGovernanceLoading(true);
       setGovernanceError(null);
+    } else {
+      setGovernanceError(null);
     }
+    governanceOverviewRequestInFlightRef.current = true;
     const overviewRequest = getFactorGovernanceOverview();
     if (!overviewRequest || typeof (overviewRequest as PromiseLike<ApiFactorGovernanceOverview>).then !== 'function') {
-      if (interactive && alive) setGovernanceLoading(false);
+      governanceOverviewRequestInFlightRef.current = false;
+      if (blockingLoad && alive) setGovernanceLoading(false);
       return () => {
         alive = false;
       };
@@ -4745,15 +4897,42 @@ export function FactorLibraryPage({
         setGovernanceOverview(overview);
       })
       .catch((err: Error) => {
-        if (alive && interactive) setGovernanceError(err.message || '治理任务加载失败。');
+        if (alive) setGovernanceError(err.message || '治理任务加载失败。');
       })
       .finally(() => {
-        if (alive && interactive) setGovernanceLoading(false);
+        governanceOverviewRequestInFlightRef.current = false;
+        if (alive && blockingLoad) setGovernanceLoading(false);
       });
     return () => {
       alive = false;
     };
-  }, [api, governanceOpen, governanceOverview]);
+  }, [api, governanceLoadToken, governanceOpen, governanceOverview]);
+  useEffect(() => {
+    if (governanceOpen || governanceOverview || governancePrefetchStartedRef.current) return;
+    const expectedGovernanceCount = recordNumber(payload?.summary, 'governance_queue_count') ?? 0;
+    if (expectedGovernanceCount <= 0) return;
+    const getFactorGovernanceOverview = (api as {
+      getFactorGovernanceOverview?: () => Promise<ApiFactorGovernanceOverview>;
+    }).getFactorGovernanceOverview;
+    if (!getFactorGovernanceOverview) return;
+    const timer = window.setTimeout(() => {
+      if (governanceOverviewRequestInFlightRef.current || governanceOverview) return;
+      governancePrefetchStartedRef.current = true;
+      governanceOverviewRequestInFlightRef.current = true;
+      getFactorGovernanceOverview()
+        .then((overview) => {
+          setGovernanceError(null);
+          setGovernanceOverview(overview);
+        })
+        .catch(() => {
+          governancePrefetchStartedRef.current = false;
+        })
+        .finally(() => {
+          governanceOverviewRequestInFlightRef.current = false;
+        });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [api, governanceOpen, governanceOverview, payload?.summary]);
   const categoryScopedFactors = useMemo(() => {
     const selectedCategories = new Set(categoryFilters);
     return (payload?.items ?? []).filter((factor) => !selectedCategories.size || selectedCategories.has(factorLibraryCategory(factor)));
@@ -4902,6 +5081,11 @@ export function FactorLibraryPage({
       return next.slice(-2);
     });
   };
+  const openGovernanceModal = (): void => {
+    setGovernanceOpen(true);
+    setGovernanceError(null);
+    setGovernanceLoadToken((value) => value + 1);
+  };
   const openGovernanceConfirmation = (action: ApiFactorGovernanceAction): void => {
     setGovernanceError(null);
     setConfirmGovernanceAction(action);
@@ -4929,10 +5113,26 @@ export function FactorLibraryPage({
           criteria: confirmGovernanceAction.criteria ?? {},
           offline_detail: confirmGovernanceAction.offline_detail ?? {},
         },
+        include_governance_overview: false,
       });
-      setGovernanceOverview(response.governance_overview ?? null);
+      if (response.governance_overview) {
+        setGovernanceOverview(response.governance_overview);
+      } else {
+        const executedActionId = confirmGovernanceAction.id;
+        setGovernanceOverview((current) => {
+          if (!current) return current;
+          const actions = current.actions.filter((action) => action.id !== executedActionId);
+          return {
+            ...current,
+            as_of: response.executed_at ?? response.offline_at ?? current.as_of,
+            queue_count: actions.length,
+            actions,
+          };
+        });
+      }
       setConfirmGovernanceAction(null);
       setReloadNonce((value) => value + 1);
+      setGovernanceLoadToken((value) => value + 1);
     } catch (err) {
       setGovernanceError(err instanceof Error ? err.message : '治理任务执行失败。');
     } finally {
@@ -4978,6 +5178,7 @@ export function FactorLibraryPage({
     };
   }, [governanceActions.length, governanceOverview, localGovernanceTaskCount, payload?.items, payload?.summary]);
   const pitStatus = recordString(payload?.summary, 'pit_status');
+  const factorAdmissionStatus = recordString(payload?.summary, 'factor_admission_status') ?? pitStatus;
   const layerCardCounts = useMemo(() => ({
     ...tierFilterCounts,
     F1: Number(f1Catalog?.summary?.item_count ?? f1Catalog?.snapshot?.field_count ?? tierFilterCounts.F1),
@@ -4985,6 +5186,15 @@ export function FactorLibraryPage({
   const confirmGovernanceCommand = confirmGovernanceAction
     ? String(confirmGovernanceAction.command ?? confirmGovernanceAction.kind ?? '').toUpperCase()
     : '';
+  const confirmGovernanceIsRestore = confirmGovernanceCommand === 'RESTORE_PRUNED';
+  const confirmGovernanceVerb = confirmGovernanceCommand === 'PUBLISH_OPTIMIZED_FACTOR'
+    ? '确认入库'
+    : confirmGovernanceIsRestore ? '恢复确认' : '确认执行';
+  const confirmGovernanceSubtitle = confirmGovernanceCommand === 'PUBLISH_OPTIMIZED_FACTOR'
+    ? '该操作会写入新的反向因子，来源因子仍保留治理审计。'
+    : confirmGovernanceIsRestore
+      ? '该操作只恢复当前重算后排序最高的历史被裁剪因子，恢复记录会写入治理审计。'
+      : '该操作会写入软下线状态，因子仍可在已下线 tab 和详情页审计。';
   const confirmOptimizedFactor = confirmGovernanceCommand === 'PUBLISH_OPTIMIZED_FACTOR'
     ? previewRecord(confirmGovernanceAction?.optimized_factor)
     : null;
@@ -5011,6 +5221,18 @@ export function FactorLibraryPage({
   const confirmPruneMvpIdentity = confirmPruneComparison
     ? resolveGovernanceFactorIdentity(confirmPruneComparison.mvp.factorId, confirmPruneComparison.mvp.factorName)
     : null;
+  const confirmRestoreDetail = previewRecord(confirmGovernanceAction?.offline_detail);
+  const confirmRestoreComparison = previewRecord(confirmRestoreDetail?.restore_comparison);
+  const confirmRestoreCandidateRecord = previewRecord(confirmRestoreComparison?.restore_candidate);
+  const confirmRestoreSourceRecord = previewRecord(confirmRestoreComparison?.source_factor);
+  const confirmRestoreCandidateId = recordString(confirmRestoreCandidateRecord ?? undefined, 'factor_id') ?? confirmAffectedFactorIds[0] ?? '';
+  const confirmRestoreSourceId = recordString(confirmRestoreSourceRecord ?? undefined, 'factor_id') ?? confirmGovernanceAction?.keep_factor_id ?? '';
+  const confirmRestoreCandidateIdentity = confirmRestoreCandidateId
+    ? resolveGovernanceFactorIdentity(confirmRestoreCandidateId, recordString(confirmRestoreCandidateRecord ?? undefined, 'factor_name'))
+    : null;
+  const confirmRestoreSourceIdentity = confirmRestoreSourceId
+    ? resolveGovernanceFactorIdentity(confirmRestoreSourceId, recordString(confirmRestoreSourceRecord ?? undefined, 'factor_name'))
+    : null;
   return (
     <div className="factor-page" data-page-root="factor-library">
       <PageHero
@@ -5021,7 +5243,7 @@ export function FactorLibraryPage({
           : '按 F1/F2/F3 管理因子、血缘、质量与生命周期。'}
         meta={
           <>
-            <span className="factor-hero-pill">PIT 准入：{pitStatus ? factorPitAdmissionLabel(pitStatus) : '正式诊断可用'}</span>
+            <span className="factor-hero-pill">PIT 准入：{factorAdmissionStatus ? factorPitAdmissionLabel(factorAdmissionStatus) : '正式诊断可用'}</span>
             <span className="factor-hero-pill factor-hero-pill--blue">10年样本窗口闭合</span>
             <span className="factor-hero-pill factor-hero-pill--warn">{librarySummary.toBeVerifiedCount} 个因子待校准</span>
           </>
@@ -5030,7 +5252,7 @@ export function FactorLibraryPage({
           <>
             <button
               className="factor-btn factor-governance-trigger"
-              onClick={() => setGovernanceOpen(true)}
+              onClick={openGovernanceModal}
               aria-haspopup="dialog"
             >
               治理任务 <span>{librarySummary.governanceQueueCount}</span>
@@ -5109,7 +5331,7 @@ export function FactorLibraryPage({
                         确认入库
                       </button>
                     ) : null}
-                    {['DEPRECATE', 'PRUNE'].includes(String(action.command ?? action.kind).toUpperCase()) ? (
+                    {['DEPRECATE', 'PRUNE', 'RESTORE_PRUNED'].includes(String(action.command ?? action.kind).toUpperCase()) ? (
                       <button
                         className="factor-btn factor-btn--primary factor-btn--small"
                         type="button"
@@ -5132,12 +5354,8 @@ export function FactorLibraryPage({
           <div className="factor-governance-modal__panel factor-governance-modal__panel--confirm">
             <div className="factor-governance-modal__header">
               <div>
-                <strong>{confirmGovernanceCommand === 'PUBLISH_OPTIMIZED_FACTOR' ? '确认入库' : '确认执行'} {governanceKindLabel(String(confirmGovernanceAction.command ?? confirmGovernanceAction.kind))}</strong>
-                <span>
-                  {confirmGovernanceCommand === 'PUBLISH_OPTIMIZED_FACTOR'
-                    ? '该操作会写入新的反向因子，来源因子仍保留治理审计。'
-                    : '该操作会写入软下线状态，因子仍可在已下线 tab 和详情页审计。'}
-                </span>
+                <strong>{confirmGovernanceVerb} {governanceKindLabel(String(confirmGovernanceAction.command ?? confirmGovernanceAction.kind))}</strong>
+                <span>{confirmGovernanceSubtitle}</span>
               </div>
               <button type="button" className="factor-governance-modal__close" aria-label="关闭确认治理任务" onClick={() => setConfirmGovernanceAction(null)}>
                 <span aria-hidden="true">×</span>
@@ -5164,6 +5382,38 @@ export function FactorLibraryPage({
                 </div>
                 <div><dt>下线原因</dt><dd>{confirmGovernanceAction.offline_reason ?? confirmGovernanceAction.detail}</dd></div>
               </dl>
+              {confirmGovernanceIsRestore && confirmRestoreCandidateIdentity && confirmRestoreSourceIdentity ? (
+                <section className="factor-governance-prune" aria-label="冗余裁剪恢复对比">
+                  <div className="factor-governance-prune__header">
+                    <strong>冗余裁剪-恢复对比</strong>
+                    <span>仅恢复排序最高者</span>
+                  </div>
+                  <div className="factor-governance-prune__cards">
+                    <article className="factor-governance-prune-card">
+                      <span>恢复候选</span>
+                      <FactorGovernanceIdentity name={confirmRestoreCandidateIdentity.name} id={confirmRestoreCandidateIdentity.id} />
+                      <ul className="factor-governance-prune__metrics">
+                        <li>Level {recordString(confirmRestoreCandidateRecord ?? undefined, 'factor_level') ?? 'NA'}</li>
+                        <li>Rank IC {num(recordNumber(confirmRestoreCandidateRecord ?? undefined, 'rank_ic'), 3)}</li>
+                        <li>IR {num(recordNumber(confirmRestoreCandidateRecord ?? undefined, 'ir'), 2)}</li>
+                      </ul>
+                    </article>
+                    <article className="factor-governance-prune-card factor-governance-prune-card--mvp">
+                      <span>重新诊断因子</span>
+                      <FactorGovernanceIdentity name={confirmRestoreSourceIdentity.name} id={confirmRestoreSourceIdentity.id} />
+                      <ul className="factor-governance-prune__metrics">
+                        <li>Level {recordString(confirmRestoreSourceRecord ?? undefined, 'factor_level') ?? 'NA'}</li>
+                        <li>Rank IC {num(recordNumber(confirmRestoreSourceRecord ?? undefined, 'rank_ic'), 3)}</li>
+                        <li>IR {num(recordNumber(confirmRestoreSourceRecord ?? undefined, 'ir'), 2)}</li>
+                      </ul>
+                    </article>
+                  </div>
+                  <p className="factor-governance-prune__plan">
+                    <strong>恢复计划</strong>
+                    治理确认后只恢复 {confirmRestoreCandidateIdentity.name}（{confirmRestoreCandidateIdentity.id}），其他历史裁剪因子保持原状态，等待下一次诊断或治理队列复核。
+                  </p>
+                </section>
+              ) : null}
               {confirmPruneComparison && confirmPruneCandidateIdentity && confirmPruneMvpIdentity ? (
                 <section className="factor-governance-prune" aria-label="冗余裁剪参数对比">
                   <div className="factor-governance-prune__header">
@@ -5227,7 +5477,7 @@ export function FactorLibraryPage({
                 disabled={governanceExecuteBusy}
                 onClick={() => void executeGovernanceAction()}
               >
-                {governanceExecuteBusy ? '执行中...' : (confirmGovernanceCommand === 'PUBLISH_OPTIMIZED_FACTOR' ? '确认入库' : '确认执行')}
+                {governanceExecuteBusy ? '执行中...' : confirmGovernanceVerb}
               </button>
             </div>
           </div>
@@ -5330,11 +5580,28 @@ export function FactorLibraryPage({
                 <th><div className="factor-th-content"><span>血缘溯源</span></div></th>
                 {isF3Ledger ? (
                   <>
-                    <th><div className="factor-th-content"><span>Blend Info</span></div></th>
-                    <th><div className="factor-th-content"><span>组合质量</span></div></th>
-                    <th><div className="factor-th-content"><span>容量/摩擦</span></div></th>
-                    <th><div className="factor-th-content"><span>风格暴露</span></div></th>
-                    <th><div className="factor-th-content"><span>实盘身份</span></div></th>
+                    <th><div className="factor-th-content"><span>算子状态灯</span></div></th>
+                    <th>
+                      <HeaderWithTooltip
+                        label="信号质量"
+                        tooltipLabel="信号质量指标解释"
+                        lines={F3_SIGNAL_QUALITY_TOOLTIP_LINES}
+                      />
+                    </th>
+                    <th>
+                      <HeaderWithTooltip
+                        label="组合质量"
+                        tooltipLabel="组合质量指标解释"
+                        lines={F3_COMPOSITE_QUALITY_TOOLTIP_LINES}
+                      />
+                    </th>
+                    <th>
+                      <HeaderWithTooltip
+                        label="容量/摩擦"
+                        tooltipLabel="容量摩擦指标解释"
+                        lines={F3_CAPACITY_TOOLTIP_LINES}
+                      />
+                    </th>
                   </>
                 ) : (
                   <>
@@ -5397,11 +5664,10 @@ export function FactorLibraryPage({
                   </td>
                   {isF3Ledger ? (
                     <>
-                      <td><BlendInfoCell factor={factor} /></td>
+                      <td><OperatorStatusLights factor={factor} /></td>
+                      <td><SignalQualityCell factor={factor} /></td>
                       <td><CompositeQualityCell factor={factor} /></td>
                       <td><CompositeCapacityCell factor={factor} /></td>
-                      <td><CompositeStyleExposureCell factor={factor} /></td>
-                      <td><CompositeExecutionCell factor={factor} /></td>
                     </>
                   ) : (
                     <>
@@ -5423,10 +5689,10 @@ export function FactorLibraryPage({
                           className="factor-link"
                           disabled={!isCompositeFactorStrategyCandidate(factor)}
                           onClick={() => navigateTo(buildCompositeFactorStrategyRoute(factor))}
-                          title={isCompositeFactorStrategyCandidate(factor) ? '生成组合策略' : compositeFactorActionBlocker(factor)}
+                          title={isCompositeFactorStrategyCandidate(factor) ? '生成策略' : compositeFactorActionBlocker(factor)}
                           type="button"
                         >
-                          生成组合策略
+                          生成策略
                         </button>
                       ) : null}
                       <button className="factor-link" onClick={() => navigateTo(`/factors/${factor.id}`)} type="button">详情</button>
@@ -5435,7 +5701,7 @@ export function FactorLibraryPage({
                 </tr>
               )) : (
                 <tr>
-                  <td colSpan={isF3Ledger ? 11 : 8}>
+                  <td colSpan={isF3Ledger ? 10 : 8}>
                     <div className="factor-empty">当前筛选条件下暂无因子。</div>
                   </td>
                 </tr>
@@ -5596,11 +5862,15 @@ export function FactorDetailPage({ factorId }: { factorId: string }): JSX.Elemen
         diagnostic_mode: diagnosticMode,
       })
       .then((result) => {
+        const restoreFollowups = (result.governance_followups ?? [])
+          .filter((action) => String(action.command ?? action.kind ?? '').toUpperCase() === 'RESTORE_PRUNED');
         setSummary(result.summary);
         setDiagnosticToast({
           tone: 'success',
           title: '诊断完成',
-          detail: `run_id ${result.run_id} · 客户端耗时 ${diagnosticElapsedLabel(startedAt)}`,
+          detail: restoreFollowups.length
+            ? `run_id ${result.run_id} · 已生成 ${restoreFollowups.length} 个冗余裁剪-恢复治理任务 · 客户端耗时 ${diagnosticElapsedLabel(startedAt)}`
+            : `run_id ${result.run_id} · 客户端耗时 ${diagnosticElapsedLabel(startedAt)}`,
         });
       })
       .catch((err: Error) => {
@@ -5645,6 +5915,7 @@ export function FactorDetailPage({ factorId }: { factorId: string }): JSX.Elemen
   const reportHref = factor && summary?.run_id
     ? backendHref(`/factors/${factor.id}/diagnostics/${summary.run_id}/report`)
     : null;
+  const detailIrMetric = diagnosticIrMetric(summary, factor?.quality_view, '', 2);
   return (
     <div className="factor-page" data-page-root="factor-detail">
       <section className="factor-detail-hero">
@@ -5723,7 +5994,7 @@ export function FactorDetailPage({ factorId }: { factorId: string }): JSX.Elemen
             <>
           <section className="factor-card-grid factor-card-grid--metrics factor-detail-metrics">
             <article className="factor-mini-card factor-mini-card--accent"><span>排序 IC</span><strong>{num(summary?.rank_ic)}</strong><p>滚动窗口稳定性</p></article>
-            <article className="factor-mini-card"><span>信息比率</span><strong>{num(summary?.ir, 2)}</strong><p>最近诊断运行</p></article>
+            <article className="factor-mini-card"><span>信息比率</span><strong title={detailIrMetric.title}>{detailIrMetric.text}</strong><p>{detailIrMetric.referenceOnly ? '检疫摘要，仅作审计参考' : '最近诊断运行'}</p></article>
             <article className="factor-mini-card factor-mini-card--warn"><span>预估年换手</span><strong>{annualTurnover === null ? '待生成' : pct(annualTurnover)}</strong><p>TRS 成本敏感</p></article>
             <article className="factor-mini-card"><span>覆盖率</span><strong>{pct(summary?.coverage)}</strong><p>可诊断样本</p></article>
           </section>
@@ -6020,9 +6291,9 @@ export function FactorEditorPage({ factorId: _factorId }: { factorId?: string })
         <article className="factor-panel">
           <div className="factor-section-title"><span>引用库</span></div>
           <ul className="factor-event-list">
-            <li><strong>Rank-12-1月截面动量 (排序)</strong><span>s_mom_12m1m_rank · 可引用</span></li>
-            <li><strong>Rank-252日波动率 (排序)</strong><span>s_vol_252d_rank · 防守型</span></li>
-            <li><strong>盈利收益率 (LTM) (原始)</strong><span>s_val_ep_ltm_raw · 基础面 PIT 可诊断</span></li>
+            <li><strong>截面动量排名 (12-1m) [Rank]</strong><span>s_mom_12m1m_rank · 可引用</span></li>
+            <li><strong>波动率排名 (252d) [Rank]</strong><span>s_vol_252d_rank · 防守型</span></li>
+            <li><strong>盈利收益率 (LTM) [Raw]</strong><span>s_val_ep_ltm_raw · 基础面 PIT 可诊断</span></li>
           </ul>
         </article>
       </section>

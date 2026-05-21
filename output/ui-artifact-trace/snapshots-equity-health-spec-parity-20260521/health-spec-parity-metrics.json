@@ -1,0 +1,324 @@
+{
+  "liveUrl": "http://127.0.0.1:4173/?v=1779353235128#/snapshots",
+  "apiStatus": 200,
+  "design": {
+    "section": {
+      "x": 268,
+      "y": 181,
+      "width": 1304,
+      "height": 361,
+      "top": 181,
+      "right": 1572,
+      "bottom": 542,
+      "left": 268
+    },
+    "cards": [
+      {
+        "title": "L1 基础行情",
+        "status": "部分可用",
+        "metric": "股票 1266 / 1482 · 债券 7 / 7",
+        "action": "下钻缺口",
+        "rect": {
+          "x": 287,
+          "y": 254,
+          "width": 307.5,
+          "height": 271
+        },
+        "background": "rgb(255, 255, 255)",
+        "borderColor": "rgb(145, 204, 195)"
+      },
+      {
+        "title": "L2 财务截面",
+        "status": "已就绪",
+        "metric": "940 / 1482",
+        "action": "查看观察项",
+        "rect": {
+          "x": 606.5,
+          "y": 254,
+          "width": 307.5,
+          "height": 271
+        },
+        "background": "rgb(251, 252, 253)",
+        "borderColor": "rgb(229, 231, 235)"
+      },
+      {
+        "title": "L3 分析师与情绪",
+        "status": "已就绪",
+        "metric": "3 / 3",
+        "action": "查看证据",
+        "rect": {
+          "x": 926,
+          "y": 254,
+          "width": 307.5,
+          "height": 271
+        },
+        "background": "rgb(251, 252, 253)",
+        "borderColor": "rgb(229, 231, 235)"
+      },
+      {
+        "title": "L4 宏观与衍生品",
+        "status": "部分可用",
+        "metric": "10 / 10",
+        "action": "下钻依赖",
+        "rect": {
+          "x": 1245.5,
+          "y": 254,
+          "width": 307.5,
+          "height": 271
+        },
+        "background": "rgb(251, 252, 253)",
+        "borderColor": "rgb(229, 231, 235)"
+      }
+    ]
+  },
+  "liveDesktop": {
+    "section": {
+      "x": 268,
+      "y": 181,
+      "width": 1300,
+      "height": 361,
+      "top": 181,
+      "right": 1568,
+      "bottom": 542,
+      "left": 268
+    },
+    "title": "L1-L4 数据层健康",
+    "chip": "2 层部分可用",
+    "cards": [
+      {
+        "title": "L1 基础行情",
+        "status": "部分可用",
+        "metric": "股票 1266 / 1482 · 债券 6 / 7",
+        "subtitle": "10Y PIT 价格回放可用；固定收益运行态来源已就绪；30Y Full Ready 与公司行为补链仍在修复队列。",
+        "miniRows": [
+          {
+            "label": "可用于",
+            "value": "动量 / 波动 / 债券资产腿"
+          },
+          {
+            "label": "待修复",
+            "value": "公司行为、长历史补价"
+          }
+        ],
+        "action": "下钻缺口",
+        "rect": {
+          "x": 287,
+          "y": 254,
+          "width": 306.5,
+          "height": 271
+        },
+        "background": "rgb(255, 255, 255)",
+        "borderColor": "rgb(154, 214, 207)"
+      },
+      {
+        "title": "L2 财务截面",
+        "status": "已就绪",
+        "metric": "940 / 1482",
+        "subtitle": "财务字段与发布时点门禁可进入质量、估值和稳健性因子研究。",
+        "miniRows": [
+          {
+            "label": "字段数",
+            "value": "18"
+          },
+          {
+            "label": "观察项",
+            "value": "财务平衡校验"
+          }
+        ],
+        "action": "查看观察项",
+        "rect": {
+          "x": 605.5,
+          "y": 254,
+          "width": 306.5,
+          "height": 271
+        },
+        "background": "rgb(251, 252, 253)",
+        "borderColor": "rgb(229, 231, 235)"
+      },
+      {
+        "title": "L3 分析师与情绪",
+        "status": "已就绪",
+        "metric": "3 / 3",
+        "subtitle": "一致预期与卖空微观结构已形成正式快照，可进入研究监测。",
+        "miniRows": [
+          {
+            "label": "一致预期",
+            "value": "3,951 行"
+          },
+          {
+            "label": "卖空链路",
+            "value": "2,924 行"
+          }
+        ],
+        "action": "查看证据",
+        "rect": {
+          "x": 924,
+          "y": 254,
+          "width": 306.5,
+          "height": 271
+        },
+        "background": "rgb(251, 252, 253)",
+        "borderColor": "rgb(229, 231, 235)"
+      },
+      {
+        "title": "L4 宏观与衍生品",
+        "status": "部分可用",
+        "metric": "10 / 10",
+        "subtitle": "利率 Beta、IV Skew 可作为特征源；正式 IC 诊断依赖 L1 样本池门禁。",
+        "miniRows": [
+          {
+            "label": "可用",
+            "value": "利率、期权偏度"
+          },
+          {
+            "label": "上游依赖",
+            "value": "L1 样本池"
+          }
+        ],
+        "action": "下钻依赖",
+        "rect": {
+          "x": 1242.5,
+          "y": 254,
+          "width": 306.5,
+          "height": 271
+        },
+        "background": "rgb(251, 252, 253)",
+        "borderColor": "rgb(229, 231, 235)"
+      }
+    ],
+    "overflow": {
+      "scrollWidth": 1600,
+      "clientWidth": 1600
+    }
+  },
+  "liveMobile": {
+    "section": {
+      "x": 38,
+      "y": 0,
+      "width": 314,
+      "height": 1195,
+      "top": 0,
+      "right": 352,
+      "bottom": 1195,
+      "left": 38
+    },
+    "title": "L1-L4 数据层健康",
+    "chip": "2 层部分可用",
+    "cards": [
+      {
+        "title": "L1 基础行情",
+        "status": "部分可用",
+        "metric": "股票 1266 / 1482 · 债券 6 / 7",
+        "subtitle": "10Y PIT 价格回放可用；固定收益运行态来源已就绪；30Y Full Ready 与公司行为补链仍在修复队列。",
+        "miniRows": [
+          {
+            "label": "可用于",
+            "value": "动量 / 波动 / 债券资产腿"
+          },
+          {
+            "label": "待修复",
+            "value": "公司行为、长历史补价"
+          }
+        ],
+        "action": "下钻缺口",
+        "rect": {
+          "x": 53,
+          "y": 129,
+          "width": 284,
+          "height": 271
+        },
+        "background": "rgb(255, 255, 255)",
+        "borderColor": "rgb(154, 214, 207)"
+      },
+      {
+        "title": "L2 财务截面",
+        "status": "已就绪",
+        "metric": "940 / 1482",
+        "subtitle": "财务字段与发布时点门禁可进入质量、估值和稳健性因子研究。",
+        "miniRows": [
+          {
+            "label": "字段数",
+            "value": "18"
+          },
+          {
+            "label": "观察项",
+            "value": "财务平衡校验"
+          }
+        ],
+        "action": "查看观察项",
+        "rect": {
+          "x": 53,
+          "y": 412,
+          "width": 284,
+          "height": 248
+        },
+        "background": "rgb(251, 252, 253)",
+        "borderColor": "rgb(229, 231, 235)"
+      },
+      {
+        "title": "L3 分析师与情绪",
+        "status": "已就绪",
+        "metric": "3 / 3",
+        "subtitle": "一致预期与卖空微观结构已形成正式快照，可进入研究监测。",
+        "miniRows": [
+          {
+            "label": "一致预期",
+            "value": "3,951 行"
+          },
+          {
+            "label": "卖空链路",
+            "value": "2,924 行"
+          }
+        ],
+        "action": "查看证据",
+        "rect": {
+          "x": 53,
+          "y": 672,
+          "width": 284,
+          "height": 248
+        },
+        "background": "rgb(251, 252, 253)",
+        "borderColor": "rgb(229, 231, 235)"
+      },
+      {
+        "title": "L4 宏观与衍生品",
+        "status": "部分可用",
+        "metric": "10 / 10",
+        "subtitle": "利率 Beta、IV Skew 可作为特征源；正式 IC 诊断依赖 L1 样本池门禁。",
+        "miniRows": [
+          {
+            "label": "可用",
+            "value": "利率、期权偏度"
+          },
+          {
+            "label": "上游依赖",
+            "value": "L1 样本池"
+          }
+        ],
+        "action": "下钻依赖",
+        "rect": {
+          "x": 53,
+          "y": 932,
+          "width": 284,
+          "height": 248
+        },
+        "background": "rgb(251, 252, 253)",
+        "borderColor": "rgb(229, 231, 235)"
+      }
+    ],
+    "overflow": {
+      "scrollWidth": 390,
+      "clientWidth": 390
+    }
+  },
+  "interaction": {
+    "l4Highlighted": true,
+    "l1Highlighted": false,
+    "scrollY": 27
+  },
+  "failedRequests": [],
+  "httpErrors": [],
+  "consoleErrors": [
+    "Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ]
+}

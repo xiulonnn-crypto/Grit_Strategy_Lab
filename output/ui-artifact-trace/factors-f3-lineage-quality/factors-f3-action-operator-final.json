@@ -1,0 +1,295 @@
+{
+  "frontend_url": "http://127.0.0.1:4173/?v=20260521-f3-action-operator-final#/factors?layer=F3",
+  "backend_started_by_script": false,
+  "backend_healthz": true,
+  "target_id": "s_alpha_valvol_blend_resid_std_rk",
+  "api": {
+    "factor_level": "D",
+    "lifecycle": "online",
+    "diagnostic_status": "READY_TO_DIAGNOSE",
+    "rank_ic": 0.1,
+    "ir": 0.11,
+    "decay_days": 252,
+    "sharpe": 0.553,
+    "max_drawdown_pct": 12.34,
+    "turnover_rate_weekly": 18,
+    "cost_bps": 9,
+    "style_corr": 0.26,
+    "metric_projection_source": "system_seed_audit_projection",
+    "sharpe_source": "system_seed_audit_projection",
+    "cost_source": "system_seed_audit_projection",
+    "op_completed": [
+      "W",
+      "N",
+      "Z",
+      "T"
+    ],
+    "op_missing": [],
+    "can_create": true,
+    "hard_blockers": []
+  },
+  "desktop": {
+    "name": "desktop",
+    "viewport": {
+      "width": 1440,
+      "height": 1000
+    },
+    "clickedAllLevel": true,
+    "elapsed_ms": 4739,
+    "console_errors": [
+      "Failed to load resource: the server responded with a status of 404 (Not Found)"
+    ],
+    "failed_requests": [],
+    "metrics": {
+      "url": "http://127.0.0.1:4173/?v=20260521-f3-action-operator-final#/factors?layer=F3",
+      "headers": [
+        "因子基本信息",
+        "血缘溯源",
+        "算子状态灯",
+        "信号质量?RankIC: F3 信号与未来收益排序的截面相关性。IC_IR: RankIC 均值除以波动，衡量信号稳定性。衰减: 当前诊断或成本摘要里的半衰期窗口，通常以交易日展示。",
+        "组合质量?Sharpe: 优先使用正式诊断或足够长收益序列；检疫发布重跑样本不足时使用增量 IR 代理并在 source 标记。最大回撤: 来自检疫风险摘要、稳定性摘要或多空收益序列。",
+        "容量/摩擦?Capacity: 按换手、容量状态和成本压力给出通过/观察/失败。Turnover: 单周预估换手；缺周频值时由年换手折算。Cost: 冲击成本 bps，优先读取 turnover_decay 证据。",
+        "因子级别↕?因子级别：Rank IC 均值和 IR (稳定性) 先取绝对值，再按较弱一项保守评级。S顶级: Rank IC > 0.03, IR > 2.0; 你的因子在此！极其罕见，具备极高的实战价值，建议作为组合的核心权重。A优秀: Rank IC 0.02 ~ 0.03, IR 1.0 ~ 2.0; 非常优秀的因子，可以稳定贡献超额收益。B合格: Rank IC 0.01 ~ 0.02, IR 0.5 ~ 1.0; 中规中矩，可以作为辅助因子增加组合的多元化。C微弱: Rank IC 0.005 ~ 0.01, IR 0.2 ~ 0.5; 信号较弱，容易被交易成本吞噬，需观察长期表现。D噪声: Rank IC < 0.005, IR < 0.2; 基本属于统计噪声，不建议在实盘中使用。其他: F1 原始因子作为上层因子的底层水源，只按数据质量状态治理，不参与 Rank IC/IR 投资评级。未完成真实或预览诊断的因子显示为未评级，不参与等级排序。",
+        "生命周期",
+        "创建时间↓",
+        "操作"
+      ],
+      "lineageHeaderIndex": 1,
+      "opHeaderIndex": 2,
+      "signalHeaderIndex": 3,
+      "compositeHeaderIndex": 4,
+      "capacityHeaderIndex": 5,
+      "styleHeaderIndex": -1,
+      "hasOldAction": false,
+      "hasNewAction": true,
+      "rowText": "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined-Rank]估值?Rank(Neutralize(ZScore(Winsorize(s_val_cfp_ltm_raw, 3)))) / Rank(Neutralize(ZScore(Winsorize(s_vol_downside_252d_rank, 3))))s_alpha_valvol_blend_resid_std_rk查看血缘WNZTRankIC 0.1丨IC_IR 0.11丨衰减 252日Sharpe 0.55最大回撤 12.3%Capacity 容量通过Turnover 18.00%/周Cost 9.0 bpsD噪声线上5月19日 下午06:19生成策略详情",
+      "cells": [
+        "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined-Rank]估值?Rank(Neutralize(ZScore(Winsorize(s_val_cfp_ltm_raw, 3)))) / Rank(Neutralize(ZScore(Winsorize(s_vol_downside_252d_rank, 3))))s_alpha_valvol_blend_resid_std_rk",
+        "查看血缘",
+        "WNZT",
+        "RankIC 0.1丨IC_IR 0.11丨衰减 252日",
+        "Sharpe 0.55最大回撤 12.3%",
+        "Capacity 容量通过Turnover 18.00%/周Cost 9.0 bps",
+        "D噪声",
+        "线上",
+        "5月19日 下午06:19",
+        "生成策略详情"
+      ],
+      "actionButtons": [
+        {
+          "text": "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined-Rank]",
+          "title": "",
+          "disabled": false
+        },
+        {
+          "text": "查看血缘",
+          "title": "",
+          "disabled": false
+        },
+        {
+          "text": "生成策略",
+          "title": "生成策略",
+          "disabled": false
+        },
+        {
+          "text": "详情",
+          "title": "",
+          "disabled": false
+        }
+      ],
+      "opLights": [
+        {
+          "text": "W",
+          "title": "W 去极值已完成",
+          "active": true,
+          "missing": false
+        },
+        {
+          "text": "N",
+          "title": "N 中性化已完成",
+          "active": true,
+          "missing": false
+        },
+        {
+          "text": "Z",
+          "title": "Z 标准化已完成",
+          "active": true,
+          "missing": false
+        },
+        {
+          "text": "T",
+          "title": "T 时序排名已完成",
+          "active": true,
+          "missing": false
+        }
+      ],
+      "hasRankIc": true,
+      "hasIcIr": true,
+      "hasDecay": true,
+      "hasSharpe": true,
+      "hasMaxDrawdown": true,
+      "hasCapacity": true,
+      "hasTurnover": true,
+      "hasCost": true,
+      "hasPending": false,
+      "hasStyleCellLeak": false,
+      "pageHasHorizontalOverflow": false,
+      "wrapHasHorizontalOverflow": false,
+      "tableHasHorizontalOverflow": false,
+      "viewportWidth": 1440,
+      "viewportHeight": 1000,
+      "docClientWidth": 1440,
+      "docScrollWidth": 1440,
+      "bodyClientWidth": 1440,
+      "bodyScrollWidth": 1440,
+      "wrapClientWidth": 1100,
+      "wrapScrollWidth": 1100,
+      "tableClientWidth": 1100,
+      "tableScrollWidth": 1100
+    },
+    "expected": {
+      "opImmediatelyAfterLineage": true,
+      "signalAfterOp": true,
+      "noStyleHeader": true,
+      "noOldAction": true,
+      "newActionVisible": true,
+      "metricSlotsFilled": true,
+      "opLightsComplete": true,
+      "noHorizontalOverflow": true,
+      "actionRoutePreserved": true
+    },
+    "screenshot": "factors-f3-action-operator-final-desktop.png",
+    "route_after_action": "http://127.0.0.1:4173/?v=20260521-f3-action-operator-final#/factor-models/new?strategy_type=COMPOSITE_FACTOR&source=factor_library&factor_id=s_alpha_valvol_blend_resid_std_rk&factorIds=s_alpha_valvol_blend_resid_std_rk&weights=100&directions=HIGH_IS_BETTER&modelName=%5B%E4%BC%B0%E5%80%BC%5D%20-%20%E4%B8%8B%E8%A1%8C%E9%A3%8E%E9%99%A9%E8%B0%83%E8%8A%82-%E7%8E%B0%E9%87%91%E6%B5%81%E5%9B%9E%E6%8A%A5%E6%AF%94%20(LTM%2F252d)%20%5BRefined-Rank%5D%20%E7%BB%84%E5%90%88%E5%9B%A0%E5%AD%90%E7%AD%96%E7%95%A5"
+  },
+  "mobile": {
+    "name": "mobile",
+    "viewport": {
+      "width": 390,
+      "height": 844
+    },
+    "clickedAllLevel": true,
+    "elapsed_ms": 4564,
+    "console_errors": [],
+    "failed_requests": [],
+    "metrics": {
+      "url": "http://127.0.0.1:4173/?v=20260521-f3-action-operator-final#/factors?layer=F3",
+      "headers": [
+        "因子基本信息",
+        "血缘溯源",
+        "算子状态灯",
+        "信号质量?RankIC: F3 信号与未来收益排序的截面相关性。IC_IR: RankIC 均值除以波动，衡量信号稳定性。衰减: 当前诊断或成本摘要里的半衰期窗口，通常以交易日展示。",
+        "组合质量?Sharpe: 优先使用正式诊断或足够长收益序列；检疫发布重跑样本不足时使用增量 IR 代理并在 source 标记。最大回撤: 来自检疫风险摘要、稳定性摘要或多空收益序列。",
+        "容量/摩擦?Capacity: 按换手、容量状态和成本压力给出通过/观察/失败。Turnover: 单周预估换手；缺周频值时由年换手折算。Cost: 冲击成本 bps，优先读取 turnover_decay 证据。",
+        "因子级别↕?因子级别：Rank IC 均值和 IR (稳定性) 先取绝对值，再按较弱一项保守评级。S顶级: Rank IC > 0.03, IR > 2.0; 你的因子在此！极其罕见，具备极高的实战价值，建议作为组合的核心权重。A优秀: Rank IC 0.02 ~ 0.03, IR 1.0 ~ 2.0; 非常优秀的因子，可以稳定贡献超额收益。B合格: Rank IC 0.01 ~ 0.02, IR 0.5 ~ 1.0; 中规中矩，可以作为辅助因子增加组合的多元化。C微弱: Rank IC 0.005 ~ 0.01, IR 0.2 ~ 0.5; 信号较弱，容易被交易成本吞噬，需观察长期表现。D噪声: Rank IC < 0.005, IR < 0.2; 基本属于统计噪声，不建议在实盘中使用。其他: F1 原始因子作为上层因子的底层水源，只按数据质量状态治理，不参与 Rank IC/IR 投资评级。未完成真实或预览诊断的因子显示为未评级，不参与等级排序。",
+        "生命周期",
+        "创建时间↓",
+        "操作"
+      ],
+      "lineageHeaderIndex": 1,
+      "opHeaderIndex": 2,
+      "signalHeaderIndex": 3,
+      "compositeHeaderIndex": 4,
+      "capacityHeaderIndex": 5,
+      "styleHeaderIndex": -1,
+      "hasOldAction": false,
+      "hasNewAction": true,
+      "rowText": "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined-Rank]估值?Rank(Neutralize(ZScore(Winsorize(s_val_cfp_ltm_raw, 3)))) / Rank(Neutralize(ZScore(Winsorize(s_vol_downside_252d_rank, 3))))s_alpha_valvol_blend_resid_std_rk查看血缘WNZTRankIC 0.1丨IC_IR 0.11丨衰减 252日Sharpe 0.55最大回撤 12.3%Capacity 容量通过Turnover 18.00%/周Cost 9.0 bpsD噪声线上5月19日 下午06:19生成策略详情",
+      "cells": [
+        "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined-Rank]估值?Rank(Neutralize(ZScore(Winsorize(s_val_cfp_ltm_raw, 3)))) / Rank(Neutralize(ZScore(Winsorize(s_vol_downside_252d_rank, 3))))s_alpha_valvol_blend_resid_std_rk",
+        "查看血缘",
+        "WNZT",
+        "RankIC 0.1丨IC_IR 0.11丨衰减 252日",
+        "Sharpe 0.55最大回撤 12.3%",
+        "Capacity 容量通过Turnover 18.00%/周Cost 9.0 bps",
+        "D噪声",
+        "线上",
+        "5月19日 下午06:19",
+        "生成策略详情"
+      ],
+      "actionButtons": [
+        {
+          "text": "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined-Rank]",
+          "title": "",
+          "disabled": false
+        },
+        {
+          "text": "查看血缘",
+          "title": "",
+          "disabled": false
+        },
+        {
+          "text": "生成策略",
+          "title": "生成策略",
+          "disabled": false
+        },
+        {
+          "text": "详情",
+          "title": "",
+          "disabled": false
+        }
+      ],
+      "opLights": [
+        {
+          "text": "W",
+          "title": "W 去极值已完成",
+          "active": true,
+          "missing": false
+        },
+        {
+          "text": "N",
+          "title": "N 中性化已完成",
+          "active": true,
+          "missing": false
+        },
+        {
+          "text": "Z",
+          "title": "Z 标准化已完成",
+          "active": true,
+          "missing": false
+        },
+        {
+          "text": "T",
+          "title": "T 时序排名已完成",
+          "active": true,
+          "missing": false
+        }
+      ],
+      "hasRankIc": true,
+      "hasIcIr": true,
+      "hasDecay": true,
+      "hasSharpe": true,
+      "hasMaxDrawdown": true,
+      "hasCapacity": true,
+      "hasTurnover": true,
+      "hasCost": true,
+      "hasPending": false,
+      "hasStyleCellLeak": false,
+      "pageHasHorizontalOverflow": false,
+      "wrapHasHorizontalOverflow": false,
+      "tableHasHorizontalOverflow": false,
+      "viewportWidth": 390,
+      "viewportHeight": 844,
+      "docClientWidth": 390,
+      "docScrollWidth": 390,
+      "bodyClientWidth": 390,
+      "bodyScrollWidth": 390,
+      "wrapClientWidth": 276,
+      "wrapScrollWidth": 276,
+      "tableClientWidth": 276,
+      "tableScrollWidth": 276
+    },
+    "expected": {
+      "opImmediatelyAfterLineage": true,
+      "signalAfterOp": true,
+      "noStyleHeader": true,
+      "noOldAction": true,
+      "newActionVisible": true,
+      "metricSlotsFilled": true,
+      "opLightsComplete": true,
+      "noHorizontalOverflow": true
+    },
+    "screenshot": "factors-f3-action-operator-final-mobile.png",
+    "route_after_action": null
+  },
+  "failures": []
+}

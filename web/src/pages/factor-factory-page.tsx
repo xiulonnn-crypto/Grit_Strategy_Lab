@@ -1985,7 +1985,7 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
   }, [overview, quarantineCandidates, quarantineCandidateById]);
   const publishableFactors = useMemo(() => {
     const direct = asList<ApiPublishableFactorRow>(overview?.publishable_factors);
-    if (direct.length) return direct;
+    if (Array.isArray(overview?.publishable_factors)) return direct;
     return quarantineCandidates.map(publishableFromCandidate).filter((item): item is ApiPublishableFactorRow => Boolean(item));
   }, [overview, quarantineCandidates]);
   const dateScopedQuarantineRows = useMemo(
@@ -2313,13 +2313,14 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
     });
   };
 
-  const searchQuarantine = (nextPage = 1): void => {
+  const searchQuarantine = (nextPage = 1, queryFilters: QuarantineFilters = filters): void => {
     void withBusy('search', async () => {
       if (api.listFactorQuarantineCandidates) {
         const payload = await api.listFactorQuarantineCandidates({
-          date: filters.date || undefined,
-          factor_name: filters.factorName || undefined,
-          result: filters.result,
+          source_job_id: text(overview?.latest_run?.mining_job_id, '') || undefined,
+          date: queryFilters.date || undefined,
+          factor_name: queryFilters.factorName || undefined,
+          result: queryFilters.result,
           page: nextPage,
           page_size: QUARANTINE_PAGE_SIZE,
         });
@@ -2585,7 +2586,15 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
             <div className="factor-factory-filter-row" aria-label="历史检疫筛选">
               <label>
                 日期
-                <input type="date" value={filters.date} onChange={(event) => updateFilters({ date: event.target.value })} />
+                <input
+                  type="date"
+                  value={filters.date}
+                  onChange={(event) => {
+                    const nextFilters = { ...filters, date: event.target.value };
+                    updateFilters({ date: event.target.value });
+                    searchQuarantine(1, nextFilters);
+                  }}
+                />
               </label>
               <label>
                 因子名
@@ -2593,7 +2602,14 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
               </label>
               <label>
                 裁决
-                <select value={filters.result} onChange={(event) => updateFilters({ result: event.target.value })}>
+                <select
+                  value={filters.result}
+                  onChange={(event) => {
+                    const nextFilters = { ...filters, result: event.target.value };
+                    updateFilters({ result: event.target.value });
+                    searchQuarantine(1, nextFilters);
+                  }}
+                >
                   <option value="ALL">全部裁决</option>
                   <option value="PASS">PASS</option>
                   <option value="WARN">WARN</option>

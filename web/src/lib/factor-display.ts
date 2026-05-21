@@ -1,5 +1,6 @@
 export const FACTOR_DISPLAY_NAME_SCHEMA_VERSION = 'factor_display_name_v4';
 export const FACTOR_DISPLAY_NAME_PROTOCOL_VERSION = 'factor_display_name_v4_structured';
+export const FACTOR_DISPLAY_NAME_STANDARD_VERSION = 'gsl_cn_naming_standard_2026_05';
 export const FACTOR_DISPLAY_NAME_DEDUPE_STRATEGY = 'parameter_first_then_sha8';
 
 const CANONICAL_FACTOR_ALIASES: Record<string, string> = {
@@ -15,36 +16,38 @@ const CANONICAL_FACTOR_ALIASES: Record<string, string> = {
 };
 
 const CANONICAL_FACTOR_DISPLAY_NAMES: Record<string, string> = {
-  a_alpha_custom_cur_raw: '自定义 Alpha 信号 (原始)',
-  a_mom_ret_126d_z: 'ZScore-126日收益率 (精炼)',
-  f1_price_close: '交易所-复权收盘价 (原始)',
-  f1_price_adjclose: '交易所-复权收盘价 (原始)',
-  f1_return_1d_base: '交易所-1日收益率基准 (原始)',
-  f1_short_balance: 'FINRA-空头余额 (原始)',
-  f1_short_vol: 'FINRA-当日卖空成交量 (原始)',
-  s_price_adjclose_cur_raw: '交易所-复权收盘价 (原始)',
-  s_size_mcap_cur_raw: '交易所-总市值 (原始)',
-  s_f2_mom_ovn_mean_21d: '隔夜动量均值 (21日) (原始)',
-  s_mom_12m1m_rank: 'Rank-12-1月截面动量 (排序)',
-  s_mom_6m_rank: 'Rank-6月截面动量 (排序)',
-  s_val_ep_ltm_raw: '盈利收益率 (LTM) (原始)',
-  s_val_bp_latest_raw: '账面市值比 (最新) (原始)',
-  s_val_cfp_ltm_raw: '现金流收益率 (LTM) (原始)',
-  s_val_evocf_ltm_raw: '经营现金流企业价值比 (LTM) (原始)',
-  s_qlty_roe_ltm_raw: '净资产收益率 (LTM) (原始)',
-  s_qlty_fcfy_ttm_raw: '自由现金流收益率 (TTM) (原始)',
-  s_qlty_leverage_cur_raw: '杠杆率 (当前) (原始)',
-  s_inv_assetgrowth_1y_rank: 'Rank-1年资产增长率 (排序)',
-  s_inv_capex_ltm_raw: '资本开支率 (LTM) (原始)',
-  s_vol_252d_rank: 'Rank-252日波动率 (排序)',
-  s_vol_downside_252d_rank: 'Rank-252日下行波动率 (排序)',
-  s_liq_turnover_20d_rank: 'Rank-20日换手率 (排序)',
-  s_liq_amihud_20d_rank: 'Rank-20日非流动性 (排序)',
-  s_beta_market_252d_raw: '市场 Beta (252日) (原始)',
-  s_size_cur_log: '对数市值 (当前) (原始)',
-  s_alpha_ffblend_resid_mkt_rank: 'GSL-多因子全能动力',
-  s_alpha_valvol_blend_resid_std_rk: '风险调整现金流回报 (精炼)',
-  s_alpha_vol_downsiderev_std_rk: '反向下行风险 Alpha (精炼)',
+  a_alpha_custom_cur_raw: '自定义 Alpha 信号 (当前) [Raw]',
+  a_mom_ret_3d_raw: '收益率 (3d) [Raw]',
+  a_mom_ret_126d_z: '收益率 (126d) [Refined]',
+  a_mom_winsor3ret_3d_raw: '平滑收益率 (3d) [Raw]',
+  f1_price_close: '交易所 - 前复权收盘价 (原始)',
+  f1_price_adjclose: '交易所 - 前复权收盘价 (原始)',
+  f1_return_1d_base: '交易所 - 1d 收益率基准 (原始)',
+  f1_short_balance: 'FINRA - 空头余额 (原始)',
+  f1_short_vol: 'FINRA - 当日卖空成交量 (原始)',
+  s_price_adjclose_cur_raw: '交易所 - 前复权收盘价 (原始)',
+  s_size_mcap_cur_raw: '交易所 - 总市值 (原始)',
+  s_f2_mom_ovn_mean_21d: '隔夜动量均值 (21d) [Raw]',
+  s_mom_12m1m_rank: '截面动量排名 (12-1m) [Rank]',
+  s_mom_6m_rank: '截面动量排名 (126d) [Rank]',
+  s_val_ep_ltm_raw: '盈利收益率 (LTM) [Raw]',
+  s_val_bp_latest_raw: '账面市值比 (最新) [Raw]',
+  s_val_cfp_ltm_raw: '现金流收益率 (LTM) [Raw]',
+  s_val_evocf_ltm_raw: '经营现金流企业价值比 (LTM) [Raw]',
+  s_qlty_roe_ltm_raw: '净资产收益率 (LTM) [Raw]',
+  s_qlty_fcfy_ttm_raw: '自由现金流收益率 (LTM) [Raw]',
+  s_qlty_leverage_cur_raw: '杠杆率 (当前) [Raw]',
+  s_inv_assetgrowth_1y_rank: '资产增长率排名 (252d) [Rank]',
+  s_inv_capex_ltm_raw: '资本开支率 (LTM) [Raw]',
+  s_vol_252d_rank: '波动率排名 (252d) [Rank]',
+  s_vol_downside_252d_rank: '下行波动率排名 (252d) [Rank]',
+  s_liq_turnover_20d_rank: '换手率排名 (20d) [Rank]',
+  s_liq_amihud_20d_rank: '非流动性排名 (20d) [Rank]',
+  s_beta_market_252d_raw: '市场 Beta (252d) [Raw]',
+  s_size_cur_log: '对数市值 (当前) [Raw]',
+  s_alpha_ffblend_resid_mkt_rank: '[综合] - FF3 风格复合基石 (等权) [Beta-Free]',
+  s_alpha_valvol_blend_resid_std_rk: '[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined-Rank]',
+  s_alpha_vol_downsiderev_std_rk: '[风险] - 反向下行风险 Alpha (252d) [Refined-Rank]',
 };
 
 export type FactorDisplayNameLookup = Record<string, string | null | undefined>;
@@ -83,7 +86,7 @@ const FACTOR_TOKEN_LABELS: Record<string, string> = {
   roe: '净资产收益率',
   size: '规模',
   turnover: '换手率',
-  ttm: 'TTM',
+  ttm: 'LTM',
   val: '价值',
   valvol: '价值波动',
   vol: '波动率',
@@ -119,12 +122,13 @@ function fallbackForFactorId(factorId: unknown, lookup?: FactorDisplayNameLookup
 function formatWindowToken(token: string): string | null {
   const match = token.match(/^(\d+)(d|m|y)$/i);
   if (!match) return null;
-  const unitMap: Record<string, string> = {
-    d: '日',
-    m: '月',
-    y: '年',
-  };
-  return `${match[1]}${unitMap[match[2].toLowerCase()] ?? match[2]}`;
+  const value = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  if (unit === 'm' && value === 1) return '21d';
+  if (unit === 'm' && value === 3) return '63d';
+  if (unit === 'm' && value === 6) return '126d';
+  if (unit === 'y' && value === 1) return '252d';
+  return `${value}${unit}`;
 }
 
 function describeRawFactorId(value: string): string | null {
@@ -134,7 +138,8 @@ function describeRawFactorId(value: string): string | null {
   const labels = tokens
     .map((token) => formatWindowToken(token) ?? FACTOR_TOKEN_LABELS[token] ?? null)
     .filter((label): label is string => Boolean(label));
-  return labels.length ? `${labels.join('')} (原始)` : null;
+  const stateSuffix = normalized.startsWith('f1_') ? '(原始)' : '[Raw]';
+  return labels.length ? `${labels.join('')} ${stateSuffix}` : null;
 }
 
 function isEnglishOnlyFallback(value: string): boolean {

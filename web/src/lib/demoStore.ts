@@ -1056,7 +1056,7 @@ function createFactorListItems(): ApiFactorListItem[] {
   const factors: Array<Omit<ApiFactorListItem, 'ic_sparkline' | 'ic_sparkline_window' | 'readiness_blockers' | 'gate_fix_target'>> = [
     {
       id: 's_mom_12m1m_rank',
-      name: 'Rank-12-1月截面动量 (排序)',
+      name: '截面动量排名 (12-1m) [Rank]',
       market: 'US',
       universe: 'SP500',
       source: 'SYSTEM_SEED',
@@ -1074,7 +1074,7 @@ function createFactorListItems(): ApiFactorListItem[] {
     },
     {
       id: 's_val_ep_ltm_raw',
-      name: '盈利收益率 (LTM) (原始)',
+      name: '盈利收益率 (LTM) [Raw]',
       market: 'US',
       universe: 'SP500',
       source: 'SYSTEM_SEED',
@@ -1092,7 +1092,7 @@ function createFactorListItems(): ApiFactorListItem[] {
     },
     {
       id: 's_val_bp_latest_raw',
-      name: '账面市值比 (最新) (原始)',
+      name: '账面市值比 (最新) [Raw]',
       market: 'US',
       universe: 'SP500',
       source: 'SYSTEM_SEED',
@@ -1110,7 +1110,7 @@ function createFactorListItems(): ApiFactorListItem[] {
     },
     {
       id: 's_vol_252d_rank',
-      name: 'Rank-252日波动率 (排序)',
+      name: '波动率排名 (252d) [Rank]',
       market: 'US',
       universe: 'SP500',
       source: 'SYSTEM_SEED',
@@ -1128,7 +1128,7 @@ function createFactorListItems(): ApiFactorListItem[] {
     },
     {
       id: 's_qlty_roe_ltm_raw',
-      name: '净资产收益率 (LTM) (原始)',
+      name: '净资产收益率 (LTM) [Raw]',
       market: 'US',
       universe: 'SP500',
       source: 'SYSTEM_SEED',
@@ -1146,7 +1146,7 @@ function createFactorListItems(): ApiFactorListItem[] {
     },
     {
       id: 's_size_cur_log',
-      name: '对数市值 (当前) (原始)',
+      name: '对数市值 (当前) [Raw]',
       market: 'US',
       universe: 'SP500',
       source: 'SYSTEM_SEED',
@@ -1164,7 +1164,7 @@ function createFactorListItems(): ApiFactorListItem[] {
     },
     {
       id: 's_qlty_fcfy_ttm_raw',
-      name: '自由现金流收益率 (TTM) (原始)',
+      name: '自由现金流收益率 (LTM) [Raw]',
       market: 'US',
       universe: 'SP500',
       source: 'SYSTEM_SEED',
@@ -1277,13 +1277,13 @@ function createFactorGovernanceOverview(items = createFactorListItems()): ApiFac
         factor_ids: ['s_val_bp_latest_raw'],
         affected_factor_ids: ['s_val_bp_latest_raw'],
         keep_factor_id: 's_val_ep_ltm_raw',
-        offline_reason: '冗余裁剪：同簇高相关且弱于盈利收益率 (LTM) (原始)',
+        offline_reason: '冗余裁剪：同簇高相关且弱于盈利收益率 (LTM) [Raw]',
         offline_detail: {
           keep_factor_id: 's_val_ep_ltm_raw',
           correlation: 0.93,
           comparison: {
-            candidate: { factor_id: 's_val_bp_latest_raw', factor_name: '账面市值比 (最新) (原始)' },
-            mvp: { factor_id: 's_val_ep_ltm_raw', factor_name: '盈利收益率 (LTM) (原始)' },
+            candidate: { factor_id: 's_val_bp_latest_raw', factor_name: '账面市值比 (最新) [Raw]' },
+            mvp: { factor_id: 's_val_ep_ltm_raw', factor_name: '盈利收益率 (LTM) [Raw]' },
           },
         },
         severity: 'warning',
@@ -1327,7 +1327,7 @@ function createFactorGovernanceOverview(items = createFactorListItems()): ApiFac
         severity: 'info',
         optimized_factor: {
           id: 's_alpha_vol_downsiderev_std_rk',
-          name: '反向下行风险 Alpha (精炼)',
+          name: '[风险] - 反向下行风险 Alpha (252d) [Refined-Rank]',
           expression: 'DownsideStd(Return(Close, 1), 252)',
           direction: 'HIGH_IS_BETTER',
           grade: 'B',
@@ -2337,6 +2337,10 @@ export const demoApi: DemoApi = {
         sandbox_ready_count: items.filter((item) => item.diagnostic_status === 'SANDBOX_READY').length,
         blocked_data_count: items.filter((item) => item.diagnostic_status === 'BLOCKED_DATA').length,
         pit_status: 'READY',
+        factor_admission_status: 'READY',
+        factor_admission_blocks: false,
+        factor_admission_warning_count: 0,
+        factor_admission_repair_symbol_count: 0,
         governance_queue_count: createFactorGovernanceOverview(items).queue_count,
         strategy_usage_factor_count: 3,
         strategy_usage_factor_ids: ['s_mom_12m1m_rank', 's_val_ep_ltm_raw', 's_vol_252d_rank'],
@@ -2360,7 +2364,7 @@ export const demoApi: DemoApi = {
         ? {
             ...created,
             id: 's_alpha_vol_downsiderev_std_rk',
-            name: '反向下行风险 Alpha (精炼)',
+            name: '[风险] - 反向下行风险 Alpha (252d) [Refined-Rank]',
             source: 'MANUAL' as const,
             lifecycle_status: 'VERIFIED' as const,
             diagnostic_status: 'COMPLETED' as const,

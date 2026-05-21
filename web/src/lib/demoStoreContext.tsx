@@ -55,6 +55,9 @@ import type {
   ApiFactorGovernanceExecuteResponse,
   ApiFactorGovernanceOverview,
   ApiFactorListResponse,
+  ApiFactorPruneRecoveryApplyPayload,
+  ApiFactorPruneRecoveryApplyResponse,
+  ApiFactorPruneRecoveryPreview,
   ApiFactorMiningJob,
   ApiFactorMiningJobCreatePayload,
   ApiFactorMiningJobListResponse,
@@ -877,6 +880,13 @@ function createHttpApiClient(): DemoApi {
     executeFactorGovernanceAction: (actionId: string, payload: ApiFactorGovernanceExecutePayload) =>
       requestJson<ApiFactorGovernanceExecuteResponse>(
         `/factor-governance/actions/${encodeURIComponent(actionId)}/execute`,
+        withJsonBody(payload, { method: 'POST' }),
+      ),
+    previewFactorPruneRecovery: () =>
+      requestJson<ApiFactorPruneRecoveryPreview>('/factor-governance/prune-recovery/preview'),
+    applyFactorPruneRecovery: (payload: ApiFactorPruneRecoveryApplyPayload) =>
+      requestJson<ApiFactorPruneRecoveryApplyResponse>(
+        '/factor-governance/prune-recovery/apply',
         withJsonBody(payload, { method: 'POST' }),
       ),
     listFactorQuarantineCandidates: (params) => {

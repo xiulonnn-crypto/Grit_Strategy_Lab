@@ -66,6 +66,7 @@ from .factor_mining import (
     run_factor_mining_job,
 )
 from .factor_research import (
+    FACTOR_PRUNE_CORRELATION_THRESHOLD,
     FactorResearchService,
     build_fundamental_gap_policy,
     build_pit_data_overview,
@@ -1020,6 +1021,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
     def execute_factor_governance_action(self, action_id: str, request: Any) -> dict[str, Any]:
         return self._factor_research_service().execute_factor_governance_action(action_id, request)
+
+    def preview_factor_prune_recovery(self) -> dict[str, Any]:
+        return self._factor_research_service().preview_factor_prune_recovery()
+
+    def apply_factor_prune_recovery(self, request: Any) -> dict[str, Any]:
+        return self._factor_research_service().apply_factor_prune_recovery(request)
 
     def create_factor_model_suggestion(self, request: Any) -> dict[str, Any]:
         return self._factor_research_service().create_factor_model_suggestion(request)
@@ -2233,6 +2240,146 @@ class RealBacktestPlatformService(BacktestPlatformService):
         return keys
 
     @staticmethod
+    def _factor_factory_redundancy_semantic_key(value: Any) -> str:
+        text_value = str(value or "").strip()
+        if not text_value:
+            return ""
+        text_value = text_value.replace("（", "(").replace("）", ")")
+        text_value = re.sub(r"^\[[^\]]+\]\s*-\s*", "", text_value)
+        text_value = re.sub(r"\[[^\]]+\]\s*$", "", text_value)
+        text_value = re.sub(r"\s+", "", text_value).lower()
+        return f"semantic:{text_value}" if text_value else ""
+
+    @classmethod
+    def _factor_factory_redundancy_semantic_keys(cls, *values: Any) -> set[str]:
+        keys = {cls._factor_factory_redundancy_semantic_key(value) for value in values}
+        return {key for key in keys if key}
+
+    @classmethod
+    def _factor_factory_publishable_block_keys(
+        cls,
+        *,
+        factor_id: Any = None,
+        name_collision_key: Any = None,
+        base_display_name_cn: Any = None,
+        display_name_cn: Any = None,
+        factor_name: Any = None,
+    ) -> set[str]:
+        keys: set[str] = set()
+        factor_key = re.sub(r"\s+", "", str(factor_id or "").strip().lower())
+        if factor_key:
+            keys.add(f"factor:{factor_key}")
+        keys.update(
+            cls._factor_factory_redundancy_semantic_keys(
+                name_collision_key,
+                base_display_name_cn,
+                display_name_cn,
+                factor_name,
+            )
+        )
+        return keys
+
+    def _factor_factory_library_publish_blockers(self) -> dict[str, dict[str, Any]]:
+        blockers: dict[str, dict[str, Any]] = {}
+
+        def add_blockers(keys: set[str], *, reason: str, source: Mapping[str, Any]) -> None:
+            for key in keys:
+                blockers.setdefault(key, {"reason": reason, "source": dict(source)})
+
+        factor_service = self._factor_research_service()
+        published_factor_ids = {
+            str(row.get("factor_id") or "").strip()
+            for row in self.storage.fetch_all(
+                """
+                SELECT DISTINCT factor_id
+                FROM factor_publish_events
+                WHERE COALESCE(factor_id, '') <> ''
+                  AND UPPER(COALESCE(event_type, '')) LIKE '%PUBLISH%'
+                """
+            )
+            if str(row.get("factor_id") or "").strip()
+        }
+        if published_factor_ids:
+            try:
+                online_factors = factor_service.list_factors(
+                    lifecycle="online",
+                    include_governance_queue=False,
+                ).get("items", [])
+            except Exception:
+                online_factors = []
+            for factor in online_factors:
+                factor_id = str(factor.get("id") or "").strip()
+                if factor_id not in published_factor_ids:
+                    continue
+                add_blockers(
+                    self._factor_factory_publishable_block_keys(
+                        factor_id=factor_id,
+                        name_collision_key=factor.get("name_collision_key"),
+                        base_display_name_cn=factor.get("base_display_name_cn"),
+                        display_name_cn=factor.get("display_name_cn"),
+                        factor_name=factor.get("name"),
+                    ),
+                    reason="ONLINE_PUBLISHED_FACTOR",
+                    source={"factor_id": factor_id},
+                )
+
+        try:
+            governance_overview = factor_service.get_factor_governance_overview()
+        except Exception:
+            governance_overview = {}
+        for action in governance_overview.get("actions") or []:
+            if not isinstance(action, Mapping):
+                continue
+            command = str(action.get("command") or action.get("kind") or "").upper()
+            if command != "PRUNE":
+                continue
+            criteria = action.get("criteria") if isinstance(action.get("criteria"), Mapping) else {}
+            offline_detail = action.get("offline_detail") if isinstance(action.get("offline_detail"), Mapping) else {}
+            correlation = abs(_coerce_float(criteria.get("correlation"), _coerce_float(offline_detail.get("correlation"), 0.0)))
+            threshold = _coerce_float(criteria.get("threshold"), FACTOR_PRUNE_CORRELATION_THRESHOLD)
+            evidence_source = str(criteria.get("evidence_source") or offline_detail.get("evidence_source") or "").upper()
+            if correlation <= threshold or evidence_source != "MEASURED_DIAGNOSTIC_IC_SERIES":
+                continue
+            comparison = offline_detail.get("comparison") if isinstance(offline_detail.get("comparison"), Mapping) else {}
+            candidate = comparison.get("candidate") if isinstance(comparison.get("candidate"), Mapping) else {}
+            mvp = comparison.get("mvp") if isinstance(comparison.get("mvp"), Mapping) else {}
+            action_factor_ids = [str(item).strip() for item in action.get("factor_ids") or [] if str(item).strip()]
+            action_factor_ids.extend(
+                str(value).strip()
+                for value in (offline_detail.get("factor_id"), candidate.get("factor_id"))
+                if str(value or "").strip()
+            )
+            for factor_id in dict.fromkeys(action_factor_ids):
+                add_blockers(
+                    self._factor_factory_publishable_block_keys(factor_id=factor_id),
+                    reason="MEASURED_PRUNE_FACTOR",
+                    source={"action_id": action.get("id"), "factor_id": factor_id, "correlation": correlation},
+                )
+            add_blockers(
+                self._factor_factory_publishable_block_keys(
+                    factor_id=candidate.get("factor_id"),
+                    name_collision_key=candidate.get("name_collision_key"),
+                    base_display_name_cn=candidate.get("base_display_name_cn"),
+                    display_name_cn=candidate.get("display_name_cn"),
+                    factor_name=candidate.get("factor_name") or candidate.get("name"),
+                ),
+                reason="MEASURED_PRUNE_SEMANTIC",
+                source={"action_id": action.get("id"), "correlation": correlation, "threshold": threshold},
+            )
+            add_blockers(
+                self._factor_factory_publishable_block_keys(
+                    factor_id=mvp.get("factor_id"),
+                    name_collision_key=mvp.get("name_collision_key"),
+                    base_display_name_cn=mvp.get("base_display_name_cn"),
+                    display_name_cn=mvp.get("display_name_cn"),
+                    factor_name=mvp.get("factor_name") or mvp.get("name"),
+                ),
+                reason="MEASURED_PRUNE_MVP",
+                source={"action_id": action.get("id"), "correlation": correlation, "threshold": threshold},
+            )
+        return blockers
+
+    @staticmethod
     def _append_factor_factory_redundancy_group(
         groups: list[dict[str, Any]],
         *,
@@ -2272,7 +2419,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
             """,
             (source_mining_job_id,),
         )
+        library_blockers = self._factor_factory_library_publish_blockers()
         groups: list[dict[str, Any]] = []
+        library_pruned = 0
         for row in rows:
             metrics = loads(row.get("candidate_metrics_json"), {})
             if not isinstance(metrics, Mapping):
@@ -2296,6 +2445,67 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 neutralization_scope=metrics.get("neutralization_scope") or metrics.get("orthogonality_intent"),
                 residual_control=metrics.get("residual_control") or ("market_beta" if "beta" in expression.lower() else None),
             )
+            block_keys = self._factor_factory_publishable_block_keys(
+                factor_id=target_factor_id,
+                name_collision_key=projection.get("name_collision_key"),
+                base_display_name_cn=projection.get("base_display_name_cn"),
+                display_name_cn=projection.get("display_name_cn"),
+                factor_name=projection.get("display_name_cn") or projection.get("base_display_name_cn"),
+            )
+            blocked_by = next(
+                (
+                    library_blockers[key]
+                    for key in sorted(block_keys.intersection(library_blockers))
+                    if isinstance(library_blockers.get(key), Mapping)
+                ),
+                None,
+            )
+            if blocked_by:
+                gate_summary = loads(row.get("gate_summary_json"), {})
+                if not isinstance(gate_summary, Mapping):
+                    gate_summary = {}
+                blocker_source = blocked_by.get("source") if isinstance(blocked_by.get("source"), Mapping) else {}
+                blocker_reason = str(blocked_by.get("reason") or "MEASURED_PRUNE_SEMANTIC")
+                metrics.update({
+                    "redundancy_pruned": True,
+                    "redundancy_pruning_source": blocker_reason,
+                    "redundancy_group_key": "|".join(sorted(block_keys.intersection(library_blockers))),
+                    "redundancy_blocker": dict(blocker_source),
+                })
+                next_gate = {
+                    **dict(gate_summary),
+                    "redundancy_pruning": "FAILED",
+                    "redundancy_pruning_source": blocker_reason,
+                    "redundancy_blocker": dict(blocker_source),
+                }
+                self.storage.execute(
+                    """
+                    UPDATE factor_quarantine_candidates
+                    SET status = 'REJECTED',
+                        publish_status = 'BLOCKED',
+                        candidate_metrics_json = ?,
+                        gate_summary_json = ?,
+                        publish_eligibility_json = ?,
+                        updated_at = ?,
+                        rejected_reason = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        dumps(metrics),
+                        dumps(next_gate),
+                        dumps({
+                            "status": "BLOCKED",
+                            "reason": "冗余裁剪：与线上因子库或实测 PRUNE 证据重复，禁止再次发布。",
+                            "rule_version": "factor_quarantine_v2_0",
+                            "source": blocker_reason,
+                        }),
+                        iso_now(),
+                        "冗余裁剪：与线上因子库或实测 PRUNE 证据重复，禁止再次发布。",
+                        row.get("id"),
+                    ),
+                )
+                library_pruned += 1
+                continue
             keys = self._factor_factory_redundancy_keys(
                 factor_id=target_factor_id,
                 name_collision_key=projection.get("name_collision_key"),
@@ -2363,6 +2573,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "status": "COMPLETED",
             "kept": kept,
             "pruned": pruned,
+            "library_pruned": library_pruned,
             "groups": len(groups),
         }
 
@@ -2468,6 +2679,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         rows: list[Mapping[str, Any]] = []
         source_mining_job_id = str(source_mining_job_id or "").strip()
         factor_service = self._factor_research_service()
+        library_blockers = self._factor_factory_library_publish_blockers()
         if source_mining_job_id:
             rows = self.storage.fetch_all(
                 """
@@ -2540,6 +2752,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 or projection.get("display_name_cn")
                 or expression
             )
+            block_keys = self._factor_factory_publishable_block_keys(
+                factor_id=factor_id,
+                name_collision_key=projection.get("name_collision_key"),
+                base_display_name_cn=projection.get("base_display_name_cn") or display_name,
+                display_name_cn=display_name,
+                factor_name=candidate.get("factor_name") or candidate.get("name"),
+            )
+            if block_keys.intersection(library_blockers):
+                continue
             keys = self._factor_factory_redundancy_keys(
                 factor_id=factor_id,
                 name_collision_key=projection.get("name_collision_key"),

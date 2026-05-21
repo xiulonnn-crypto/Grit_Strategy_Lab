@@ -1,0 +1,164 @@
+[
+  {
+    "label": "desktop",
+    "metrics": {
+      "url": "http://127.0.0.1:4173/?v=overflow-final-data2-1779354902660-desktop#/factors?layer=F3",
+      "viewport": {
+        "width": 1440,
+        "height": 1000
+      },
+      "pageScrollWidth": 1440,
+      "pageClientWidth": 1440,
+      "pageHasHorizontalOverflow": false,
+      "wrapClientWidth": 1100,
+      "wrapScrollWidth": 1100,
+      "wrapHasHorizontalOverflow": false,
+      "tableClientWidth": 1100,
+      "tableScrollWidth": 1100,
+      "tableHasHorizontalOverflow": false,
+      "panelClientWidth": 1138,
+      "theadDisplay": "table-header-group",
+      "firstRowDisplay": "table-row",
+      "mobileSignalLabel": "none",
+      "mobileActionLabel": "none",
+      "rowCount": 1,
+      "hasSharpe": true,
+      "cellRects": [
+        {
+          "width": 242,
+          "height": 127,
+          "text": "[综合] - FF3 风格复合基石 (等权) [Beta-Free]估值?Rank(ZScore(Residual(Wi"
+        },
+        {
+          "width": 88,
+          "height": 127,
+          "text": "查看血缘"
+        },
+        {
+          "width": 154,
+          "height": 127,
+          "text": "RankIC 0.013丨IC_IR 0.51丨衰减 252日"
+        },
+        {
+          "width": 116,
+          "height": 127,
+          "text": "Sharpe 0.63最大回撤 12.3%"
+        },
+        {
+          "width": 127,
+          "height": 127,
+          "text": "Capacity 容量通过Turnover 1.38%/周Cost 9.0 bps"
+        },
+        {
+          "width": 94,
+          "height": 127,
+          "text": "风格中性Style Corr 0.000"
+        },
+        {
+          "width": 77,
+          "height": 127,
+          "text": "B合格"
+        },
+        {
+          "width": 72,
+          "height": 127,
+          "text": "线上"
+        },
+        {
+          "width": 66,
+          "height": 127,
+          "text": "5月19日 下午02:56"
+        },
+        {
+          "width": 66,
+          "height": 127,
+          "text": "生成组合策略详情"
+        }
+      ]
+    },
+    "consoleErrors": [
+      "Failed to load resource: the server responded with a status of 404 (Not Found)"
+    ],
+    "failedRequests": []
+  },
+  {
+    "label": "mobile",
+    "metrics": {
+      "url": "http://127.0.0.1:4173/?v=overflow-final-data2-1779354906639-mobile#/factors?layer=F3",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "pageScrollWidth": 390,
+      "pageClientWidth": 390,
+      "pageHasHorizontalOverflow": false,
+      "wrapClientWidth": 276,
+      "wrapScrollWidth": 276,
+      "wrapHasHorizontalOverflow": false,
+      "tableClientWidth": 276,
+      "tableScrollWidth": 276,
+      "tableHasHorizontalOverflow": false,
+      "panelClientWidth": 312,
+      "theadDisplay": "none",
+      "firstRowDisplay": "grid",
+      "mobileSignalLabel": "\"信号质量\"",
+      "mobileActionLabel": "\"操作\"",
+      "rowCount": 1,
+      "hasSharpe": true,
+      "cellRects": [
+        {
+          "width": 274,
+          "height": 184,
+          "text": "[综合] - FF3 风格复合基石 (等权) [Beta-Free]估值?Rank(ZScore(Residual(Wi"
+        },
+        {
+          "width": 274,
+          "height": 53,
+          "text": "查看血缘"
+        },
+        {
+          "width": 274,
+          "height": 59,
+          "text": "RankIC 0.013丨IC_IR 0.51丨衰减 252日"
+        },
+        {
+          "width": 274,
+          "height": 57,
+          "text": "Sharpe 0.63最大回撤 12.3%"
+        },
+        {
+          "width": 274,
+          "height": 78,
+          "text": "Capacity 容量通过Turnover 1.38%/周Cost 9.0 bps"
+        },
+        {
+          "width": 274,
+          "height": 57,
+          "text": "风格中性Style Corr 0.000"
+        },
+        {
+          "width": 274,
+          "height": 45,
+          "text": "B合格"
+        },
+        {
+          "width": 274,
+          "height": 45,
+          "text": "线上"
+        },
+        {
+          "width": 274,
+          "height": 37,
+          "text": "5月19日 下午02:56"
+        },
+        {
+          "width": 274,
+          "height": 72,
+          "text": "生成组合策略详情"
+        }
+      ]
+    },
+    "consoleErrors": [],
+    "failedRequests": []
+  }
+]

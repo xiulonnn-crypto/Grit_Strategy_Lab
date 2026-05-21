@@ -11,6 +11,7 @@ from grit_backtest_platform.factor_research import (
     VALUE_VOL_WNZT_F3_FACTOR_ID,
     VALUE_VOL_WNZT_F3_FACTOR_NAME,
     VALUE_VOL_WNZT_F3_PARENTS,
+    factor_display_name_projection_v4,
     validate_factor_expression,
 )
 from grit_backtest_platform.storage import dumps
@@ -364,6 +365,21 @@ def governance_ready_summary(
             for day in range(1, 21)
         ],
     }
+
+
+def governance_ready_summary_with_ic_series(
+    *,
+    rank_ic: float,
+    ir: float,
+    coverage: float,
+    values: list[float],
+) -> dict:
+    summary = governance_ready_summary(rank_ic=rank_ic, ir=ir, coverage=coverage)
+    summary["ic_series"] = [
+        {"date": f"2026-04-{index + 1:02d}", "rank_ic": value, "ic": value, "symbol_count": 420}
+        for index, value in enumerate(values)
+    ]
+    return summary
 
 
 def inverted_group_return_series() -> list[dict]:
@@ -1219,6 +1235,21 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
             "ir": 6.91,
             "coverage": 100.0,
             "composition_methods": [{"key": "residual_blend", "label": "Residual Blend"}],
+            "group_return_series": [
+                {"q1_q5_spread": 0.020},
+                {"q1_q5_spread": 0.012},
+                {"q1_q5_spread": -0.004},
+                {"q1_q5_spread": 0.018},
+                {"q1_q5_spread": 0.006},
+                {"q1_q5_spread": 0.010},
+                {"q1_q5_spread": -0.002},
+                {"q1_q5_spread": 0.014},
+                {"q1_q5_spread": 0.009},
+                {"q1_q5_spread": 0.016},
+                {"q1_q5_spread": 0.004},
+                {"q1_q5_spread": 0.011},
+            ],
+            "turnover_decay": {"half_life_days": 252, "annual_turnover_pct": 72.0, "impact_cost_bps": 9.0},
             "scoring_detail": {
                 "predictive_power": {"rank_ic": 0.0345, "rank_icir": 6.91},
                 "stability_turnover": {"turnover_rate_weekly": 18.0},
@@ -1268,10 +1299,10 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
 
     by_id = {item["id"]: item for item in payload["items"]}
     assert by_id[VALUE_VOL_WNZT_F3_FACTOR_ID]["name"] == VALUE_VOL_WNZT_F3_FACTOR_NAME
-    assert by_id["s_beta_market_252d_raw"]["name"] == "市场 Beta (252日) (原始)"
-    assert by_id["s_val_cfp_ltm_raw"]["name"] == "现金流收益率 (LTM) (原始)"
-    assert by_id["s_alpha_ffblend_resid_mkt_rank"]["name"] == "GSL-多因子全能动力"
-    assert by_id["s_val_cfp_ltm_raw"]["display_name_cn"] == "现金流收益率 (LTM) (原始)"
+    assert by_id["s_beta_market_252d_raw"]["name"] == "市场 Beta (252d) [Raw]"
+    assert by_id["s_val_cfp_ltm_raw"]["name"] == "现金流收益率 (LTM) [Raw]"
+    assert by_id["s_alpha_ffblend_resid_mkt_rank"]["name"] == "[综合] - FF3 风格复合基石 (等权) [Beta-Free]"
+    assert by_id["s_val_cfp_ltm_raw"]["display_name_cn"] == "现金流收益率 (LTM) [Raw]"
     assert by_id["s_val_cfp_ltm_raw"]["short_name_cn"] == "现金流收益率 (LTM)"
     assert by_id["s_val_cfp_ltm_raw"]["name_schema_version"] == "factor_display_name_v4"
     assert "Raw" in by_id["s_val_cfp_ltm_raw"]["governance_badges"]
@@ -1283,7 +1314,7 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
     assert payload["summary"]["to_be_verified_count"] >= 0
     assert by_id["s_size_mcap_cur_raw"]["tier_level"] == "F1"
     assert by_id["s_size_mcap_cur_raw"]["tier_label"] == "F1 原始"
-    assert by_id["s_price_adjclose_cur_raw"]["name"] == "交易所-复权收盘价 (原始)"
+    assert by_id["s_price_adjclose_cur_raw"]["name"] == "交易所 - 前复权收盘价 (原始)"
     assert by_id["s_price_adjclose_cur_raw"]["tier_level"] == "F1"
     assert by_id["s_val_ep_ltm_raw"]["tier_level"] == "F2"
     assert by_id["s_mom_12m1m_rank"]["tier_level"] == "F2"
@@ -1312,10 +1343,13 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
     assert by_id[VALUE_VOL_WNZT_F3_FACTOR_ID]["lineage_summary"]["has_lineage"] is True
     assert set(by_id[VALUE_VOL_WNZT_F3_FACTOR_ID]["lineage_summary"]["parent_ids"]) == set(VALUE_VOL_WNZT_F3_PARENTS)
     composite_view = by_id[VALUE_VOL_WNZT_F3_FACTOR_ID]["composite_view"]
-    assert composite_view["quality"]["sharpe"] is None
+    assert composite_view["quality"]["sharpe"] is not None
     assert composite_view["quality"]["max_drawdown_pct"] == 12.34
     assert composite_view["turnover_cost"]["turnover_rate_weekly"] == 18.0
+    assert composite_view["turnover_cost"]["cost_bps"] == 9.0
     assert composite_view["style_exposure"]["style_corr"] == 0.26
+    assert composite_view["source"]["sharpe_source"] == "return_spread_series"
+    assert composite_view["source"]["cost_source"] == "turnover_decay"
     assert composite_view["execution"]["portfolio_id"] is None
     assert composite_view["execution"]["portfolio_label"] == "未绑定"
     assert composite_view["blend_info"]["component_count"] == len(VALUE_VOL_WNZT_F3_PARENTS)
@@ -1357,7 +1391,7 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
 
     legacy_detail = assert_ok(client.get("/factors/value_ep_ltm"))
     assert legacy_detail["id"] == "s_val_ep_ltm_raw"
-    assert legacy_detail["name"] == "盈利收益率 (LTM) (原始)"
+    assert legacy_detail["name"] == "盈利收益率 (LTM) [Raw]"
     assert assert_ok(client.get("/factors/value_bp_latest"))["id"] == "s_val_bp_latest_raw"
     assert assert_ok(client.get("/factors/quality_roe_ltm"))["id"] == "s_qlty_roe_ltm_raw"
     detail = assert_ok(client.get("/factors/s_alpha_ffblend_resid_mkt_rank"))
@@ -1372,14 +1406,14 @@ def test_factor_library_seeds_common_factors_and_resolves_legacy_aliases(tmp_pat
         "s_size_cur_log",
     }
     assert {parent["label"] for parent in detail["lineage_tree"]["parents"]} >= {
-        "Rank-12-1月截面动量 (排序)",
-        "盈利收益率 (LTM) (原始)",
-        "净资产收益率 (LTM) (原始)",
-        "对数市值 (当前) (原始)",
+        "截面动量排名 (12-1m) [Rank]",
+        "盈利收益率 (LTM) [Raw]",
+        "净资产收益率 (LTM) [Raw]",
+        "对数市值 (当前) [Raw]",
     }
     momentum_detail = assert_ok(client.get("/factors/s_mom_12m1m_rank"))
     assert momentum_detail["lineage_tree"]["parents"][0]["id"] == "s_price_adjclose_cur_raw"
-    assert momentum_detail["lineage_tree"]["parents"][0]["label"] == "交易所-复权收盘价 (原始)"
+    assert momentum_detail["lineage_tree"]["parents"][0]["label"] == "交易所 - 前复权收盘价 (原始)"
     assert momentum_detail["lineage_tree"]["parents"][0]["tier_level"] == "F1"
 
 
@@ -1389,7 +1423,7 @@ def test_factor_display_name_v4_backfill_dry_run_and_apply_preserves_identity(tm
     assert_ok(client.get("/factors"))
     factor_id = "s_val_cfp_ltm_raw"
     stale_name = "Old Cashflow Name"
-    expected_name = "现金流收益率 (LTM) (原始)"
+    expected_name = "现金流收益率 (LTM) [Raw]"
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -1460,6 +1494,28 @@ def test_factor_display_name_v4_backfill_dry_run_and_apply_preserves_identity(tm
     assert audit["rename_reason"] == "display_name_v4_backfill"
 
 
+def test_factor_display_name_raw_suffix_requires_wnzt_evidence_before_refined_suffix():
+    raw_projection = factor_display_name_projection_v4(
+        factor_id="a_alpha_custom_cur_raw",
+        source="AUTO_MINED",
+        expression=VALUE_VOL_WNZT_F3_EXPRESSION,
+        tier_level="F3",
+    )
+    assert raw_projection["display_name_cn"] == "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Raw]"
+    assert raw_projection["name_dedupe_suffix"] == ""
+    assert raw_projection["name_audit"]["structured_components"]["governance_tag"] == "Raw"
+
+    refined_projection = factor_display_name_projection_v4(
+        factor_id="a_alpha_custom_cur_raw",
+        source="AUTO_MINED",
+        expression=VALUE_VOL_WNZT_F3_EXPRESSION,
+        tier_level="F3",
+        op_status={"completed": ["W", "N", "Z", "T"]},
+    )
+    assert refined_projection["display_name_cn"] == "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined]"
+    assert refined_projection["name_audit"]["structured_components"]["governance_tag"] == "Refined"
+
+
 def test_factor_display_name_v4_backfill_dedupes_online_f2_f3_names(tmp_path):
     client, db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
@@ -1474,13 +1530,13 @@ def test_factor_display_name_v4_backfill_dedupes_online_f2_f3_names(tmp_path):
                 direction, frequency, expression, tags_json, data_requirements_json,
                 institutional_note, created_by, created_at, updated_at
             )
-            VALUES (?, '风险调整现金流回报 (精炼)', 'US', 'SP500', 'AUTO_MINED',
+            VALUES (?, '[估值] - 风险调整现金流回报比 (LTM/252d) [Refined-Rank]', 'US', 'SP500', 'AUTO_MINED',
                     'VERIFIED', 'COMPLETED', 'HIGH_IS_BETTER', 'DAILY', ?, ?, ?, ?,
                     'unit_test', ?, ?)
             """,
             (
                 factor_id,
-                "s_val_cfp_ltm_raw / s_vol_downside_252d_rank",
+                VALUE_VOL_WNZT_F3_EXPRESSION,
                 dumps(["自动挖掘", "检疫通过", "L3"]),
                 dumps(["adj_close", "price_history", "returns", "market_cap", "operating_cash_flow"]),
                 "Legacy duplicate value-volatility factor.",
@@ -1518,13 +1574,13 @@ def test_factor_display_name_v4_backfill_dedupes_online_f2_f3_names(tmp_path):
     assert dry_run["naming_protocol_version"] == "factor_display_name_v4_structured"
     assert dry_run["dedupe_strategy"] == "parameter_first_then_sha8"
     assert factor_id in dry_items
-    assert VALUE_VOL_WNZT_F3_FACTOR_ID in dry_items
-    assert dry_items[factor_id]["new_display_name"] != dry_items[VALUE_VOL_WNZT_F3_FACTOR_ID]["new_display_name"]
-    assert dry_items[factor_id]["base_display_name_cn"].startswith("现金流回报 - ")
-    assert VALUE_VOL_WNZT_F3_FACTOR_ID in dry_items[factor_id]["name_collision_group"]
+    assert dry_items[factor_id]["base_display_name_cn"] == "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined]"
+    assert dry_items[factor_id]["new_display_name"] != VALUE_VOL_WNZT_F3_FACTOR_NAME
+    assert dry_items[factor_id]["base_display_name_cn"].startswith("[估值] - 下行风险调节-现金流回报比")
+    assert VALUE_VOL_WNZT_F3_FACTOR_ID not in dry_items[factor_id]["name_collision_group"]
 
     applied = assert_ok(client.post("/factors/display-name-v4-backfill", json={"dry_run": False}))
-    assert applied["summary"]["applied_count"] >= 2
+    assert applied["summary"]["applied_count"] >= 1
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -1549,10 +1605,10 @@ def test_factor_display_name_v4_backfill_dedupes_online_f2_f3_names(tmp_path):
         ).fetchone()
 
     assert names[factor_id] != names[VALUE_VOL_WNZT_F3_FACTOR_ID]
-    assert names[factor_id].startswith("现金流回报 - ")
+    assert names[factor_id].startswith("[估值] - 下行风险调节-现金流回报比")
     metadata = json.loads(audit["metadata_json"])
     assert metadata["dedupe_strategy"] == "parameter_first_then_sha8"
-    assert VALUE_VOL_WNZT_F3_FACTOR_ID in metadata["name_collision_group"]
+    assert VALUE_VOL_WNZT_F3_FACTOR_ID not in metadata["name_collision_group"]
 
 
 def test_factor_library_keeps_return_raw_signals_in_f2_even_with_legacy_l1_summary(tmp_path):
@@ -1565,6 +1621,7 @@ def test_factor_library_keeps_return_raw_signals_in_f2_even_with_legacy_l1_summa
         "a_mom_ret_3d_raw": "Return(Close, 3)",
         "a_mom_ret_5d_raw": "Return(Close, 5)",
         "a_mom_ret_63d_raw": "Return(Close, 63)",
+        "a_mom_winsor3ret_3d_raw": "Winsorize(Return(Close, 3), 3)",
     }
     with client.app.state.service.storage.connection() as conn:
         for factor_id, expression in legacy_return_factors.items():
@@ -1620,9 +1677,13 @@ def test_factor_library_keeps_return_raw_signals_in_f2_even_with_legacy_l1_summa
         assert factor["latest_diagnostic_summary"]["target_layer"] == "L1"
         assert factor["tier_level"] == "F2"
         assert factor["tier_projection"]["key"] == "F2"
+    assert by_id["a_mom_ret_3d_raw"]["name"] == "收益率 (3d) [Raw]"
+    assert by_id["a_mom_ret_3d_raw"]["name_dedupe_suffix"] == ""
+    assert by_id["a_mom_winsor3ret_3d_raw"]["name"] == "平滑收益率 (3d) [Raw]"
+    assert by_id["a_mom_winsor3ret_3d_raw"]["name_dedupe_suffix"] == ""
 
 
-def test_factor_library_repairs_legacy_cashflow_risk_adjusted_alpha_name_and_wnzt_status(tmp_path):
+def test_factor_library_repairs_legacy_cashflow_risk_adjusted_alpha_name_without_faking_wnzt_status(tmp_path):
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
     assert_ok(client.get("/factors"))
@@ -1685,22 +1746,26 @@ def test_factor_library_repairs_legacy_cashflow_risk_adjusted_alpha_name_and_wnz
     by_id = {item["id"]: item for item in payload["items"]}
     factor = by_id[factor_id]
 
-    assert factor["name"].startswith("现金流回报 - ")
-    assert "波动比" in factor["display_name_cn"]
-    assert "[Standard-Rank]" in factor["display_name_cn"]
-    assert factor["base_display_name_cn"].startswith("现金流回报 - ")
+    assert factor["name"] == "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Raw]"
+    assert "(LTM/252d)" in factor["display_name_cn"]
+    assert "[Raw]" in factor["display_name_cn"]
+    assert "[Refined]" not in factor["display_name_cn"]
+    assert "[Refined-Rank]" not in factor["display_name_cn"]
+    assert factor["base_display_name_cn"] == "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Raw]"
     assert factor["name_collision_key"]
-    assert VALUE_VOL_WNZT_F3_FACTOR_ID in factor["name_collision_group"]
-    assert factor["name_dedupe_suffix"] in {"参数/治理链", ""}
+    assert VALUE_VOL_WNZT_F3_FACTOR_ID not in factor["name_collision_group"]
+    suffix = factor["name_dedupe_suffix"]
+    assert suffix == ""
     assert factor["name_audit"]["dedupe_strategy"] == "parameter_first_then_sha8"
     assert factor["naming_protocol_version"] == "factor_display_name_v4_structured"
     assert factor["name_schema_version"] == "factor_display_name_v4"
-    assert factor["op_status"]["completed"] == ["W", "N", "Z", "T"]
-    assert factor["op_status"]["missing"] == []
+    assert factor["op_status"]["completed"] == []
+    assert factor["op_status"]["missing"] == ["W", "N", "Z", "T"]
     value_vol = by_id[VALUE_VOL_WNZT_F3_FACTOR_ID]
     assert value_vol["display_name_cn"] != factor["display_name_cn"]
-    assert factor_id in value_vol["name_collision_group"]
-    assert storage.fetch_one("SELECT name FROM factor_definitions WHERE id = ?", (factor_id,))["name"] == "风险调整现金流回报 (精炼)"
+    assert factor_id not in value_vol["name_collision_group"]
+    stored_name = storage.fetch_one("SELECT name FROM factor_definitions WHERE id = ?", (factor_id,))["name"]
+    assert stored_name.startswith("[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Raw]")
 
 
 def test_factor_library_lifecycle_queries_accept_phase1_aliases(tmp_path):
@@ -1955,6 +2020,8 @@ def test_factor_library_hot_path_does_not_call_heavy_pit_overview(tmp_path):
 
     assert payload["items"]
     assert payload["summary"]["pit_status"] in {"READY", "LIMITED_READY", "BLOCKED"}
+    assert payload["summary"]["factor_admission_status"] in {"READY", "REPAIR", "BLOCKED"}
+    assert isinstance(payload["summary"]["factor_admission_blocks"], bool)
 
 
 def test_factor_detail_hot_path_does_not_call_heavy_pit_overview(tmp_path):
@@ -1972,7 +2039,7 @@ def test_factor_detail_hot_path_does_not_call_heavy_pit_overview(tmp_path):
     payload = assert_ok(client.get("/factors/s_alpha_ffblend_resid_mkt_rank"))
 
     assert payload["id"] == "s_alpha_ffblend_resid_mkt_rank"
-    assert payload["name"] == "GSL-多因子全能动力"
+    assert payload["name"] == "[综合] - FF3 风格复合基石 (等权) [Beta-Free]"
     assert payload["diagnostic_status"] in {"READY_TO_DIAGNOSE", "SANDBOX_READY", "COMPLETED"}
 
 
@@ -1986,6 +2053,36 @@ def test_factor_library_does_not_fake_ic_sparkline_without_diagnostic(tmp_path):
     assert factor["latest_diagnostic_summary"] is None
     assert factor["ic_sparkline"] == []
     assert factor["diagnostic_gap_summary"]["rank_ic"].startswith("Rank IC:")
+
+
+def test_value_vol_wnzt_seed_factor_projects_complete_metric_slots(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+
+    payload = assert_ok(client.get("/factors"))
+    factor = next(item for item in payload["items"] if item["id"] == VALUE_VOL_WNZT_F3_FACTOR_ID)
+
+    run_count = client.app.state.service.storage.fetch_one(
+        "SELECT COUNT(*) AS count FROM factor_diagnostic_runs WHERE factor_id = ?",
+        (VALUE_VOL_WNZT_F3_FACTOR_ID,),
+    )
+    assert int(run_count["count"]) == 0
+    assert factor["latest_diagnostic_summary"]["data_lineage"]["kind"] == "SYSTEM_SEED_AUDIT_PROJECTION"
+    assert factor["latest_diagnostic_summary"]["metric_projection_source"] == "system_seed_audit_projection"
+    assert factor["quality_view"]["rank_ic"] == 0.1
+    assert factor["quality_view"]["ir"] == 0.11
+    assert factor["quality_view"]["decay_days"] == 252
+    composite = factor["composite_view"]
+    assert composite["quality"]["sharpe"] == 0.553
+    assert composite["quality"]["max_drawdown_pct"] == 12.34
+    assert composite["turnover_cost"]["turnover_rate_weekly"] == 18.0
+    assert composite["turnover_cost"]["cost_bps"] == 9.0
+    assert composite["style_exposure"]["style_corr"] == 0.26
+    assert composite["source"]["metric_projection_source"] == "system_seed_audit_projection"
+    assert composite["source"]["sharpe_source"] == "system_seed_audit_projection"
+    assert composite["source"]["cost_source"] == "system_seed_audit_projection"
+    assert factor["op_status"]["completed"] == ["W", "N", "Z", "T"]
+    assert factor["op_status"]["missing"] == []
 
 
 def test_factor_governance_projection_maps_diagnostic_states_to_management_rules(tmp_path):
@@ -2272,18 +2369,86 @@ def test_factor_governance_overview_promotes_live_like_momentum_tasks_without_hi
     }
 
     assert unsupported_kinds == set()
-    deprecate_action = next(
-        item for item in actions if item["kind"] == "DEPRECATE" and deprecate_id in item["factor_ids"]
+    assert all(
+        not (item["kind"] == "DEPRECATE" and deprecate_id in item["factor_ids"])
+        for item in actions
     )
-    prune_action = next(
-        item for item in actions if item["kind"] == "PRUNE" and prune_id in item["factor_ids"]
+    assert all(
+        not (item["kind"] == "PRUNE" and prune_id in item["factor_ids"])
+        for item in actions
     )
-    assert deprecate_action["command"] == "DEPRECATE"
-    assert deprecate_action["offline_detail"]["grade"] == "D"
-    assert deprecate_action["offline_detail"]["noise_like"] is True
-    assert prune_action["command"] == "PRUNE"
-    assert prune_action["keep_factor_id"] == keep_id
-    assert prune_action["offline_detail"]["correlation"] == 0.94
+
+
+def test_factor_governance_overview_reuses_single_factor_read_model(tmp_path, monkeypatch):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    factor_service = client.app.state.service._factor_research_service()
+    original_list_factors = factor_service.list_factors
+    calls: list[dict[str, object]] = []
+
+    def counting_list_factors(*args, **kwargs):
+        calls.append(dict(kwargs))
+        return original_list_factors(*args, **kwargs)
+
+    monkeypatch.setattr(factor_service, "list_factors", counting_list_factors)
+
+    overview = assert_ok(client.get("/factor-governance/overview"))
+
+    assert "actions" in overview
+    assert len(calls) == 1
+    assert calls[0].get("lifecycle") == "all"
+    assert calls[0].get("include_governance_queue") is False
+
+
+def test_factor_governance_prune_requires_measured_rankic_correlation(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    keep_id = "m_mom_longra_126d_rank"
+    prune_id = "m_mom_longdra_126d_rank"
+    for expected_id, name, expression, metric in [
+        (keep_id, "risk adjusted momentum", "Rank(s_mom_6m_rank / s_vol_126d_raw)", "longra"),
+        (prune_id, "downside risk adjusted momentum", "Rank(s_mom_6m_rank / s_vol_downside_126d_raw)", "longdra"),
+    ]:
+        created = assert_ok(
+            client.post(
+                "/factors",
+                json={
+                    "name": name,
+                    "market": "US",
+                    "universe": "SP500",
+                    "expression": expression,
+                    "frequency": "DAILY",
+                    "direction": "HIGH_IS_BETTER",
+                    "descriptor": manual_descriptor(metric=metric, window="126d", operator="rank"),
+                    "tags": ["manual"],
+                },
+            )
+        )
+        assert created["id"] == expected_id
+    keep_values = [0.011, 0.013, 0.015, 0.018, 0.017, 0.021, 0.024, 0.026, 0.025, 0.029]
+    prune_values = [value * 0.93 + 0.001 for value in keep_values]
+    seed_factor_diagnostic_summary(
+        client,
+        keep_id,
+        governance_ready_summary_with_ic_series(rank_ic=0.0308, ir=1.3205, coverage=99.13, values=keep_values),
+        run_id="fdiag_measured_keep",
+    )
+    seed_factor_diagnostic_summary(
+        client,
+        prune_id,
+        governance_ready_summary_with_ic_series(rank_ic=0.0294, ir=1.2591, coverage=99.13, values=prune_values),
+        run_id="fdiag_measured_prune",
+    )
+
+    overview = assert_ok(client.get("/factor-governance/overview"))
+    action = next(
+        item for item in overview["actions"] if item["kind"] == "PRUNE" and prune_id in item["factor_ids"]
+    )
+    assert action["command"] == "PRUNE"
+    assert action["keep_factor_id"] == keep_id
+    assert action["offline_detail"]["correlation"] > 0.9
+    assert action["offline_detail"]["evidence_source"] == "MEASURED_DIAGNOSTIC_IC_SERIES"
+    assert action["offline_detail"]["sample_count"] == len(keep_values)
 
 
 def test_factor_governance_optimizes_inverted_downside_factor_and_publishes_reverse(tmp_path):
@@ -2319,8 +2484,8 @@ def test_factor_governance_optimizes_inverted_downside_factor_and_publishes_reve
     assert optimize_action["command"] == "PUBLISH_OPTIMIZED_FACTOR"
     assert optimized["id"] == "s_alpha_vol_downsiderev_std_rk"
     assert optimized["publish_naming_rule"] == "factor_display_name_v4"
-    assert optimized["name"] == "反向下行风险 Alpha (精炼)"
-    assert optimized["display_name_cn"] == "反向下行风险 Alpha (精炼)"
+    assert optimized["name"] == "[风险] - 反向下行风险 Alpha (252d) [Refined-Rank]"
+    assert optimized["display_name_cn"] == "[风险] - 反向下行风险 Alpha (252d) [Refined-Rank]"
     assert optimized["name_schema_version"] == "factor_display_name_v4"
     assert optimized["direction"] == "HIGH_IS_BETTER"
     assert optimized["grade"] in {"A", "B"}
@@ -2349,7 +2514,7 @@ def test_factor_governance_optimizes_inverted_downside_factor_and_publishes_reve
     assert executed["command"] == "PUBLISH_OPTIMIZED_FACTOR"
     assert executed["created_factor_id"] == "s_alpha_vol_downsiderev_std_rk"
     created = assert_ok(client.get("/factors/s_alpha_vol_downsiderev_std_rk"))
-    assert created["name"] == "反向下行风险 Alpha (精炼)"
+    assert created["name"] == "[风险] - 反向下行风险 Alpha (252d) [Refined-Rank]"
     assert created["source"] == "MANUAL"
     assert created["lifecycle_status"] == "VERIFIED"
     assert created["direction"] == "HIGH_IS_BETTER"
@@ -2523,7 +2688,7 @@ def test_size_neutralized_factor_gets_preview_and_persisted_sandbox_diagnostics(
     assert detail["latest_diagnostic_summary"]["factor_id"] == created["id"]
 
 
-def test_factor_governance_overview_deprecates_preview_grade_d_seed_factors(tmp_path, monkeypatch):
+def test_factor_governance_overview_does_not_deprecate_preview_grade_d_without_persistent_inversion(tmp_path, monkeypatch):
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
     target_ids = {"s_liq_amihud_20d_rank", "s_mom_shortrev_1m_rank"}
@@ -2585,6 +2750,11 @@ def test_factor_governance_overview_deprecates_preview_grade_d_seed_factors(tmp_
         }
 
     monkeypatch.setattr(factor_service, "preview_diagnostics_batch", preview_stub)
+    monkeypatch.setattr(
+        factor_service,
+        "_preview_diagnostics_batch_for_factors",
+        lambda _factors, request: preview_stub(request),
+    )
 
     factors = assert_ok(client.get("/factors?lifecycle=online"))["items"]
     by_id = {item["id"]: item for item in factors}
@@ -2608,38 +2778,12 @@ def test_factor_governance_overview_deprecates_preview_grade_d_seed_factors(tmp_
     assert all(item["latest_diagnostic_summary"]["status"] == "PREVIEW" for item in preview["items"])
 
     overview = assert_ok(client.get("/factor-governance/overview"))
-    deprecate_actions = {
-        action["factor_ids"][0]: action
+    deprecate_actions = [
+        action
         for action in overview["actions"]
         if action["kind"] == "DEPRECATE" and action["factor_ids"][0] in target_ids
-    }
-    assert set(deprecate_actions) == target_ids
-    for factor_id, action in deprecate_actions.items():
-        preview_summary = preview_by_id[factor_id]["latest_diagnostic_summary"]
-        assert action["offline_detail"]["preview_only"] is True
-        assert action["offline_detail"]["grade"] == "D"
-        assert action["offline_detail"]["rank_ic"] == preview_summary["rank_ic"]
-        assert action["offline_detail"]["ir"] == preview_summary["ir"]
-
-    action = deprecate_actions["s_mom_shortrev_1m_rank"]
-    executed = assert_ok(
-        client.post(
-            f"/factor-governance/actions/{action['id']}/execute",
-            json={
-                "confirm": True,
-                "command": "DEPRECATE",
-                "factor_ids": ["s_mom_shortrev_1m_rank"],
-                "reason": "强制下线：只读预览 Grade D 噪声信号。",
-                "detail": action.get("offline_detail", {}),
-            },
-        )
-    )
-    assert executed["items"][0]["lifecycle_status"] == "DEPRECATED"
-    offline_by_id = {
-        item["id"]: item
-        for item in assert_ok(client.get("/factors?lifecycle=offline"))["items"]
-    }
-    assert offline_by_id["s_mom_shortrev_1m_rank"]["offline_detail"]["evidence"]["preview_only"] is True
+    ]
+    assert deprecate_actions == []
 
 
 def test_factor_governance_prune_uses_preview_augmented_cluster_peers(tmp_path, monkeypatch):
@@ -2653,6 +2797,12 @@ def test_factor_governance_prune_uses_preview_augmented_cluster_peers(tmp_path, 
         keep_id: {"rank_ic": 0.028, "ir": 1.1, "coverage": 99.0},
         "s_mom_shortrev_1m_rank": {"rank_ic": 0.021, "ir": 0.42, "coverage": 97.0},
         "s_mom_12m1m_rank": {"rank_ic": 0.019, "ir": 0.35, "coverage": 96.0},
+    }
+    keep_series = [0.011, 0.012, 0.014, 0.017, 0.019, 0.021, 0.022, 0.024, 0.027, 0.028, 0.031]
+    series_by_id = {
+        keep_id: keep_series,
+        "s_mom_shortrev_1m_rank": [value * 0.94 + 0.001 for value in keep_series],
+        "s_mom_12m1m_rank": [value * 0.92 + 0.0015 for value in keep_series],
     }
 
     def preview_stub(request):
@@ -2681,8 +2831,8 @@ def test_factor_governance_prune_uses_preview_augmented_cluster_peers(tmp_path, 
                             {"group": "Q5", "mean_return": 0.01, "sample_count": 50},
                         ],
                         "ic_series": [
-                            {"date": f"2026-04-{day:02d}", "rank_ic": metrics["rank_ic"], "ic": metrics["rank_ic"]}
-                            for day in range(1, 12)
+                            {"date": f"2026-04-{index + 1:02d}", "rank_ic": value, "ic": value}
+                            for index, value in enumerate(series_by_id[factor_id])
                         ],
                         "compliance_trail": {"diagnosed_at": "2026-05-08T09:39:17Z"},
                     },
@@ -2727,6 +2877,11 @@ def test_factor_governance_prune_uses_preview_augmented_cluster_peers(tmp_path, 
         return original_cluster(factor_id)
 
     monkeypatch.setattr(factor_service, "preview_diagnostics_batch", preview_stub)
+    monkeypatch.setattr(
+        factor_service,
+        "_preview_diagnostics_batch_for_factors",
+        lambda _factors, request: preview_stub(request),
+    )
     monkeypatch.setattr(factor_service, "_correlation_cluster", cluster_stub)
 
     online = assert_ok(client.get("/factors?lifecycle=online"))["items"]
@@ -2773,16 +2928,18 @@ def test_factor_governance_prune_matches_factor_library_heatmap_high_pairs(tmp_p
     assert_ok(client.get("/factors"))
     keep_id = "s_vol_downside_252d_rank"
     prune_id = "s_vol_mdd_252d_rank"
+    keep_values = [0.012, 0.015, 0.014, 0.018, 0.021, 0.024, 0.026, 0.029, 0.031, 0.034]
+    prune_values = [value * 0.91 + 0.002 for value in keep_values]
     seed_factor_diagnostic_summary(
         client,
         keep_id,
-        governance_ready_summary(rank_ic=0.0955, ir=2.7573, coverage=98.99),
+        governance_ready_summary_with_ic_series(rank_ic=0.0955, ir=2.7573, coverage=98.99, values=keep_values),
         run_id=f"fdiag_{keep_id}_mvp",
     )
     seed_factor_diagnostic_summary(
         client,
         prune_id,
-        governance_ready_summary(rank_ic=0.075, ir=1.0997, coverage=98.34),
+        governance_ready_summary_with_ic_series(rank_ic=0.075, ir=1.0997, coverage=98.34, values=prune_values),
         run_id=f"fdiag_{prune_id}_weak",
     )
 
@@ -2799,10 +2956,11 @@ def test_factor_governance_prune_matches_factor_library_heatmap_high_pairs(tmp_p
     assert action is not None
     assert action["keep_factor_id"] == keep_id
     assert action["offline_detail"]["correlation"] > 0.90
+    assert action["offline_detail"]["evidence_source"] == "MEASURED_DIAGNOSTIC_IC_SERIES"
     assert action["offline_detail"]["comparison"]["mvp"]["factor_id"] == keep_id
 
 
-def test_factor_governance_prune_uses_standard_style_categories(tmp_path, monkeypatch):
+def test_factor_governance_prune_uses_standard_style_categories(tmp_path):
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
     factors = assert_ok(client.get("/factors"))["items"]
@@ -2824,28 +2982,20 @@ def test_factor_governance_prune_uses_standard_style_categories(tmp_path, monkey
 
     keep_id = "s_vol_252d_rank"
     prune_id = "s_beta_resid_252d_z"
+    keep_values = [0.011, 0.014, 0.016, 0.017, 0.02, 0.022, 0.023, 0.027, 0.028, 0.03]
+    prune_values = [value * 0.93 + 0.0008 for value in keep_values]
     seed_factor_diagnostic_summary(
         client,
         keep_id,
-        governance_ready_summary(rank_ic=0.075, ir=2.2, coverage=99.0),
+        governance_ready_summary_with_ic_series(rank_ic=0.075, ir=2.2, coverage=99.0, values=keep_values),
         run_id=f"fdiag_{keep_id}_style_mvp",
     )
     seed_factor_diagnostic_summary(
         client,
         prune_id,
-        governance_ready_summary(rank_ic=0.024, ir=0.42, coverage=91.0),
+        governance_ready_summary_with_ic_series(rank_ic=0.024, ir=0.42, coverage=91.0, values=prune_values),
         run_id=f"fdiag_{prune_id}_style_prune",
     )
-
-    original_pair_correlation = factor_service._factor_pair_correlation
-
-    def style_pair_correlation(left, right):
-        pair = {str(left.get("id") or ""), str(right.get("id") or "")}
-        if pair == {keep_id, prune_id}:
-            return 0.94
-        return original_pair_correlation(left, right)
-
-    monkeypatch.setattr(factor_service, "_factor_pair_correlation", style_pair_correlation)
 
     overview = assert_ok(client.get("/factor-governance/overview"))
     action = next(
@@ -2871,7 +3021,10 @@ def test_factor_governance_deprecate_soft_offlines_and_blocks_model_use(tmp_path
     seed_factor_diagnostic_summary(
         client,
         factor_id,
-        governance_ready_summary(rank_ic=0.002, ir=0.12, coverage=94.0, inverted=True, low_efficiency=True),
+        {
+            **governance_ready_summary(rank_ic=0.002, ir=0.12, coverage=94.0, inverted=True, low_efficiency=True),
+            "group_return_series": inverted_group_return_series(),
+        },
     )
 
     overview = assert_ok(client.get("/factor-governance/overview"))
@@ -2896,11 +3049,13 @@ def test_factor_governance_deprecate_soft_offlines_and_blocks_model_use(tmp_path
                 "factor_ids": [factor_id],
                 "reason": "强制下线：Grade D、低效 20 个交易日且分组收益倒挂。",
                 "detail": action.get("offline_detail", {}),
+                "include_governance_overview": False,
             },
         )
     )
     assert executed["command"] == "DEPRECATE"
     assert executed["affected_factor_ids"] == [factor_id]
+    assert "governance_overview" not in executed
     assert executed["items"][0]["lifecycle_status"] == "DEPRECATED"
     assert executed["items"][0]["offline_command"] == "DEPRECATE"
     assert executed["items"][0]["offline_at"]
@@ -3134,16 +3289,18 @@ def test_factor_governance_prune_keeps_cluster_mvp_and_soft_offlines_redundant_f
     prune_id = "s_vol_mdd_252d_rank"
     keep_id = "s_vol_downside_252d_rank"
     assert {prune_id, keep_id}.issubset({factor["id"] for factor in factors})
+    keep_values = [0.012, 0.013, 0.016, 0.017, 0.019, 0.023, 0.025, 0.027, 0.03, 0.032]
+    prune_values = [value * 0.92 + 0.001 for value in keep_values]
     seed_factor_diagnostic_summary(
         client,
         prune_id,
-        governance_ready_summary(rank_ic=0.018, ir=0.31, coverage=82.0),
+        governance_ready_summary_with_ic_series(rank_ic=0.018, ir=0.31, coverage=82.0, values=prune_values),
         run_id=f"fdiag_{prune_id}_weak",
     )
     seed_factor_diagnostic_summary(
         client,
         keep_id,
-        governance_ready_summary(rank_ic=0.095, ir=5.12, coverage=99.0),
+        governance_ready_summary_with_ic_series(rank_ic=0.095, ir=5.12, coverage=99.0, values=keep_values),
         run_id=f"fdiag_{keep_id}_mvp",
     )
 
@@ -3228,16 +3385,28 @@ def test_factor_governance_prune_execute_is_idempotent_for_stale_confirmation(tm
             "UPDATE factor_definitions SET lifecycle_status = 'VERIFIED' WHERE id IN (?, ?)",
             ("m_liq_pvdiv_10d_raw", "m_liq_vol_conc_21d_raw"),
         )
+    keep_values = [0.01, 0.012, 0.014, 0.017, 0.018, 0.021, 0.023, 0.026, 0.027, 0.029]
+    prune_values = [value * 0.94 + 0.0007 for value in keep_values]
     seed_factor_diagnostic_summary(
         client,
         "m_liq_pvdiv_10d_raw",
-        governance_ready_summary(rank_ic=0.021, ir=0.8, coverage=98.99),
+        governance_ready_summary_with_ic_series(
+            rank_ic=0.021,
+            ir=0.8,
+            coverage=98.99,
+            values=prune_values,
+        ),
         run_id="fdiag_m_liq_pvdiv_10d_raw_weak",
     )
     seed_factor_diagnostic_summary(
         client,
         "m_liq_vol_conc_21d_raw",
-        governance_ready_summary(rank_ic=0.0253, ir=1.0171, coverage=98.99),
+        governance_ready_summary_with_ic_series(
+            rank_ic=0.0253,
+            ir=1.0171,
+            coverage=98.99,
+            values=keep_values,
+        ),
         run_id="fdiag_m_liq_vol_conc_21d_raw_mvp",
     )
 
@@ -3261,6 +3430,332 @@ def test_factor_governance_prune_execute_is_idempotent_for_stale_confirmation(tm
     assert replayed["affected_factor_ids"] == ["m_liq_pvdiv_10d_raw"]
     assert replayed["items"][0]["lifecycle_status"] == "PRUNED"
     assert all(item["id"] != action["id"] for item in replayed["governance_overview"]["actions"])
+
+
+def test_factor_governance_prune_recovery_restores_heuristic_only_factor(tmp_path):
+    client, db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    factor_id = "s_vol_mdd_252d_rank"
+    keep_id = "s_vol_downside_252d_rank"
+    assert_ok(client.get("/factors"))
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE factor_definitions
+            SET lifecycle_status = 'PRUNED',
+                offline_reason = ?,
+                offline_at = '2026-05-20T00:00:00Z',
+                offline_command = 'PRUNE',
+                offline_detail_json = ?,
+                updated_at = '2026-05-20T00:00:00Z'
+            WHERE id = ?
+            """,
+            (
+                "冗余裁剪：历史启发式相关性",
+                dumps(
+                    {
+                        "keep_factor_id": keep_id,
+                        "correlation": 0.94,
+                        "evidence_source": "FACTOR_LIBRARY_HEATMAP_PROXY",
+                    }
+                ),
+                factor_id,
+            ),
+        )
+
+    preview = assert_ok(client.get("/factor-governance/prune-recovery/preview"))
+    item = next(entry for entry in preview["items"] if entry["factor_id"] == factor_id)
+    assert item["recoverable"] is True
+    assert item["decision"] == "RESTORE"
+    assert item["offline_correlation"] == 0.94
+    assert item["measured_correlation"] == 0.0
+
+    applied = assert_ok(
+        client.post(
+            "/factor-governance/prune-recovery/apply",
+            json={"confirm": True, "factor_ids": [factor_id], "reason": "unit-test recovery"},
+        )
+    )
+
+    assert applied["command"] == "PRUNE_RECOVERY"
+    assert applied["recovered_factor_ids"] == [factor_id]
+    recovered = assert_ok(client.get(f"/factors/{factor_id}"))
+    assert recovered["lifecycle_status"] == "VERIFIED"
+    assert recovered["offline_reason"] is None
+    assert recovered["offline_command"] is None
+    assert recovered["offline_detail"] == {}
+    with sqlite3.connect(db_path) as conn:
+        event = conn.execute(
+            """
+            SELECT event_type, before_json, after_json
+            FROM factor_governance_events
+            WHERE factor_id = ? AND event_type = 'PRUNE_RECOVERY'
+            """,
+            (factor_id,),
+        ).fetchone()
+    assert event is not None
+    assert json.loads(event[1])["recovery_evidence"]["decision"] == "RESTORE"
+    assert json.loads(event[2])["reason"] == "unit-test recovery"
+
+
+def test_factor_governance_prune_recovery_keeps_factor_pruned_with_real_evidence(tmp_path):
+    client, db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    factor_id = "s_beta_resid_252d_z"
+    keep_id = "s_vol_252d_rank"
+    assert_ok(client.get("/factors"))
+    now = "2026-05-20T00:00:00Z"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE factor_definitions
+            SET lifecycle_status = 'PRUNED',
+                offline_reason = ?,
+                offline_at = ?,
+                offline_command = 'PRUNE',
+                offline_detail_json = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                "冗余裁剪：检疫实测相关性",
+                now,
+                dumps({"keep_factor_id": keep_id, "correlation": 0.94}),
+                now,
+                factor_id,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO factor_quarantine_candidates (
+                id,
+                mining_candidate_id,
+                source_mining_job_id,
+                expression,
+                status,
+                publish_status,
+                gate_summary_json,
+                cluster_id,
+                candidate_metrics_json,
+                failure_samples_json,
+                pit_evidence_json,
+                publish_eligibility_json,
+                target_factor_id,
+                created_at,
+                updated_at,
+                published_at,
+                rejected_reason
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "fq_redundancy_real_evidence",
+                "mine_redundancy_real_evidence",
+                "mine_redundancy_real",
+                "ZScore(Residual(Return(Close, 252), by=\"s_vol_252d_rank\"))",
+                "PASSED",
+                "ELIGIBLE",
+                dumps({"redundancy_pruning": "FAILED"}),
+                "cluster_redundancy_real",
+                dumps({"matrix_max_correlation": 0.93, "rank_ic": 0.041}),
+                dumps([]),
+                dumps({"status": "FULL_READY"}),
+                dumps({"status": "ELIGIBLE"}),
+                factor_id,
+                now,
+                now,
+                now,
+                None,
+            ),
+        )
+
+    preview = assert_ok(client.get("/factor-governance/prune-recovery/preview"))
+    item = next(entry for entry in preview["items"] if entry["factor_id"] == factor_id)
+    assert item["recoverable"] is False
+    assert item["decision"] == "KEEP_PRUNED"
+    assert item["measured_correlation"] == 0.93
+    assert item["evidence"]["quarantine"]["evidence_source"] == "QUARANTINE_GATE"
+
+    applied = assert_ok(
+        client.post(
+            "/factor-governance/prune-recovery/apply",
+            json={"confirm": True, "factor_ids": [factor_id], "reason": "unit-test non recovery"},
+        )
+    )
+    assert applied["recovered_factor_ids"] == []
+    assert applied["recovered_count"] == 0
+    still_pruned = assert_ok(client.get(f"/factors/{factor_id}"))
+    assert still_pruned["lifecycle_status"] == "PRUNED"
+
+
+def test_factor_governance_redundancy_restore_queue_restores_only_best_candidate(tmp_path):
+    client, db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    source_id = "s_vol_downside_252d_rank"
+    weaker_id = "s_vol_mdd_252d_rank"
+    best_id = "s_vol_252d_rank"
+    assert_ok(client.get("/factors?lifecycle=all"))
+    seed_factor_diagnostic_summary(
+        client,
+        source_id,
+        governance_ready_summary(rank_ic=0.006, ir=0.21, coverage=92.0),
+        run_id="fdiag_restore_source_weak",
+    )
+    seed_factor_diagnostic_summary(
+        client,
+        weaker_id,
+        governance_ready_summary(rank_ic=0.024, ir=1.1, coverage=97.0),
+        run_id="fdiag_restore_weaker",
+    )
+    seed_factor_diagnostic_summary(
+        client,
+        best_id,
+        governance_ready_summary(rank_ic=0.041, ir=2.5, coverage=99.0),
+        run_id="fdiag_restore_best",
+    )
+    with sqlite3.connect(db_path) as conn:
+        for factor_id in (weaker_id, best_id):
+            conn.execute(
+                """
+                UPDATE factor_definitions
+                SET lifecycle_status = 'PRUNED',
+                    offline_reason = 'historical redundancy prune',
+                    offline_at = '2026-05-20T00:00:00Z',
+                    offline_command = 'PRUNE',
+                    offline_detail_json = ?,
+                    updated_at = '2026-05-20T00:00:00Z'
+                WHERE id = ?
+                """,
+                (
+                    dumps(
+                        {
+                            "keep_factor_id": source_id,
+                            "correlation": 0.94,
+                            "evidence_source": "FACTOR_LIBRARY_HEATMAP_PROXY",
+                        }
+                    ),
+                    factor_id,
+                ),
+            )
+
+    overview = assert_ok(client.get("/factor-governance/overview"))
+    restore_actions = [
+        item for item in overview["actions"]
+        if item.get("kind") == "REDUNDANCY_RESTORE"
+    ]
+    assert len(restore_actions) == 1
+    action = restore_actions[0]
+    assert action["command"] == "RESTORE_PRUNED"
+    assert action["restore_factor_id"] == best_id
+    assert action["affected_factor_ids"] == [best_id]
+    assert action["criteria"]["selection"] == "highest_factor_level_then_lifecycle"
+
+    executed = assert_ok(
+        client.post(
+            f"/factor-governance/actions/{action['id']}/execute",
+            json={
+                "confirm": True,
+                "command": "RESTORE_PRUNED",
+                "factor_ids": action["affected_factor_ids"],
+                "keep_factor_id": action["keep_factor_id"],
+                "reason": "unit-test restore best only",
+                "detail": action.get("offline_detail", {}),
+            },
+        )
+    )
+
+    assert executed["command"] == "RESTORE_PRUNED"
+    assert executed["affected_factor_ids"] == [best_id]
+    restored = assert_ok(client.get(f"/factors/{best_id}"))
+    assert restored["lifecycle_status"] == "VERIFIED"
+    assert restored["offline_reason"] is None
+    assert restored["offline_command"] is None
+    still_pruned = assert_ok(client.get(f"/factors/{weaker_id}"))
+    assert still_pruned["lifecycle_status"] == "PRUNED"
+    with sqlite3.connect(db_path) as conn:
+        event = conn.execute(
+            """
+            SELECT event_type, after_json
+            FROM factor_governance_events
+            WHERE factor_id = ? AND event_type = 'REDUNDANCY_RESTORE'
+            """,
+            (best_id,),
+        ).fetchone()
+    assert event is not None
+    assert json.loads(event[1])["reason"] == "unit-test restore best only"
+
+
+def test_factor_diagnostics_returns_redundancy_restore_followup(tmp_path):
+    client, db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    pit = assert_ok(client.get("/pit-data"))
+    source_id = "s_vol_downside_252d_rank"
+    target_id = "s_vol_252d_rank"
+    assert_ok(client.get("/factors?lifecycle=all"))
+    seed_factor_diagnostic_summary(
+        client,
+        target_id,
+        governance_ready_summary(rank_ic=0.041, ir=2.5, coverage=99.0),
+        run_id="fdiag_restore_followup_target",
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE factor_definitions
+            SET lifecycle_status = 'PRUNED',
+                offline_reason = 'historical redundancy prune',
+                offline_at = '2026-05-20T00:00:00Z',
+                offline_command = 'PRUNE',
+                offline_detail_json = ?,
+                updated_at = '2026-05-20T00:00:00Z'
+            WHERE id = ?
+            """,
+            (
+                dumps({"keep_factor_id": source_id, "correlation": 0.94}),
+                target_id,
+            ),
+        )
+    factor_service = client.app.state.service._factor_research_service()
+    original_compute = factor_service._compute_factor_diagnostic_summary
+
+    def fake_compute_summary(**kwargs):
+        run_id = kwargs["run_id"]
+        summary = governance_ready_summary(rank_ic=0.006, ir=0.21, coverage=92.0)
+        return {
+            **summary,
+            "run_id": run_id,
+            "factor_id": source_id,
+            "dataset_snapshot_id": pit["dataset_snapshot_id"],
+            "universe_snapshot_id": pit["universe_snapshot_id"],
+            "artifact_refs": {},
+            "promotion_eligible": True,
+        }
+
+    factor_service._compute_factor_diagnostic_summary = fake_compute_summary
+    try:
+        diagnostic = assert_ok(
+            client.post(
+                f"/factors/{source_id}/diagnostics",
+                json={
+                    "start_date": pit["diagnostic_windows"]["verified"]["start_date"],
+                    "end_date": pit["as_of_date"],
+                    "dataset_snapshot_id": pit["dataset_snapshot_id"],
+                    "universe_snapshot_id": pit["universe_snapshot_id"],
+                    "return_window_days": 21,
+                    "group_count": 5,
+                    "diagnostic_mode": "VERIFIED",
+                },
+            )
+        )
+    finally:
+        factor_service._compute_factor_diagnostic_summary = original_compute
+
+    followups = diagnostic.get("governance_followups") or []
+    assert any(
+        item.get("command") == "RESTORE_PRUNED"
+        and item.get("restore_factor_id") == target_id
+        for item in followups
+    )
 
 
 def test_factor_batch_preview_is_read_only_and_returns_summary(tmp_path):
@@ -3385,6 +3880,142 @@ def test_factor_formal_diagnostics_hot_cache_still_writes_new_runs(tmp_path, mon
         assert stored_request["diagnostic_mode"] == "VERIFIED"
         assert stored_request["dataset_snapshot_id"] == pit["dataset_snapshot_id"]
         assert stored_request["universe_snapshot_id"] == pit["universe_snapshot_id"]
+
+
+def test_published_quarantine_factor_diagnostic_reuses_summary_when_replay_sample_is_short(tmp_path, monkeypatch):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    pit = assert_ok(client.get("/pit-data"))
+    assert_ok(client.get("/factors"))
+    storage = client.app.state.service.storage
+    factor_id = "a_alpha_custom_cur_raw"
+    source_run_id = f"fdiag_{factor_id}_legacy_publish"
+    now = "2026-05-19T10:30:00Z"
+    with storage.connection() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO factor_definitions (
+                id, name, market, universe, source, lifecycle_status, diagnostic_status,
+                direction, frequency, expression, tags_json, data_requirements_json,
+                institutional_note, created_by, created_at, updated_at
+            )
+            VALUES (?, 'Legacy value volatility ratio', 'US', 'SP500', 'AUTO_MINED',
+                    'VERIFIED', 'COMPLETED', 'HIGH_IS_BETTER', 'DAILY', ?, ?, ?, ?,
+                    'unit_test', ?, ?)
+            """,
+            (
+                factor_id,
+                "s_val_cfp_ltm_raw / s_vol_downside_252d_rank",
+                dumps(["auto_mined", "quarantine_publish", "L3"]),
+                dumps(["adj_close", "price_history", "returns", "market_cap", "operating_cash_flow"]),
+                "Legacy auto-mined value-volatility factor.",
+                now,
+                now,
+            ),
+        )
+    seed_factor_diagnostic_summary(
+        client,
+        factor_id,
+        {
+            **governance_ready_summary(rank_ic=0.3455, ir=6.91, coverage=100.0),
+            "target_layer": "L3",
+            "promotion_eligible": True,
+            "group_return_series": [
+                {
+                    "date": f"2026-0{month}-20",
+                    "groups": [
+                        {"group": "Q1", "mean_return": 0.024 + month * 0.001, "sample_count": 120},
+                        {"group": "Q5", "mean_return": -0.019 - month * 0.001, "sample_count": 120},
+                    ],
+                    "q1_q5_spread": 0.043 + month * 0.002,
+                }
+                for month in range(1, 7)
+            ],
+            "scoring_detail": {
+                "risk_orthogonality": {
+                    "incremental_ir": 0.5527,
+                    "max_drawdown": 45.53,
+                    "style_corr": 0.26,
+                },
+                "stability_turnover": {"turnover_rate_weekly": 18.0},
+                "data_health": {"coverage": 100.0},
+            },
+            "data_lineage": {
+                "kind": "QUARANTINE_PUBLISH_SUMMARY",
+                "method": "factor_quarantine_run_metrics",
+            },
+        },
+        run_id=source_run_id,
+    )
+    factor_service = client.app.state.service._factor_research_service()
+
+    def fake_data_cache(**_kwargs):
+        return {
+            "symbols": ["AAPL", "MSFT", "NVDA", "AMZN"],
+            "bars_by_symbol": {},
+            "fundamental_by_symbol": {},
+            "prepared_frame": {},
+        }
+
+    def sample_shortage(**_kwargs):
+        raise ValueError("diagnostic sample shortage: IC sample insufficient")
+
+    monkeypatch.setattr(factor_service, "_build_diagnostic_batch_data_cache", fake_data_cache)
+    monkeypatch.setattr(factor_service, "_compute_factor_diagnostic_summary", sample_shortage)
+    verified_window = pit["diagnostic_windows"]["verified"]
+
+    diagnostic = assert_ok(
+        client.post(
+            f"/factors/{factor_id}/diagnostics",
+            json={
+                "start_date": verified_window["start_date"],
+                "end_date": pit["as_of_date"],
+                "dataset_snapshot_id": pit["dataset_snapshot_id"],
+                "universe_snapshot_id": pit["universe_snapshot_id"],
+                "return_window_days": 21,
+                "group_count": 5,
+                "diagnostic_mode": "VERIFIED",
+            },
+        )
+    )
+
+    assert diagnostic["run_id"] != source_run_id
+    assert diagnostic["summary"]["run_id"] == diagnostic["run_id"]
+    assert diagnostic["summary"]["status"] == "COMPLETED"
+    assert diagnostic["summary"]["rank_ic"] == 0.3455
+    assert diagnostic["summary"]["published_diagnostic_reused"] is True
+    assert diagnostic["summary"]["source_diagnostic_run_id"] == source_run_id
+    assert diagnostic["summary"]["diagnostic_reuse"]["kind"] == "PUBLISHED_QUARANTINE_SUMMARY"
+    assert diagnostic["summary"]["data_lineage"]["kind"] == "QUARANTINE_PUBLISH_SUMMARY"
+    assert diagnostic["summary"]["ir"] == 6.91
+    assert diagnostic["summary"]["ir_reference_only"] is True
+    assert diagnostic["summary"]["ir_display_value"] is None
+    assert diagnostic["summary"]["ir_evidence"]["value"] == 6.91
+    assert diagnostic["summary"]["ir_evidence"]["display_value"] is None
+    assert diagnostic["summary"]["ir_evidence"]["reference_only"] is True
+    row = storage.fetch_one(
+        "SELECT request_json, summary_json FROM factor_diagnostic_runs WHERE id = ?",
+        (diagnostic["run_id"],),
+    )
+    stored_request = json.loads(row["request_json"])
+    stored_summary = json.loads(row["summary_json"])
+    assert stored_request["diagnostic_mode"] == "VERIFIED"
+    assert stored_summary["source_diagnostic_run_id"] == source_run_id
+
+    factors = assert_ok(client.get("/factors"))
+    item = next(item for item in factors["items"] if item["id"] == factor_id)
+    assert item["latest_diagnostic_summary"]["ir"] == 6.91
+    assert item["latest_diagnostic_summary"]["ir_reference_only"] is True
+    assert item["quality_view"]["ir"] is None
+    assert item["quality_view"]["raw_ir"] == 6.91
+    assert item["quality_view"]["ir_reference_only"] is True
+    assert item["diagnostic_gap_summary"]["next_action"] == "IC_IR: 样本不足，待正式重算"
+    assert item["factor_level"] != "S"
+    composite = item["composite_view"]
+    assert composite["quality"]["sharpe"] == 0.553
+    assert composite["source"]["sharpe_source"] == "quarantine_incremental_ir_proxy"
+    assert composite["source"]["sharpe_observation_count"] == 6
+    assert "incremental IR proxy" in composite["source"]["sharpe_shortfall_reason"]
 
 
 def test_factor_batch_preview_skips_governance_queue_build(tmp_path, monkeypatch):
@@ -3616,7 +4247,7 @@ def test_planned_manual_factor_description_repairs_prior_formula_fallback(tmp_pa
     )
 
     assert created["id"] == "s_f2_mom_ovn_mean_21d"
-    assert created["name"] == "隔夜动量均值 (21日) (原始)"
+    assert created["name"] == "隔夜动量均值 (21d) [Raw]"
     assert created["descriptor"]["canonical_id"] == "s_f2_mom_ovn_mean_21d"
     assert created["tier_level"] == "F2"
     assert created["description"] == expected_description
@@ -3693,7 +4324,7 @@ def test_overnight_mean_legacy_alpha_factor_is_canonical_f2(tmp_path):
 
     assert "m_alpha_overnight_21d_raw" not in by_id
     factor = by_id["s_f2_mom_ovn_mean_21d"]
-    assert factor["name"] == "隔夜动量均值 (21日) (原始)"
+    assert factor["name"] == "隔夜动量均值 (21d) [Raw]"
     assert factor["expression"] == "Mean(Open / Close(t-1),21)"
     assert factor["descriptor"]["canonical_id"] == "s_f2_mom_ovn_mean_21d"
     assert factor["descriptor"]["category"] == "mom"

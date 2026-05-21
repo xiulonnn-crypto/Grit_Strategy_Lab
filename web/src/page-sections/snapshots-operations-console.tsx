@@ -36,8 +36,9 @@ type LayerCard = {
   title: string;
   subtitle: string;
   status: string;
-  coverage: string;
-  gap: string;
+  statusLabel: string;
+  metric: string;
+  miniRows: Array<{ label: string; value: string }>;
   action: string;
   refreshTargets: SnapshotRefreshTarget[];
 };
@@ -56,6 +57,22 @@ type LedgerRow = {
   repairTarget?: SnapshotRefreshTarget;
   dataset?: ApiDatasetSnapshot;
   universe?: ApiUniverseSnapshot;
+};
+
+type SourceDrillModule = {
+  id: string;
+  sourceId: string;
+  layerId: LayerId;
+  layerTitle: string;
+  title: string;
+  status: string;
+  statusLabel: string;
+  existingData: string;
+  completeness: string;
+  missingData: string;
+  blocker: string;
+  nextAction: string;
+  refreshTargets: SnapshotRefreshTarget[];
 };
 
 type CredentialRow = {
@@ -97,8 +114,8 @@ type CredentialDisplayRow = {
 
 const LAYER_LABELS: Record<LayerId, string> = {
   l1: 'L1 基础行情',
-  l2: 'L2 财务基本面',
-  l3: 'L3 情绪与微观结构',
+  l2: 'L2 财务截面',
+  l3: 'L3 分析师与情绪',
   l4: 'L4 宏观与衍生品',
 };
 
@@ -113,6 +130,16 @@ const DATASET_NAME: Record<string, string> = {
   'ds-option-skew': '期权偏斜',
 };
 
+const DRILL_SOURCE_NAME: Record<string, string> = {
+  'ds-price': '价格历史',
+  'ds-corporate-actions': '公司行为',
+  'ds-fundamentals': '财务截面',
+  'ds-analyst-consensus': '分析师一致预期',
+  'ds-short-volume': '卖空量',
+  'ds-macro-rates': '宏观利率',
+  'ds-option-skew': '期权偏度',
+};
+
 const TARGET_BY_SNAPSHOT: Record<string, SnapshotRefreshTarget> = {
   'ds-price': 'price',
   'ds-corporate-actions': 'corporate',
@@ -123,6 +150,56 @@ const TARGET_BY_SNAPSHOT: Record<string, SnapshotRefreshTarget> = {
   'ds-macro-rates': 'macro_derivatives',
   'ds-option-skew': 'macro_derivatives',
 };
+
+const DRILL_SOURCE_SPECS: Array<{
+  id: string;
+  layerId: LayerId;
+  nextAction: string;
+  refreshTargets: SnapshotRefreshTarget[];
+}> = [
+  {
+    id: 'ds-price',
+    layerId: 'l1',
+    nextAction: '刷新价格主链，补齐缺失标的的 10Y 价格历史，再复核长周期补价队列。',
+    refreshTargets: ['price'],
+  },
+  {
+    id: 'ds-corporate-actions',
+    layerId: 'l1',
+    nextAction: '补齐公司行为和复权链；若来源限流，查看底部凭据与重试窗口后再刷新。',
+    refreshTargets: ['corporate'],
+  },
+  {
+    id: 'ds-fundamentals',
+    layerId: 'l2',
+    nextAction: '刷新财务截面并复核发布时点门禁，保留财务平衡校验观察项。',
+    refreshTargets: ['fundamentals'],
+  },
+  {
+    id: 'ds-analyst-consensus',
+    layerId: 'l3',
+    nextAction: '刷新分析师一致预期，确认覆盖窗口和可研究标的范围。',
+    refreshTargets: ['sentiment'],
+  },
+  {
+    id: 'ds-short-volume',
+    layerId: 'l3',
+    nextAction: '刷新卖空量链路，确认 FINRA 文件窗口与缺失交易日。',
+    refreshTargets: ['sentiment'],
+  },
+  {
+    id: 'ds-macro-rates',
+    layerId: 'l4',
+    nextAction: '先完成 L1 样本池门禁；若宏观源异常，再刷新宏观利率来源。',
+    refreshTargets: ['macro_derivatives'],
+  },
+  {
+    id: 'ds-option-skew',
+    layerId: 'l4',
+    nextAction: '先完成 L1 样本池门禁；若期权源异常，再刷新期权偏度来源。',
+    refreshTargets: ['macro_derivatives'],
+  },
+];
 
 const BLOCKER_LABELS: Record<string, string> = {
   PRICE_SNAPSHOT_INCOMPLETE: '价格快照覆盖不足',
@@ -245,12 +322,16 @@ function statusLabel(status?: string | null): string {
   switch (String(status ?? '').toUpperCase()) {
     case 'READY':
     case 'COMPLETED':
+    case 'USABLE':
+    case 'AVAILABLE':
       return '可用';
     case 'RUNNING':
       return '刷新中';
     case 'STALE':
       return '待刷新';
     case 'INCOMPLETE':
+    case 'PARTIAL':
+    case 'PARTIAL_READY':
       return '部分可用';
     case 'FAILED':
     case 'BLOCKED':
@@ -267,9 +348,13 @@ function statusTone(status?: string | null): string {
     case 'READY':
     case 'COMPLETED':
     case 'PASS':
+    case 'USABLE':
+    case 'AVAILABLE':
       return 'ready';
     case 'STALE':
     case 'INCOMPLETE':
+    case 'PARTIAL':
+    case 'PARTIAL_READY':
     case 'WARN':
     case 'WARNING':
       return 'warning';
@@ -282,6 +367,15 @@ function statusTone(status?: string | null): string {
     default:
       return 'neutral';
   }
+}
+
+function healthCardStatusLabel(status?: string | null): string {
+  return statusTone(status) === 'ready' ? '已就绪' : statusLabel(status);
+}
+
+function hasKnownNonReadyStatus(status?: string | null): boolean {
+  const normalized = String(status ?? '').toUpperCase();
+  return Boolean(normalized) && normalized !== 'READY';
 }
 
 function getDatasetCoverage(dataset?: ApiDatasetSnapshot): string {
@@ -445,20 +539,52 @@ function findRefreshEntry(overview: ApiSnapshotOverview | null, id: string): Rec
   return null;
 }
 
-function summarizeRefreshEntry(entry: Record<string, unknown> | null): string {
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    result.push(trimmed);
+  }
+  return result;
+}
+
+function summarizeRefreshEntry(entry: Record<string, unknown> | null, label?: string): string {
   if (!entry) {
     return '本次未入库';
   }
-  const rows = firstNumber(entry, ['rows_inserted', 'landed_row_count', 'row_count', 'new_rows', 'rows']);
-  const symbols = firstNumber(entry, ['landed_symbol_count', 'symbol_count', 'symbols_inserted', 'covered_symbol_count']);
-  const parts: string[] = [];
+  const rows = firstNumber(entry, [
+    'rows_inserted',
+    'new_rows',
+    'rows_added',
+    'updated_row_count',
+    'landed_row_count',
+    'records_inserted',
+    'inserted_count',
+    'added_count',
+    'created_count',
+  ]);
+  const symbols = firstNumber(entry, [
+    'symbols_inserted',
+    'new_symbols',
+    'updated_symbol_count',
+    'landed_symbol_count',
+    'member_count_delta',
+    'members_inserted',
+    'new_members',
+  ]);
+  const prefix = label ? `${label}新增` : '新增';
   if (rows !== null) {
-    parts.push(`${formatCount(rows)} 行`);
+    return `${prefix} ${formatCount(rows)} 行数据`;
   }
   if (symbols !== null) {
-    parts.push(`${formatCount(symbols)} 标的`);
+    return `${prefix} ${formatCount(symbols)} 标的数据`;
   }
-  return parts.length ? parts.join(' / ') : '已记录入库';
+  return label ? `${label}已记录入库` : '已记录入库';
 }
 
 function summarizeRefreshSource(entry: Record<string, unknown> | null, fallback: string): string {
@@ -488,57 +614,178 @@ function buildLayerCards(overview: ApiSnapshotOverview | null): LayerCard[] {
   const macro = getDataset(overview, 'ds-macro-rates');
   const option = getDataset(overview, 'ds-option-skew');
   const bondStatus = overview?.bond_fixed_income?.global_pulse?.status ?? 'UNKNOWN';
+  const hasL1DependencyGap = [price?.status, corporate?.status, bondStatus].some(hasKnownNonReadyStatus);
+  const hasL4SourceGap = [macro?.status, option?.status].some(hasKnownNonReadyStatus);
+  const hasL3SourceGap = [analyst?.status, shortVolume?.status].some((status) => status && status !== 'READY');
+  const l1Status = hasL1DependencyGap ? 'INCOMPLETE' : 'READY';
+  const l2Status = fundamentals?.status ?? 'UNKNOWN';
+  const l3Status = hasL3SourceGap ? 'INCOMPLETE' : 'READY';
+  const l4Status = hasL4SourceGap ? 'INCOMPLETE' : 'READY';
+  const fundamentalFieldCount =
+    firstNumber(asRecord(fundamentals?.metadata), ['field_count', 'field_count_total', 'ready_field_count']) ?? 18;
 
   return [
     {
       id: 'l1',
       title: 'L1 基础行情',
-      subtitle: '价格、公司行动、债券基础行情',
-      status: [price?.status, corporate?.status, bondStatus].some((status) => status && status !== 'READY')
-        ? 'INCOMPLETE'
-        : 'READY',
-      coverage: `股票 ${getDatasetCoverage(price)} · 公司行动 ${getDatasetCoverage(corporate)} · 债券 ${getBondCoverage(overview)}`,
-      gap: corporate?.blocker || price?.blocker
-        ? blockerLabel(corporate?.blocker?.code ?? price?.blocker?.code)
-        : '债券基础行情 READY',
-      action: corporate?.blocker || price?.blocker ? '修复 L1 缺口' : '查看债券证据',
+      subtitle: '10Y PIT 价格回放可用；固定收益运行态来源已就绪；30Y Full Ready 与公司行为补链仍在修复队列。',
+      status: l1Status,
+      statusLabel: healthCardStatusLabel(l1Status),
+      metric: `股票 ${getDatasetCoverage(price)} · 债券 ${getBondCoverage(overview)}`,
+      miniRows: [
+        { label: '可用于', value: '动量 / 波动 / 债券资产腿' },
+        { label: '待修复', value: '公司行为、长历史补价' },
+      ],
+      action: hasL1DependencyGap ? '下钻缺口' : '查看债券证据',
       refreshTargets: ['price', 'corporate', 'bond'],
     },
     {
       id: 'l2',
-      title: 'L2 财务基本面',
-      subtitle: '财报字段、估值基础、PIT 入场',
-      status: fundamentals?.status ?? 'UNKNOWN',
-      coverage: getDatasetCoverage(fundamentals),
-      gap: fundamentals?.blocker ? blockerLabel(fundamentals.blocker.code) : '财务平衡校验仅作为观察项',
-      action: fundamentals?.blocker ? '修复基本面' : '查看质量审计',
+      title: 'L2 财务截面',
+      subtitle: '财务字段与发布时点门禁可进入质量、估值和稳健性因子研究。',
+      status: l2Status,
+      statusLabel: healthCardStatusLabel(l2Status),
+      metric: getDatasetCoverage(fundamentals),
+      miniRows: [
+        { label: '字段数', value: formatCount(fundamentalFieldCount) },
+        { label: '观察项', value: fundamentals?.blocker ? blockerLabel(fundamentals.blocker.code) : '财务平衡校验' },
+      ],
+      action: fundamentals?.blocker ? '下钻观察项' : '查看观察项',
       refreshTargets: ['fundamentals'],
     },
     {
       id: 'l3',
-      title: 'L3 情绪与微观结构',
-      subtitle: '一致预期、卖空量、市场情绪',
-      status: [analyst?.status, shortVolume?.status].some((status) => status && status !== 'READY') ? 'INCOMPLETE' : 'READY',
-      coverage: `${getDatasetCoverage(analyst)} · ${getDatasetCoverage(shortVolume)}`,
-      gap: analyst?.blocker || shortVolume?.blocker
-        ? blockerLabel(analyst?.blocker?.code ?? shortVolume?.blocker?.code)
-        : '影响扩展因子，主流程可继续',
-      action: analyst?.blocker || shortVolume?.blocker ? '修复情绪数据' : '查看来源',
+      title: 'L3 分析师与情绪',
+      subtitle: '一致预期与卖空微观结构已形成正式快照，可进入研究监测。',
+      status: l3Status,
+      statusLabel: healthCardStatusLabel(l3Status),
+      metric: hasL3SourceGap ? `${getDatasetCoverage(analyst)} · ${getDatasetCoverage(shortVolume)}` : '3/3',
+      miniRows: [
+        { label: '一致预期', value: `${formatCount(analyst?.row_count)} 行` },
+        { label: '卖空链路', value: `${formatCount(shortVolume?.row_count)} 行` },
+      ],
+      action: hasL3SourceGap ? '下钻缺口' : '查看证据',
       refreshTargets: ['sentiment'],
     },
     {
       id: 'l4',
       title: 'L4 宏观与衍生品',
-      subtitle: '利率、波动率、期权偏斜',
-      status: [macro?.status, option?.status].some((status) => status && status !== 'READY') ? 'INCOMPLETE' : 'READY',
-      coverage: `${getDatasetCoverage(macro)} · ${getDatasetCoverage(option)}`,
-      gap: macro?.blocker || option?.blocker
-        ? blockerLabel(macro?.blocker?.code ?? option?.blocker?.code)
-        : '仅影响高级风险预算',
-      action: macro?.blocker || option?.blocker ? '修复 L4' : '查看宏观证据',
+      subtitle: '利率 Beta、IV Skew 可作为特征源；正式 IC 诊断依赖 L1 样本池门禁。',
+      status: l4Status,
+      statusLabel: healthCardStatusLabel(l4Status),
+      metric: getDatasetCoverage(macro),
+      miniRows: [
+        { label: '可用', value: '利率、期权偏度' },
+        {
+          label: '上游依赖',
+          value: macro?.blocker || option?.blocker
+            ? blockerLabel(macro?.blocker?.code ?? option?.blocker?.code)
+            : 'L1 样本池',
+        },
+      ],
+      action: hasL4SourceGap ? '下钻缺口' : '查看证据',
       refreshTargets: ['macro_derivatives'],
     },
   ];
+}
+
+function getCoverageNumbers(dataset?: ApiDatasetSnapshot): { covered: number; total: number } | null {
+  if (!dataset) {
+    return null;
+  }
+  const metadata = asRecord(dataset.metadata);
+  const benchmark = asRecord(metadata.benchmark_etf_coverage);
+  const covered =
+    firstNumber(metadata, ['covered_symbol_count', 'raw_covered_symbol_count', 'effective_covered_symbol_count']) ??
+    firstNumber(benchmark, ['ready_count']);
+  const total = firstNumber(metadata, ['total_symbol_count']) ?? firstNumber(benchmark, ['total_count']);
+  return covered !== null && total !== null ? { covered, total } : null;
+}
+
+function getCompletenessText(dataset?: ApiDatasetSnapshot): string {
+  if (!dataset) {
+    return '0/0，未返回快照记录';
+  }
+  const coverage = getCoverageNumbers(dataset);
+  if (!coverage || coverage.total <= 0) {
+    return getDatasetCoverage(dataset);
+  }
+  const ratio = Math.max(0, Math.min(100, (coverage.covered / coverage.total) * 100));
+  return `${getDatasetCoverage(dataset)}，${ratio.toFixed(1)}%`;
+}
+
+function getMissingDataText(dataset?: ApiDatasetSnapshot, upstreamReason?: string | null): string {
+  if (!dataset) {
+    return '数据源未出现在快照 overview，缺完整入库记录。';
+  }
+  const coverage = getCoverageNumbers(dataset);
+  if (coverage) {
+    const missing = Math.max(0, coverage.total - coverage.covered);
+    if (missing > 0) {
+      return `缺 ${formatCount(missing)} 个标的或序列。`;
+    }
+  }
+  if (dataset.blocker) {
+    return blockerLabel(dataset.blocker.code);
+  }
+  if (upstreamReason) {
+    return '本数据源覆盖完整；缺的是可用于正式诊断的 L1 样本池门禁。';
+  }
+  return '无显式覆盖缺口。';
+}
+
+function getBlockerText(dataset?: ApiDatasetSnapshot, upstreamReason?: string | null): string {
+  if (!dataset) {
+    return '快照 read model 未返回该数据源。';
+  }
+  if (dataset.blocker) {
+    return blockerLabel(dataset.blocker.code);
+  }
+  if (hasKnownNonReadyStatus(dataset.status)) {
+    return `${statusLabel(dataset.status)}，需查看 provider 尝试和刷新日志。`;
+  }
+  return upstreamReason ?? '无阻塞。';
+}
+
+function getExistingDataText(dataset?: ApiDatasetSnapshot): string {
+  if (!dataset) {
+    return '未返回行数、窗口或来源。';
+  }
+  const start = dataset.start_date ? `，窗口 ${dataset.start_date} 至 ${dataset.end_date ?? dataset.as_of ?? '未记录'}` : '';
+  return `${formatCount(dataset.row_count)} 行${start}，来源 ${sourceLabel(dataset.source, dataset.fallback_source)}。`;
+}
+
+function buildDataSourceDrillModules(overview: ApiSnapshotOverview | null): SourceDrillModule[] {
+  if (!overview) {
+    return [];
+  }
+
+  return DRILL_SOURCE_SPECS.flatMap((spec) => {
+    const dataset = getDataset(overview, spec.id);
+    const sourceGap = !dataset || hasKnownNonReadyStatus(dataset.status) || Boolean(dataset.blocker);
+    if (!sourceGap) {
+      return [];
+    }
+    const sourceName = DRILL_SOURCE_NAME[spec.id] ?? DATASET_NAME[spec.id] ?? dataset?.name ?? spec.id;
+    const status = dataset?.status ?? 'UNKNOWN';
+    return [
+      {
+        id: `source-${spec.id}`,
+        sourceId: spec.id,
+        layerId: spec.layerId,
+        layerTitle: LAYER_LABELS[spec.layerId],
+        title: sourceName,
+        status,
+        statusLabel: statusLabel(status),
+        existingData: getExistingDataText(dataset),
+        completeness: getCompletenessText(dataset),
+        missingData: getMissingDataText(dataset),
+        blocker: getBlockerText(dataset),
+        nextAction: spec.nextAction,
+        refreshTargets: spec.refreshTargets,
+      },
+    ];
+  });
 }
 
 function buildLedgerRows(overview: ApiSnapshotOverview | null): LedgerRow[] {
@@ -549,6 +796,8 @@ function buildLedgerRows(overview: ApiSnapshotOverview | null): LedgerRow[] {
     'ds-price',
     'ds-corporate-actions',
     'ds-fundamentals',
+    'ds-analyst-consensus',
+    'ds-short-volume',
     'ds-macro-rates',
     'ds-option-skew',
   ];
@@ -739,22 +988,34 @@ function buildRefreshLogRows(overview: ApiSnapshotOverview | null, layerCards: L
   issue: string;
   nextAction: string;
 }> {
-  const idsByLayer: Record<LayerId, string[]> = {
-    l1: ['ds-price', 'ds-corporate-actions', 'bond_fixed_income'],
-    l2: ['ds-fundamentals'],
-    l3: ['ds-analyst-consensus', 'ds-short-volume'],
-    l4: ['ds-macro-rates', 'ds-option-skew'],
+  const refreshItemsByLayer: Record<LayerId, Array<{ id: string; label: string }>> = {
+    l1: [
+      { id: 'ds-price', label: '价格' },
+      { id: 'ds-corporate-actions', label: '公司行为' },
+      { id: 'bond_fixed_income', label: '债券' },
+    ],
+    l2: [{ id: 'ds-fundamentals', label: '财务截面' }],
+    l3: [
+      { id: 'ds-analyst-consensus', label: '分析师一致预期' },
+      { id: 'ds-short-volume', label: '卖空量' },
+    ],
+    l4: [
+      { id: 'ds-macro-rates', label: '宏观利率' },
+      { id: 'ds-option-skew', label: '期权偏度' },
+    ],
   };
   return layerCards.map((card) => {
-    const ids = idsByLayer[card.id];
-    const entries = ids.map((id) => findRefreshEntry(overview, id)).filter(Boolean);
+    const items = refreshItemsByLayer[card.id];
+    const entries = items
+      .map((item) => ({ ...item, entry: findRefreshEntry(overview, item.id) }))
+      .filter((item): item is { id: string; label: string; entry: Record<string, unknown> } => Boolean(item.entry));
     const run = entries.length
-      ? entries.map((entry) => summarizeRefreshEntry(entry)).join(' · ')
+      ? uniqueStrings(entries.map((item) => summarizeRefreshEntry(item.entry, item.label))).join(' · ')
       : card.id === 'l1'
         ? '股票/债券本次入库按来源分项记录'
         : '本次无入库';
-    const sources = ids
-      .map((id) => {
+    const sources = items
+      .map(({ id }) => {
         const dataset = getDataset(overview, id);
         if (id === 'bond_fixed_income') {
           return sourceKeyLabel(overview?.bond_fixed_income?.selected_source_summary?.primary_source);
@@ -764,10 +1025,10 @@ function buildRefreshLogRows(overview: ApiSnapshotOverview | null, layerCards: L
       .filter(Boolean);
     return {
       id: card.id,
-      current: card.coverage,
+      current: card.metric,
       thisRun: run,
-      source: sources.join(' / ') || '未记录',
-      issue: card.gap,
+      source: uniqueStrings(sources).join(' / ') || '未记录',
+      issue: card.miniRows[1]?.value ?? card.subtitle,
       nextAction: card.action,
     };
   });
@@ -784,7 +1045,7 @@ function compactObject(value: Record<string, unknown>): string {
 function getLayerHealthSummary(layerCards: LayerCard[]): Array<{ label: string; value: string; tone: string }> {
   return layerCards.map((card) => ({
     label: card.title,
-    value: statusLabel(card.status),
+    value: card.statusLabel,
     tone: statusTone(card.status),
   }));
 }
@@ -800,6 +1061,12 @@ function spacedCoverage(value: string): string {
 
 function plainMetric(value: string): string {
   return spacedCoverage(value).replaceAll(',', '');
+}
+
+function scrollIntoViewIfAvailable(element: Element | null, options: ScrollIntoViewOptions): void {
+  if (element && typeof element.scrollIntoView === 'function') {
+    element.scrollIntoView(options);
+  }
 }
 
 function buildQueueItems(overview: ApiSnapshotOverview | null, registry: ApiSnapshotProviderRegistry | null): QueueItem[] {
@@ -989,6 +1256,51 @@ function getCredentialDisplayRows(rows: CredentialRow[]): CredentialDisplayRow[]
   return displayRows;
 }
 
+function buildCredentialRestartCommand(
+  credential: CredentialRow | null,
+  display: CredentialDisplayRow | null,
+): string {
+  const actionKind = credential?.actionKind ?? display?.actionKind;
+  if (actionKind === 'configure_path') {
+    const keyLabel = credential?.keyLabel ?? display?.key ?? '<PATH>';
+    return `$env:${keyLabel}="C:\\path\\to\\data"; powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1 -ForceRestart -RestartReason "snapshot provider credentials updated"`;
+  }
+  if (actionKind === 'replace_key') {
+    const keyLabel = credential?.keyLabel ?? display?.key ?? '<KEY>';
+    return `$env:${keyLabel}="<paste-key>"; powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1 -ForceRestart -RestartReason "snapshot provider credentials updated"`;
+  }
+  return `powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1 -ForceRestart -RestartReason "snapshot provider credentials updated"`;
+}
+
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through to the textarea fallback.
+  }
+
+  const textarea = document.createElement('textarea');
+  try {
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand('copy');
+    return copied;
+  } catch {
+    return false;
+  } finally {
+    if (textarea.parentNode) {
+      textarea.parentNode.removeChild(textarea);
+    }
+  }
+}
+
 export function SnapshotOperationsConsole({
   overview,
   providerRegistry,
@@ -1004,11 +1316,15 @@ export function SnapshotOperationsConsole({
   createAssetLegMessage,
 }: SnapshotOperationsConsoleProps): JSX.Element {
   const [highlightedLayer, setHighlightedLayer] = useState<LayerId | null>(null);
+  const [activeDrillSourceId, setActiveDrillSourceId] = useState<string | null>(null);
+  const [highlightedLedgerLayer, setHighlightedLedgerLayer] = useState<LayerId | null>(null);
   const [selectedEvidenceId, setSelectedEvidenceId] = useState<string | null>(null);
   const [isRefreshLogOpen, setIsRefreshLogOpen] = useState(false);
   const [activeCredentialId, setActiveCredentialId] = useState<string | null>(null);
+  const [credentialCopyStatus, setCredentialCopyStatus] = useState<'idle' | 'copied' | 'manual'>('idle');
 
   const layerCards = useMemo(() => buildLayerCards(overview), [overview]);
+  const sourceDrillModules = useMemo(() => buildDataSourceDrillModules(overview), [overview]);
   const ledgerRows = useMemo(() => buildLedgerRows(overview), [overview]);
   const queueRows = useMemo(() => buildQueueItems(overview, providerRegistry), [overview, providerRegistry]);
   const credentialRows = useMemo(
@@ -1020,27 +1336,38 @@ export function SnapshotOperationsConsole({
   const refreshLogRows = useMemo(() => buildRefreshLogRows(overview, layerCards), [layerCards, overview]);
   const selectedEvidence = ledgerRows.find((row) => row.id === selectedEvidenceId) ?? null;
   const activeCredential = credentialRows.find((row) => row.id === activeCredentialId) ?? null;
-  const activeCredentialDisplay = credentialDisplayRows.find((row) => row.id === activeCredentialId) ?? null;
+  const activeCredentialDisplay =
+    credentialDisplayRows.find((row) =>
+      row.id === activeCredentialId ||
+      row.credential?.id === activeCredentialId ||
+      (activeCredential ? row.credential?.providerId === activeCredential.providerId : false),
+    ) ?? null;
+  const activeCredentialCommand = buildCredentialRestartCommand(activeCredential, activeCredentialDisplay);
+  const activeCredentialInstruction = activeCredentialDisplay
+    ? `${activeCredentialDisplay.actionLabel} · ${activeCredentialDisplay.key} · ${activeCredentialDisplay.source}`
+    : '请选择左侧凭证行，命令会按该来源更新。';
   const healthSummary = getLayerHealthSummary(layerCards);
+  const activeDrillModule =
+    sourceDrillModules.find((module) => module.sourceId === activeDrillSourceId) ?? sourceDrillModules[0] ?? null;
+  const activeLayerCard = activeDrillModule
+    ? layerCards.find((card) => card.id === activeDrillModule.layerId) ?? layerCards[0]
+    : layerCards[0];
+  const activeDrillTone = statusTone(activeDrillModule?.status ?? activeLayerCard?.status);
   const latestJob = overview?.latest_job ?? null;
-  const price = getDataset(overview, 'ds-price');
-  const corporate = getDataset(overview, 'ds-corporate-actions');
-  const fundamentals = getDataset(overview, 'ds-fundamentals');
-  const analyst = getDataset(overview, 'ds-analyst-consensus');
-  const shortVolume = getDataset(overview, 'ds-short-volume');
-  const macro = getDataset(overview, 'ds-macro-rates');
-  const bond = overview?.bond_fixed_income;
-  const bondCoverage = getBondCoverage(overview);
 
   useEffect(() => {
     if (!highlightTarget) {
       return;
     }
     const layerId = layerForTarget(highlightTarget);
+    const sourceModule = sourceDrillModules.find((module) => module.layerId === layerId);
+    if (sourceModule) {
+      setActiveDrillSourceId(sourceModule.sourceId);
+    }
     setHighlightedLayer(layerId);
     const timer = window.setTimeout(() => setHighlightedLayer(null), 2400);
     return () => window.clearTimeout(timer);
-  }, [highlightTarget]);
+  }, [highlightTarget, sourceDrillModules]);
 
   useEffect(() => {
     if (openRefreshLogToken === undefined || openRefreshLogToken <= 0) {
@@ -1050,9 +1377,31 @@ export function SnapshotOperationsConsole({
   }, [openRefreshLogToken]);
 
   function handleDrill(layerId: LayerId): void {
+    const sourceModule = sourceDrillModules.find((module) => module.layerId === layerId) ?? sourceDrillModules[0];
+    if (sourceModule) {
+      setActiveDrillSourceId(sourceModule.sourceId);
+      scrollIntoViewIfAvailable(document.getElementById(`snapshot-source-${sourceModule.sourceId}`), { block: 'center', behavior: 'smooth' });
+    } else {
+      scrollIntoViewIfAvailable(document.querySelector('[data-testid="snapshots-drilldown-row"]'), { block: 'center', behavior: 'smooth' });
+    }
     setHighlightedLayer(layerId);
-    document.getElementById(`snapshot-layer-${layerId}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
     window.setTimeout(() => setHighlightedLayer(null), 2400);
+  }
+
+  function handleViewEvidence(layerId: LayerId): void {
+    setHighlightedLedgerLayer(layerId);
+    scrollIntoViewIfAvailable(document.getElementById('snapshot-ledger'), { block: 'start', behavior: 'smooth' });
+    window.setTimeout(() => setHighlightedLedgerLayer(null), 2400);
+  }
+
+  function selectCredential(id: string | null): void {
+    setActiveCredentialId(id);
+    setCredentialCopyStatus('idle');
+  }
+
+  async function handleCopyCredentialCommand(): Promise<void> {
+    const copied = await copyTextToClipboard(activeCredentialCommand);
+    setCredentialCopyStatus(copied ? 'copied' : 'manual');
   }
 
   return (
@@ -1066,66 +1415,52 @@ export function SnapshotOperationsConsole({
           <span className="snapshots-ops-status snapshots-ops-status--warning">{getLayerStatusSummary(layerCards)}</span>
         </div>
         <div className="snapshots-ops-health-grid">
-          <article className="snapshots-ops-health-card snapshots-ops-health-card--warning snapshots-ops-health-card--active">
-            <div className="snapshots-ops-card-title">
-              <h3>L1 基础行情</h3>
-              <span className="snapshots-ops-status snapshots-ops-status--warning">{healthSummary[0]?.value ?? '部分可用'}</span>
-            </div>
-            <div className="snapshots-ops-metric-line">
-              <strong>股票 {plainMetric(getDatasetCoverage(price))} · 债券 {plainMetric(bondCoverage)}</strong>
-              <span>10Y PIT 价格回放可用；固定收益运行态来源已就绪；30Y Full Ready 与公司行为补链仍在修复队列。</span>
-            </div>
-            <div className="snapshots-ops-mini-list">
-              <div className="snapshots-ops-mini-row"><span>可用于</span><strong>动量 / 波动 / 债券资产腿</strong></div>
-              <div className="snapshots-ops-mini-row"><span>待修复</span><strong>公司行为、长历史补价</strong></div>
-              <button className="link-btn snapshots-ops-link-plain" type="button" onClick={() => handleDrill('l1')}>下钻缺口</button>
-            </div>
-          </article>
-          <article className="snapshots-ops-health-card snapshots-ops-health-card--ready">
-            <div className="snapshots-ops-card-title">
-              <h3>L2 财务截面</h3>
-              <span className="snapshots-ops-status snapshots-ops-status--ready">{healthSummary[1]?.value ?? '已就绪'}</span>
-            </div>
-            <div className="snapshots-ops-metric-line">
-              <strong>{plainMetric(getDatasetCoverage(fundamentals))}</strong>
-              <span>财务字段与发布时点门禁可进入质量、估值和稳健性因子研究。</span>
-            </div>
-            <div className="snapshots-ops-mini-list">
-              <div className="snapshots-ops-mini-row"><span>字段数</span><strong>18</strong></div>
-              <div className="snapshots-ops-mini-row"><span>观察项</span><strong>财务平衡校验</strong></div>
-              <button className="link-btn snapshots-ops-link-plain" type="button" onClick={() => handleDrill('l2')}>查看观察项</button>
-            </div>
-          </article>
-          <article className="snapshots-ops-health-card snapshots-ops-health-card--ready">
-            <div className="snapshots-ops-card-title">
-              <h3>L3 分析师与情绪</h3>
-              <span className="snapshots-ops-status snapshots-ops-status--ready">{healthSummary[2]?.value ?? '已就绪'}</span>
-            </div>
-            <div className="snapshots-ops-metric-line">
-              <strong>3 / 3</strong>
-              <span>一致预期与卖空微观结构已形成正式快照，可进入研究监测。</span>
-            </div>
-            <div className="snapshots-ops-mini-list">
-              <div className="snapshots-ops-mini-row"><span>一致预期</span><strong>{formatCount(analyst?.row_count)} 行</strong></div>
-              <div className="snapshots-ops-mini-row"><span>卖空链路</span><strong>{formatCount(shortVolume?.row_count)} 行</strong></div>
-              <button className="link-btn snapshots-ops-link-plain" type="button" onClick={() => handleDrill('l3')}>查看证据</button>
-            </div>
-          </article>
-          <article className="snapshots-ops-health-card snapshots-ops-health-card--warning">
-            <div className="snapshots-ops-card-title">
-              <h3>L4 宏观与衍生品</h3>
-              <span className="snapshots-ops-status snapshots-ops-status--warning">{healthSummary[3]?.value ?? '部分可用'}</span>
-            </div>
-            <div className="snapshots-ops-metric-line">
-              <strong>{spacedCoverage(getDatasetCoverage(macro))}</strong>
-              <span>利率 Beta、IV Skew 可作为特征源；正式 IC 诊断依赖 L1 样本池门禁。</span>
-            </div>
-            <div className="snapshots-ops-mini-list">
-              <div className="snapshots-ops-mini-row"><span>可用</span><strong>利率、期权偏度</strong></div>
-              <div className="snapshots-ops-mini-row"><span>上游依赖</span><strong>L1 样本池</strong></div>
-              <button className="link-btn snapshots-ops-link-plain" type="button" onClick={() => handleDrill('l4')}>下钻依赖</button>
-            </div>
-          </article>
+          {layerCards.map((card, index) => {
+            const tone = statusTone(card.status);
+            const isReady = tone === 'ready';
+            const isActive = highlightedLayer === card.id || highlightedLedgerLayer === card.id;
+            const isPrimary = card.id === 'l1';
+            return (
+              <article
+                className={`snapshots-ops-health-card snapshots-ops-health-card--${tone}${isPrimary ? ' snapshots-ops-health-card--primary' : ''}${isActive ? ' snapshots-ops-health-card--active' : ''}`}
+                data-layer-id={card.id}
+                data-layer-status={String(card.status).toLowerCase()}
+                key={card.id}
+              >
+                <div className="snapshots-ops-card-title">
+                  <h3>{card.title}</h3>
+                  <span className={`snapshots-ops-status snapshots-ops-status--${tone}`}>
+                    {healthSummary[index]?.value ?? statusLabel(card.status)}
+                  </span>
+                </div>
+                <div className="snapshots-ops-metric-line">
+                  <strong>{plainMetric(card.metric)}</strong>
+                  <span>{card.subtitle}</span>
+                </div>
+                <div className="snapshots-ops-mini-list">
+                  {card.miniRows.map((row) => (
+                    <div className="snapshots-ops-mini-row" key={row.label}>
+                      <span>{row.label}</span>
+                      <strong>{row.value}</strong>
+                    </div>
+                  ))}
+                  <button
+                    className="link-btn snapshots-ops-link-plain snapshots-ops-health-action"
+                    type="button"
+                    onClick={() => {
+                      if (isReady) {
+                        handleViewEvidence(card.id);
+                      } else {
+                        handleDrill(card.id);
+                      }
+                    }}
+                  >
+                    {card.action}
+                  </button>
+                </div>
+              </article>
+            );
+          })}
         </div>
       </section>
 
@@ -1162,7 +1497,7 @@ export function SnapshotOperationsConsole({
                         phase2_max_symbols: 25,
                       });
                     } else if (item.actionKind === 'configure_path') {
-                      setActiveCredentialId('crsp_us_stock');
+                      selectCredential('crsp_us_stock');
                     } else {
                       document.querySelector('.snapshots-ops-ledger')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
                     }
@@ -1195,61 +1530,72 @@ export function SnapshotOperationsConsole({
         <div className="snapshots-ops-panel__header">
           <div>
             <p className="snapshots-ops-eyebrow">当前下钻</p>
-            <h2>L1 基础行情</h2>
-            <p className="snapshots-ops-small-note">横向展示可用证据、固定收益基础行情、不可用部分和修复入口；切换 L2-L4 时复用同一位置，不再占用右侧长栏。</p>
+            <h2>
+              {activeDrillModule
+                ? `${activeDrillModule.layerTitle} · ${activeDrillModule.title}`
+                : activeLayerCard?.title ?? 'L1 基础行情'}
+            </h2>
+            <p className="snapshots-ops-small-note">仅为部分可用或阻塞的数据源生成独立下钻模块；READY 来源保留在原始台账和证据弹层。</p>
           </div>
-          <span className="snapshots-ops-status snapshots-ops-status--warning">{statusLabel(layerCards[0]?.status)}</span>
+          <span className={`snapshots-ops-status snapshots-ops-status--${activeDrillTone}`}>
+            {activeDrillModule?.statusLabel ?? activeLayerCard?.statusLabel ?? statusLabel(layerCards[0]?.status)}
+          </span>
         </div>
         <div className="snapshots-ops-drill-grid">
-          <article className={`snapshots-ops-drill-card snapshots-ops-drill-card--primary ${highlightedLayer === 'l1' ? 'snapshots-ops-drill-card--highlight' : ''}`} id="snapshot-layer-l1" data-layer-id="l1">
-            <div className="snapshots-ops-card-title">
-              <h3>可用边界</h3>
-              <span className="snapshots-ops-status snapshots-ops-status--ready">研究可用</span>
-            </div>
-            <p>10Y PIT 价格和历史样本池可支撑研究回放；债券运行态来源可进入资产腿创建和风险预算预检。</p>
-            <div className="snapshots-ops-mini-list">
-              <div className="snapshots-ops-mini-row"><span>股票价格</span><strong>{plainMetric(getDatasetCoverage(price))}</strong></div>
-              <div className="snapshots-ops-mini-row"><span>债券来源</span><strong>{plainMetric(bondCoverage)} 就绪</strong></div>
-              <div className="snapshots-ops-mini-row"><span>允许动作</span><strong>研究回放 / 资产腿</strong></div>
-            </div>
-          </article>
-          <article className="snapshots-ops-drill-card" id="snapshot-layer-l2" data-layer-id="l2">
-            <h3>可用证据</h3>
-            <div className="snapshots-ops-drill-list">
-              <div className="snapshots-ops-check-row"><span className="snapshots-ops-status snapshots-ops-status--ready">已可用</span><div>价格行数 {plainMetric(formatCount(price?.row_count))}，覆盖 {plainMetric(getDatasetCoverage(price))}。</div></div>
-              <div className="snapshots-ops-check-row"><span className="snapshots-ops-status snapshots-ops-status--ready">已可用</span><div>10Y PIT 回放可服务动量、波动和基础回测。</div></div>
-              <div className="snapshots-ops-check-row"><span className="snapshots-ops-status snapshots-ops-status--ready">已可用</span><div>债券来源 {plainMetric(bondCoverage)} 就绪，可进入资产腿创建。</div></div>
-            </div>
-          </article>
-          <article className="snapshots-ops-drill-card" id="snapshot-layer-l3" data-layer-id="l3">
-            <h3>固定收益基础行情</h3>
-            <div className="snapshots-ops-bond-mini-grid">
-              <div><strong>国债曲线</strong><span>{(bond?.curve_preview ?? []).slice(0, 4).map((point) => `${point.tenor_label} ${point.yield_pct.toFixed(2)}%`).join(' · ') || '3M 3.69% · 2Y 3.95% · 10Y 4.45% · 30Y 5.02%'}</span></div>
-              <div><strong>曲线审计</strong><span>10Y-2Y 利差 +50 bps，处于审计带内。</span></div>
-              <div><strong>通胀保护债</strong><span>TIPS 5Y / 10Y 已具备真实收益率与通胀因子。</span></div>
-              <div><strong>信用债代理</strong><span>LQD 可入风险预算；跟踪误差来源已记录。</span></div>
-            </div>
-          </article>
-          <article className="snapshots-ops-drill-card" id="snapshot-layer-l4" data-layer-id="l4">
-            <h3>不可用与修复</h3>
-            <div className="snapshots-ops-drill-list">
-              <div className="snapshots-ops-check-row"><span className="snapshots-ops-status snapshots-ops-status--warning">待补</span><div>公司行为链路未完成，影响 30Y Full Ready 和复权审计。</div></div>
-              <div className="snapshots-ops-check-row"><span className="snapshots-ops-status snapshots-ops-status--warning">待配置</span><div>CRSP_DATA_PATH、NORGATE_DATA_PATH 缺失。</div></div>
-            </div>
-            <button
-              className="primary-button"
-              disabled={refreshDisabled}
-              type="button"
-              onClick={() => onRefresh({ mode: 'repair', targets: ['price', 'corporate', 'bond'], reason: 'snapshot-layer-l1-repair', phase2_scope: 'sp500_10y', phase2_max_symbols: 25 })}
-            >
-              运行 L1 修复
-            </button>
-            <button className="link-btn" type="button" onClick={() => setActiveCredentialId('crsp_us_stock')}>生成本机路径配置命令</button>
-          </article>
+          {sourceDrillModules.length ? (
+            sourceDrillModules.map((module) => {
+              const isActive = activeDrillModule?.sourceId === module.sourceId;
+              return (
+                <article
+                  className={`snapshots-ops-drill-card ${isActive ? 'snapshots-ops-drill-card--highlight' : ''}`}
+                  data-layer-id={module.layerId}
+                  data-source-id={module.sourceId}
+                  id={`snapshot-source-${module.sourceId}`}
+                  key={module.sourceId}
+                >
+                  <div className="snapshots-ops-card-title">
+                    <h3>{module.title}数据源下钻</h3>
+                    <span className={`snapshots-ops-status snapshots-ops-status--${statusTone(module.status)}`}>
+                      {module.statusLabel}
+                    </span>
+                  </div>
+                  <p>{module.layerTitle} 的 {module.title} 目前需要单独复核；下方只列本数据源的证据、缺口和动作。</p>
+                  <div className="snapshots-ops-source-fact-grid">
+                    <div><span>已有数据</span><strong>{module.existingData}</strong></div>
+                    <div><span>完整度</span><strong>{module.completeness}</strong></div>
+                    <div><span>缺少数据</span><strong>{module.missingData}</strong></div>
+                    <div><span>卡点</span><strong>{module.blocker}</strong></div>
+                  </div>
+                  <div className="snapshots-ops-drill-list">
+                    <div className="snapshots-ops-check-row">
+                      <span className="snapshots-ops-status snapshots-ops-status--ready">下一步</span>
+                      <div>{module.nextAction}</div>
+                    </div>
+                  </div>
+                  <button
+                    className="primary-button"
+                    disabled={refreshDisabled}
+                    type="button"
+                    onClick={() => onRefresh({ mode: 'repair', targets: module.refreshTargets, reason: `snapshot-source-${module.sourceId}-repair` })}
+                  >
+                    刷新{module.title}
+                  </button>
+                  {module.layerId === 'l4' ? (
+                    <button className="link-btn" type="button" onClick={() => handleDrill('l1')}>查看 L1 样本池依赖</button>
+                  ) : null}
+                </article>
+              );
+            })
+          ) : (
+            <article className="snapshots-ops-drill-card snapshots-ops-drill-card--empty">
+              <h3>暂无单独下钻模块</h3>
+              <p>当前 L1-L4 数据源没有部分可用或阻塞状态；请在原始快照清单中查看 READY 来源证据。</p>
+            </article>
+          )}
         </div>
       </section>
 
-      <section className="snapshots-ops-panel snapshots-ops-ledger">
+      <section className="snapshots-ops-panel snapshots-ops-ledger" id="snapshot-ledger">
           <div className="snapshots-ops-panel__header">
             <div>
               <h2>原始快照清单</h2>
@@ -1277,10 +1623,11 @@ export function SnapshotOperationsConsole({
               </thead>
               <tbody>
                 {ledgerRows.map((row) => {
-                  const rowHighlighted = row.id === highlightTarget;
+                  const rowHighlighted = row.id === highlightTarget || row.layerId === highlightedLedgerLayer;
                   return (
                   <tr
                     className={rowHighlighted ? 'dense-row dense-row--highlight snapshots-ops-ledger-row--highlight' : undefined}
+                    data-layer-id={row.layerId}
                     data-snapshot-id={row.id}
                     key={row.id}
                   >
@@ -1344,21 +1691,35 @@ export function SnapshotOperationsConsole({
               <span>影响</span>
               <span>操作</span>
             </div>
-            {credentialDisplayRows.map((row) => (
-              <div className="snapshots-ops-credential-row" key={row.id}>
-                <div className="snapshots-ops-credential-key"><strong>{row.key}</strong><span>{row.source}</span></div>
-                <span className={`snapshots-ops-status snapshots-ops-status--${row.configTone}`}>{row.configLabel}</span>
-                <span className={`snapshots-ops-status snapshots-ops-status--${row.statusTone}`}>{row.statusLabel}</span>
-                <p>{row.impact}</p>
-                <button className="link-btn" type="button" onClick={() => {
-                  if (row.actionKind !== 'noop') {
-                    setActiveCredentialId(row.credential?.id ?? row.id);
-                  }
-                }}>
-                  {row.actionLabel}
-                </button>
-              </div>
-            ))}
+            {credentialDisplayRows.map((row) => {
+              const rowActive =
+                activeCredentialId === row.id ||
+                activeCredentialId === row.credential?.id ||
+                (activeCredential ? row.credential?.providerId === activeCredential.providerId : false);
+              return (
+                <div
+                  aria-current={rowActive ? 'true' : undefined}
+                  className={`snapshots-ops-credential-row${rowActive ? ' snapshots-ops-credential-row--active' : ''}`}
+                  data-credential-id={row.id}
+                  data-testid={`credential-row-${row.id}`}
+                  key={row.id}
+                >
+                  <div className="snapshots-ops-credential-key"><strong>{row.key}</strong><span>{row.source}</span></div>
+                  <span className={`snapshots-ops-status snapshots-ops-status--${row.configTone}`}>{row.configLabel}</span>
+                  <span className={`snapshots-ops-status snapshots-ops-status--${row.statusTone}`}>{row.statusLabel}</span>
+                  <p>{row.impact}</p>
+                  <button
+                    aria-pressed={rowActive}
+                    className="link-btn"
+                    data-credential-action={row.actionKind}
+                    type="button"
+                    onClick={() => selectCredential(row.credential?.id ?? row.id)}
+                  >
+                    {row.actionLabel}
+                  </button>
+                </div>
+              );
+            })}
           </div>
         </article>
         <article className="snapshots-ops-panel snapshots-ops-restart">
@@ -1367,13 +1728,16 @@ export function SnapshotOperationsConsole({
               <h2>重启命令</h2>
               <p className="snapshots-ops-small-note">仅在更新凭据或本机路径后执行；不提交后端、不落库。</p>
             </div>
-            <button className="link-btn" type="button">复制命令</button>
+            <button className="link-btn" type="button" onClick={() => void handleCopyCredentialCommand()}>
+              {credentialCopyStatus === 'copied' ? '已复制' : credentialCopyStatus === 'manual' ? '请手动复制' : '复制命令'}
+            </button>
           </div>
-          <pre className="snapshots-ops-command-box">{activeCredential?.actionKind === 'configure_path'
-            ? `$env:${activeCredential.keyLabel}="C:\\path\\to\\data"; powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1 -ForceRestart -RestartReason "snapshot provider credentials updated"`
-            : activeCredentialDisplay?.actionKind === 'replace_key' || activeCredential?.actionKind === 'replace_key'
-              ? `$env:${activeCredential?.keyLabel ?? activeCredentialDisplay?.key ?? '<KEY>'}="<paste-key>"; powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1 -ForceRestart -RestartReason "snapshot provider credentials updated"`
-              : `powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1 -ForceRestart -RestartReason "snapshot provider credentials updated"`}</pre>
+          <div className="snapshots-ops-command-selected" data-testid="credential-selected-detail">
+            <span>{activeCredentialDisplay ? '当前选择' : '默认命令'}</span>
+            <strong>{activeCredentialInstruction}</strong>
+            <p>{activeCredentialDisplay?.impact ?? '未选中具体来源时，只显示默认强制重启命令。'}</p>
+          </div>
+          <pre className="snapshots-ops-command-box">{activeCredentialCommand}</pre>
         </article>
       </section>
 

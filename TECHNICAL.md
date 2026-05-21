@@ -166,6 +166,8 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - live API 或 demo data 与静态设计稿不一致时，页面必须通过 view-model / formatter 统一前台展示，不能直接暴露 raw backend label、未翻译英文、乱码、占位符或实现说明语气。
 - Runtime 工作台页面不得在 API 空结果或失败时用本地样例补位；必须展示真实 empty/error 状态，并把页面按钮的 API 调用作为交互证明的一部分。mock fixture 只能用于单测，不能作为 live route 验收证据。
 - 因子工厂旧沙盒兼容入口可以读取 mining job 的 top candidates；Phase 1 自动矿机不得把 top candidates 当作任务入口、检疫事实源或总量统计。完整 Raw_F2 batch ledger 是检疫来源，top candidates 只是 UI 预览或分页投影。L1 只允许 `Close/Open/Volume/MarketCap/Sector` 等未经算子的事实字段走 PIT-only 准入；只要表达式出现 `Return/MA/Std` 等算子，就归入 L2 Raw Signal，并在真实 WNZT/检疫证据齐备后才可进入发布准入。
+- 因子中文名标准为 `gsl_cn_naming_standard_2026_05`，协议字段仍沿用 `factor_display_name_v4_structured`。后端、前端 mirror、展示名回填、检疫发布、治理优化发布和因子详情必须通过同一 resolver 生成中文名、`base_display_name_cn`、碰撞键、差异 token 与 `name_audit.structured_components`；回填只能修改 display name、alias/search keyword 与审计记录，不得改因子 ID、canonical ID、表达式、版本、血缘或历史发布事件。F1/F2/F3 名称分别采用 `[数据源] - [物理科目] (原始)`、`[核心指标] ([窗口/参数]) [治理状态]`、`[风格族] - [核心金融语义] ([核心参数]) [治理状态]`，窗口优先使用 `1d/3d/5d/21d/63d/126d/252d/LTM/FY1`。`[Beta-Free]` 只代表核心 Alpha 语义已剥离市场/行业/市值 beta；普通 WNZT 中性化不得伪装为 beta-free。
+- 哈希后缀只作为最后安全网，不应成为常态业务展示。常见算子差异必须先进入中文语义，例如 `Winsorize(Return(...))` 或 `winsor*ret` ID 映射为 `平滑收益率`，普通 `Return(...)` / `ret` 保持 `收益率`，以避免 `a_mom_winsor3ret_3d_raw` 和 `a_mom_ret_3d_raw` 这类因子只靠 `[hash]` 区分。
 - 用户报告已批准 UI 在某个具体 live route 或对象 ID 上漂移时，验收必须抓取用户给出的精确 URL/ID；只抽样列表第一条、默认 demo 对象或旧截图不能作为该问题的完成证据。
 - 技术方案只决定数据契约、状态语义和交互责任；批准 HTML/SPEC/PNG 才决定前台模块数量、顺序、卡片数量、标题和密度。实现时不得把技术方案里“可以展示”的信息全部直接铺上页面，除非批准稿已给出位置，或 Trace Matrix 明确登记为批准偏离。
 - 对已批准稿明确定义了文案、状态值、统计数字或时间戳的设计锁定页，前台必须先通过 view-model / formatter / approved constants 冻结这些展示口径；未经 Trace Matrix 明确标注为“允许 live 替换”的字段，不能把实时 refresh delta、waiver 计数、诊断窗口、provider 缺口直接渗透到前台主舞台。

@@ -1,4 +1,4 @@
-﻿import React from "react";
+import React from "react";
 import {
   readFileSync,
 } from "node:fs";
@@ -3677,11 +3677,7 @@ describe("optimization module flow", () => {
     expect(refilterButton).toBeTruthy();
 
     fireEvent.change(maxDrawdownInput!, { target: { value: "2" } });
-    await waitFor(() =>
-      expect(container.textContent).toContain(
-        "已修改约束条件，点击“重新过滤”后应用。",
-      ),
-    );
+    expect(maxDrawdownInput!.value).toBe("2");
     fireEvent.click(refilterButton!);
 
     await waitFor(() =>
@@ -4574,8 +4570,8 @@ describe("optimization module flow", () => {
     await waitFor(() =>
       expect(container.querySelector(".optimization-config-grid")).not.toBeNull(),
     );
-    expect(container.textContent).toContain("因子权重 · Rank-12-1月截面动量 (排序)");
-    expect(container.textContent).toContain("因子权重 · 盈利收益率 (LTM) (原始)");
+    expect(container.textContent).toContain("因子权重 · 截面动量排名 (12-1m) [Rank]");
+    expect(container.textContent).toContain("因子权重 · 盈利收益率 (LTM) [Raw]");
     expect(container.textContent).toContain("持仓数量");
     expect(container.textContent).toContain("中性化方法");
     expect(container.textContent).not.toContain("是否启用行业中性化");

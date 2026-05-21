@@ -77,7 +77,7 @@ function makeReadyPreview(overrides: Partial<FactorModelPreview> = {}): FactorMo
 function makeFactor(overrides: Partial<ApiFactorListItem> = {}): ApiFactorListItem {
   return {
     id: 's_mom_12m1m_rank',
-    name: 'Rank-12-1月截面动量 (排序)',
+    name: '截面动量排名 (12-1m) [Rank]',
     market: 'US',
     universe: 'SP500',
     created_at: '2026-05-01T09:00:00Z',
@@ -173,7 +173,7 @@ function makeFactor(overrides: Partial<ApiFactorListItem> = {}): ApiFactorListIt
 function makeFactorDetail(overrides: Partial<ApiFactorDetail> = {}): ApiFactorDetail {
   const base = makeFactor({
     id: 's_alpha_ffblend_cur_rank',
-    name: 'GSL-多因子全能动力',
+    name: '[综合] - FF3 风格复合基石 (等权) [Beta-Free]',
     diagnostic_status: 'SANDBOX_READY',
     latest_diagnostic_summary: null,
     last_diagnostic_run_id: null,
@@ -281,14 +281,14 @@ describe('FactorModelBuilderPage', () => {
     expect(screen.getByRole('heading', { level: 2, name: '选择因子' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '权重与打分预览' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 2, name: '策略创建风险' })).toBeInTheDocument();
-    expect(screen.getAllByText('Rank-12-1月截面动量 (排序)').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('盈利收益率 (LTM) (原始)').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('自由现金流收益率 (TTM) (原始)').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('对数市值 (当前) (原始)').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('截面动量排名 (12-1m) [Rank]').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('盈利收益率 (LTM) [Raw]').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('自由现金流收益率 (LTM) [Raw]').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('对数市值 (当前) [Raw]').length).toBeGreaterThan(0);
     expect(screen.getByLabelText('策略名称')).toHaveValue('多因子核心模型');
     expect(screen.getByLabelText('持仓数量')).toHaveValue(10);
     expect(screen.getByRole('button', { name: '启用行业中性化' })).toBeInTheDocument();
-    expect(screen.getByLabelText('Rank-12-1月截面动量 (排序)权重')).toBeInTheDocument();
+    expect(screen.getByLabelText('截面动量排名 (12-1m) [Rank]权重')).toBeInTheDocument();
     expect(screen.getAllByText('再平衡配置').length).toBeGreaterThan(0);
     expect(screen.getByLabelText('每月')).toBeChecked();
     expect(screen.getByLabelText('每季度')).toBeInTheDocument();
@@ -756,7 +756,7 @@ describe('FactorModelBuilderPage', () => {
       .mockResolvedValue({ strategy_id: 'strat_composite_factor' });
     const compositeFactors: FactorModelOption[] = [{
       id: 's_mom_12m1m_rank',
-      displayName: 'Rank-12-1月截面动量 (排序)',
+      displayName: '截面动量排名 (12-1m) [Rank]',
       family: '动量',
       categoryLabel: '动量',
       sourceLabel: '自动挖掘',
@@ -917,7 +917,7 @@ describe('FactorModelBuilderPage', () => {
 
     await waitFor(() => expect(previewFactorModel).toHaveBeenCalledTimes(1));
     expect(screen.getAllByText('API 动量').length).toBeGreaterThan(0);
-    expect(screen.queryByText('Rank-12-1月截面动量 (排序)')).not.toBeInTheDocument();
+    expect(screen.queryByText('截面动量排名 (12-1m) [Rank]')).not.toBeInTheDocument();
     expect(previewFactorModel.mock.calls[0][0].factors.map((factor) => factor.weightPct)).toEqual([
       20,
       20,
@@ -933,7 +933,7 @@ describe('FactorModelBuilderPage', () => {
     render(<FactorModelBuilderPage api={{ previewFactorModel }} factors={[]} useDefaultFallback={false} />);
 
     expect(screen.getByText('因子接口未返回可用因子，当前无法创建策略。')).toBeInTheDocument();
-    expect(screen.queryByText('Rank-12-1月截面动量 (排序)')).not.toBeInTheDocument();
+    expect(screen.queryByText('截面动量排名 (12-1m) [Rank]')).not.toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: '创建可回测策略' })[0]).toBeDisabled();
     expect(previewFactorModel).not.toHaveBeenCalled();
   });
@@ -946,7 +946,7 @@ describe('FactorModelBuilderPage', () => {
     render(<FactorModelBuilderPage api={{ previewFactorModel }} />);
 
     await waitFor(() => expect(previewFactorModel).toHaveBeenCalledTimes(1));
-    fireEvent.change(screen.getByLabelText('Rank-12-1月截面动量 (排序)权重'), { target: { value: '25' } });
+    fireEvent.change(screen.getByLabelText('截面动量排名 (12-1m) [Rank]权重'), { target: { value: '25' } });
 
     const weightRow = screen.getByText('权重合计').closest('.audit-row');
     expect(weightRow).not.toBeNull();
@@ -1227,7 +1227,7 @@ describe('FactorModelBuilderPage', () => {
   it('keeps creation disabled until selected factor weights add up to 100%', () => {
     render(<FactorModelBuilderPage />);
 
-    fireEvent.click(screen.getByLabelText('选择Rank-12-1月截面动量 (排序)'));
+    fireEvent.click(screen.getByLabelText('选择截面动量排名 (12-1m) [Rank]'));
 
     const weightRow = screen.getByText('权重合计').closest('.audit-row');
     expect(weightRow).not.toBeNull();
@@ -1280,7 +1280,7 @@ describe('FactorModelBuilderPage', () => {
         }),
         makeFactor({
           id: 's_price_adjclose_cur_raw',
-          name: '交易所-复权收盘价 (原始)',
+          name: '交易所 - 前复权收盘价 (原始)',
           descriptor: {
             canonical_id: 's_price_adjclose_cur_raw',
             source_prefix: 's',
@@ -1311,7 +1311,7 @@ describe('FactorModelBuilderPage', () => {
         makeFactor(),
         makeFactor({
           id: 's_val_ep_ltm_raw',
-          name: '盈利收益率 (LTM) (原始)',
+          name: '盈利收益率 (LTM) [Raw]',
           diagnostic_status: 'COMPLETED',
           ui_state: 'needs_calibration',
           ui_state_label: '待校准',
@@ -1343,7 +1343,7 @@ describe('FactorModelBuilderPage', () => {
         }),
         makeFactor({
           id: 's_alpha_ffblend_cur_rank',
-          name: 'GSL-多因子全能动力',
+          name: '[综合] - FF3 风格复合基石 (等权) [Beta-Free]',
           source: 'SYSTEM_SEED',
           diagnostic_status: 'READY_TO_DIAGNOSE',
           ui_state: 'sandbox',
@@ -1431,7 +1431,7 @@ describe('FactorModelBuilderPage', () => {
         },
         {
           factor_id: 'f1_price_close',
-          name: '交易所-复权收盘价 (原始)',
+          name: '交易所 - 前复权收盘价 (原始)',
           category: '价格',
           pit_layer: 'L1',
           source_refs: { dataset_snapshot_id: 'ds-price', source: 'runtime_price' },
@@ -1510,18 +1510,18 @@ describe('FactorModelBuilderPage', () => {
     expect(levelFamilyRow.lastElementChild).toBe(familyFilter);
 
     const factorTable = screen.getByRole('table');
-    expect(within(factorTable).queryByText('GSL-多因子全能动力')).not.toBeInTheDocument();
+    expect(within(factorTable).queryByText('[综合] - FF3 风格复合基石 (等权) [Beta-Free]')).not.toBeInTheDocument();
     fireEvent.click(within(levelFilter).getByRole('button', { name: 'C微弱' }));
     expect(within(levelFilter).getByRole('button', { name: 'C微弱' })).toHaveClass('is-active');
-    expect(within(factorTable).getByText('Rank-12-1月截面动量 (排序)')).toBeInTheDocument();
+    expect(within(factorTable).getByText('截面动量排名 (12-1m) [Rank]')).toBeInTheDocument();
     expect(within(factorTable).queryByText('默认库')).not.toBeInTheDocument();
     expect(within(factorTable).queryByText('人工库')).not.toBeInTheDocument();
     expect(within(factorTable).queryByText('挖掘库')).not.toBeInTheDocument();
     expect(within(factorTable).queryByText('F2 改造')).not.toBeInTheDocument();
     expect(within(factorTable).queryByText('总市值原值')).not.toBeInTheDocument();
     expect(within(factorTable).queryByText('F1 原始')).not.toBeInTheDocument();
-    expect(within(factorTable).queryByText('交易所-复权收盘价 (原始)')).not.toBeInTheDocument();
-    expect(within(factorTable).getByText('GSL-多因子全能动力')).toBeInTheDocument();
+    expect(within(factorTable).queryByText('交易所 - 前复权收盘价 (原始)')).not.toBeInTheDocument();
+    expect(within(factorTable).getByText('[综合] - FF3 风格复合基石 (等权) [Beta-Free]')).toBeInTheDocument();
     expect(within(factorTable).getAllByRole('button', { name: /查看血缘/ }).length).toBeGreaterThanOrEqual(1);
     expect(within(factorTable).getAllByText('W').length).toBeGreaterThan(0);
     expect(within(factorTable).getAllByText('N').length).toBeGreaterThan(0);
@@ -1537,14 +1537,14 @@ describe('FactorModelBuilderPage', () => {
     expect(within(factorTable).queryByRole('button', { name: '诊断' })).not.toBeInTheDocument();
     expect(within(factorTable).getAllByRole('button', { name: '详情' }).length).toBeGreaterThan(0);
     expect(screen.queryByText('血缘树预览')).not.toBeInTheDocument();
-    const momentumRow = within(factorTable).getByText('Rank-12-1月截面动量 (排序)').closest('tr') as HTMLElement;
+    const momentumRow = within(factorTable).getByText('截面动量排名 (12-1m) [Rank]').closest('tr') as HTMLElement;
     const lineageButton = within(momentumRow).getByRole('button', { name: /查看血缘/ });
     expect(lineageButton).toHaveAttribute('aria-haspopup', 'dialog');
     fireEvent.click(lineageButton);
     const lineageDialog = screen.getByRole('dialog', { name: '血缘树预览' });
     expect(lineageDialog).toHaveClass('factor-lineage-preview');
     expect(within(lineageDialog).getByText('血缘树预览')).toBeInTheDocument();
-    expect(within(lineageDialog).getByText('交易所-复权收盘价 (原始)')).toBeInTheDocument();
+    expect(within(lineageDialog).getByText('交易所 - 前复权收盘价 (原始)')).toBeInTheDocument();
     expect(within(lineageDialog).getByText(/当前预览：/)).toBeInTheDocument();
     fireEvent.click(within(lineageDialog).getByRole('button', { name: '收起' }));
     expect(screen.queryByText('血缘树预览')).not.toBeInTheDocument();
@@ -1554,7 +1554,7 @@ describe('FactorModelBuilderPage', () => {
     expect(within(levelFilter).getByRole('button', { name: 'C微弱' })).toHaveClass('is-active');
     expect(allLevelButton).not.toHaveClass('is-active');
     fireEvent.click(within(layerCards).getByRole('button', { name: /F3 组合库/ }));
-    expect(within(factorTable).getByText('GSL-多因子全能动力')).toBeInTheDocument();
+    expect(within(factorTable).getByText('[综合] - FF3 风格复合基石 (等权) [Beta-Free]')).toBeInTheDocument();
     expect(within(factorTable).queryByText('F3 组合')).not.toBeInTheDocument();
 
     fireEvent.click(allLevelButton);
@@ -1582,7 +1582,7 @@ describe('FactorModelBuilderPage', () => {
     expect(within(layerCards).getByRole('button', { name: /F2 改造库/ })).toHaveAttribute('aria-pressed', 'true');
     expect(within(refreshedLifecycleFilter).getByRole('tab', { name: /全部生命周期 1/ })).toBeInTheDocument();
     const refreshedFactorTable = screen.getByRole('table');
-    expect(within(refreshedFactorTable).getByText('Rank-12-1月截面动量 (排序)')).toBeInTheDocument();
+    expect(within(refreshedFactorTable).getByText('截面动量排名 (12-1m) [Rank]')).toBeInTheDocument();
   });
 
   it('defaults a plain factor library refresh to the F2 ledger', async () => {
@@ -1608,7 +1608,7 @@ describe('FactorModelBuilderPage', () => {
       items: [
         makeFactor({
           id: 's_alpha_valvol_blend_resid_std_rk',
-          name: '风险调整现金流回报 (精炼)',
+          name: '[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined-Rank]',
           tier_level: 'F3',
           tier_label: 'F3 组合',
           tier_projection: { key: 'F3', label: 'F3 组合', description: 'L3 publishable factor' },
@@ -1616,14 +1616,33 @@ describe('FactorModelBuilderPage', () => {
           latest_diagnostic_summary: {
             run_id: 'diag_f3_completed',
             status: 'COMPLETED',
-            rank_ic: 0.0345,
-            ir: 6.91,
+            rank_ic: 0.1,
+            ir: 0.11,
             coverage: 100,
+          },
+          quality_view: {
+            rank_ic: 0.1,
+            ir: 0.11,
+            coverage: 100,
+            decay_days: 252,
+            decay_label: '252日',
+            sparkline: [],
+            sparkline_window: '12m',
           },
           last_diagnostic_run_id: 'diag_f3_completed',
           factor_level: 'S',
           factor_level_label: 'S顶级',
           factor_level_projection: { key: 'S', label: 'S顶级', description: '组合质量可进入策略草稿' },
+          op_status: {
+            completed: ['W', 'N', 'Z', 'T'],
+            missing: [],
+            lights: [
+              { code: 'W', key: 'winsorize', label: '去极值', active: true, status: 'done' },
+              { code: 'N', key: 'neutralize', label: '中性化', active: true, status: 'done' },
+              { code: 'Z', key: 'zscore', label: '标准化', active: true, status: 'done' },
+              { code: 'T', key: 'tsrank', label: '时序排名', active: true, status: 'done' },
+            ],
+          },
           lineage_summary: {
             has_lineage: true,
             parent_count: 4,
@@ -1633,13 +1652,14 @@ describe('FactorModelBuilderPage', () => {
           },
           composite_view: {
             quality: {
-              sharpe: null,
-              sharpe_label: '待补',
+              sharpe: 0.5527,
+              sharpe_label: '0.55',
               max_drawdown_pct: 12.34,
               max_drawdown_label: '12.34%',
+              incremental_ir: 0.5527,
             },
             capacity: { status: 'PASS', label: '容量通过', source: 'turnover_derived' },
-            turnover_cost: { turnover_rate_weekly: 18, turnover_rate_weekly_label: '18.00%/周', cost_bps: null, cost_bps_label: '待补' },
+            turnover_cost: { turnover_rate_weekly: 18, turnover_rate_weekly_label: '18.00%/周', cost_bps: 9, cost_bps_label: '9.0 bps' },
             style_exposure: { status: 'PASS', label: '风格中性', style_corr: 0.26, style_corr_label: '0.260' },
             execution: { portfolio_id: null, portfolio_label: '未绑定', execution_tag: null, execution_tag_label: '未绑定' },
             blend_info: {
@@ -1659,7 +1679,7 @@ describe('FactorModelBuilderPage', () => {
         }),
         makeFactor({
           id: 's_val_ep_ltm_raw',
-          name: '盈利收益率 (LTM) (原始)',
+          name: '盈利收益率 (LTM) [Raw]',
           tier_level: 'F2',
           tier_projection: { key: 'F2', label: 'F2 改造', description: 'Not F3' },
         }),
@@ -1675,37 +1695,68 @@ describe('FactorModelBuilderPage', () => {
     expect(document.querySelector('.factor-tier-tabs')).toBeNull();
     expect(document.querySelector('.factor-level-filter')).not.toBeNull();
     expect(document.querySelector('.factor-lifecycle-tabs')).not.toBeNull();
-    expect(within(table).getByRole('columnheader', { name: /Blend Info/ })).toBeInTheDocument();
+    const headers = within(table).getAllByRole('columnheader').map((header) => header.textContent ?? '');
+    expect(within(table).queryByRole('columnheader', { name: /Blend Info/ })).not.toBeInTheDocument();
+    expect(within(table).queryByRole('columnheader', { name: /实盘身份/ })).not.toBeInTheDocument();
+    expect(within(table).getByRole('columnheader', { name: /信号质量/ })).toBeInTheDocument();
     expect(within(table).getByRole('columnheader', { name: /组合质量/ })).toBeInTheDocument();
+    expect(within(table).getByRole('columnheader', { name: /算子状态灯/ })).toBeInTheDocument();
+    const signalHeaderIndex = headers.findIndex((header) => header.includes('信号质量'));
+    const compositeHeaderIndex = headers.findIndex((header) => header.includes('组合质量'));
+    const lineageHeaderIndex = headers.findIndex((header) => header.includes('血缘溯源'));
+    const opHeaderIndex = headers.findIndex((header) => header.includes('算子状态灯'));
+    expect(signalHeaderIndex).toBeGreaterThanOrEqual(0);
+    expect(compositeHeaderIndex).toBeGreaterThanOrEqual(0);
+    expect(lineageHeaderIndex).toBeGreaterThanOrEqual(0);
+    expect(opHeaderIndex).toBeGreaterThanOrEqual(0);
+    expect(opHeaderIndex).toBe(lineageHeaderIndex + 1);
+    expect(opHeaderIndex).toBeLessThan(signalHeaderIndex);
+    expect(signalHeaderIndex).toBeLessThan(compositeHeaderIndex);
+    expect(within(table).getByLabelText('信号质量指标解释')).toBeInTheDocument();
+    expect(within(table).getByLabelText('组合质量指标解释')).toBeInTheDocument();
+    expect(within(table).getByLabelText('容量摩擦指标解释')).toBeInTheDocument();
     expect(within(table).getByRole('columnheader', { name: /容量\/摩擦/ })).toBeInTheDocument();
-    expect(within(table).getByRole('columnheader', { name: /风格暴露/ })).toBeInTheDocument();
-    expect(within(table).getByRole('columnheader', { name: /实盘身份/ })).toBeInTheDocument();
-    expect(within(table).queryByRole('columnheader', { name: /算子状态灯/ })).not.toBeInTheDocument();
-    expect(within(table).queryByRole('columnheader', { name: /质量指标/ })).not.toBeInTheDocument();
-    expect(within(table).getByText('风险调整现金流回报 (精炼)')).toBeInTheDocument();
+    expect(within(table).queryByRole('columnheader', { name: /风格暴露/ })).not.toBeInTheDocument();
+    expect(within(table).queryByLabelText('风格暴露指标解释')).not.toBeInTheDocument();
+    expect(within(table).getByText('[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined-Rank]')).toBeInTheDocument();
     expect(within(table).getByText('估值')).toBeInTheDocument();
-    expect(within(table).queryByText('盈利收益率 (LTM) (原始)')).not.toBeInTheDocument();
-    expect(within(table).getByText('4 个 F2 成分')).toBeInTheDocument();
-    expect(within(table).getByText('Residual Blend')).toBeInTheDocument();
-    expect(within(table).getByText('Sharpe 待补')).toBeInTheDocument();
+    expect(within(table).queryByText('盈利收益率 (LTM) [Raw]')).not.toBeInTheDocument();
+    expect(within(table).queryByText('4 个 F2 成分')).not.toBeInTheDocument();
+    expect(within(table).queryByText('Residual Blend')).not.toBeInTheDocument();
+    expect(within(table).getByText('RankIC 0.1')).toBeInTheDocument();
+    expect(within(table).getByText('IC_IR 0.11')).toBeInTheDocument();
+    expect(within(table).getByText('衰减 252日')).toBeInTheDocument();
+    expect(within(table).getByText('Sharpe 0.55')).toBeInTheDocument();
+    expect(within(table).queryByText('增量IR 0.55')).not.toBeInTheDocument();
+    expect(within(table).queryByText('Sharpe 待补')).not.toBeInTheDocument();
     expect(within(table).getByText('最大回撤 12.3%')).toBeInTheDocument();
     expect(within(table).getByText('Capacity 容量通过')).toBeInTheDocument();
     expect(within(table).getByText('Turnover 18.00%/周')).toBeInTheDocument();
-    expect(within(table).getByText('Style Corr 0.260')).toBeInTheDocument();
-    expect(within(table).getByText('Portfolio 未绑定')).toBeInTheDocument();
-    expect(within(table).getByText('Tag 未绑定')).toBeInTheDocument();
-    expect(within(table).queryByText('W')).not.toBeInTheDocument();
-    expect(within(table).queryByText('RankIC 0.035')).not.toBeInTheDocument();
+    expect(within(table).getByText('Cost 9.0 bps')).toBeInTheDocument();
+    expect(within(table).queryByText('Style Corr 0.260')).not.toBeInTheDocument();
+    expect(within(table).queryByText('Portfolio 未绑定')).not.toBeInTheDocument();
+    expect(within(table).queryByText('Tag 未绑定')).not.toBeInTheDocument();
+    expect(within(table).getByTitle(/W .*已完成/)).toBeInTheDocument();
+    expect(within(table).getByTitle(/N .*未记录|N .*已完成/)).toBeInTheDocument();
+    expect(within(table).getByTitle(/Z .*未记录|Z .*已完成/)).toBeInTheDocument();
+    expect(within(table).getByTitle(/T .*已完成/)).toBeInTheDocument();
+
+    fireEvent.click(within(table).getByRole('button', { name: /查看血缘/ }));
+    const lineageDialog = screen.getByRole('dialog', { name: '血缘树预览' });
+    expect(within(lineageDialog).getByText('4 个 F2 成分')).toBeInTheDocument();
+    expect(within(lineageDialog).getByText('Residual Blend')).toBeInTheDocument();
+    expect(within(lineageDialog).getByText('Portfolio 未绑定')).toBeInTheDocument();
+    expect(within(lineageDialog).getByText('Tag 未绑定')).toBeInTheDocument();
 
     fireEvent.click(within(familyFilter).getByRole('button', { name: '估值' }));
-    expect(within(table).getByText('风险调整现金流回报 (精炼)')).toBeInTheDocument();
+    expect(within(table).getByText('[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined-Rank]')).toBeInTheDocument();
     fireEvent.click(within(familyFilter).getByRole('button', { name: '估值' }));
     fireEvent.click(within(familyFilter).getByRole('button', { name: '风险' }));
-    expect(within(table).queryByText('风险调整现金流回报 (精炼)')).not.toBeInTheDocument();
+    expect(within(table).queryByText('[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined-Rank]')).not.toBeInTheDocument();
     fireEvent.click(within(familyFilter).getByRole('button', { name: '风险' }));
-    expect(within(table).getByText('风险调整现金流回报 (精炼)')).toBeInTheDocument();
+    expect(within(table).getByText('[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined-Rank]')).toBeInTheDocument();
 
-    fireEvent.click(within(table).getByRole('button', { name: '生成组合策略' }));
+    fireEvent.click(within(table).getByRole('button', { name: '生成策略' }));
     expect(window.location.hash).toContain('#/factor-models/new?');
     expect(window.location.hash).toContain('strategy_type=COMPOSITE_FACTOR');
     expect(window.location.hash).toContain('factor_id=s_alpha_valvol_blend_resid_std_rk');
@@ -1753,7 +1804,7 @@ describe('FactorModelBuilderPage', () => {
     renderLegacyFactorLibraryPage();
 
     const table = await screen.findByRole('table');
-    const configureButtons = within(table).getAllByRole('button', { name: '生成组合策略' });
+    const configureButtons = within(table).getAllByRole('button', { name: '生成策略' });
     expect(configureButtons).toHaveLength(1);
     fireEvent.click(configureButtons[0]);
 
@@ -1833,7 +1884,7 @@ describe('FactorModelBuilderPage', () => {
       items: [
         makeFactor({
           id: reverseFactorId,
-          name: '反向下行风险 Alpha (精炼)',
+          name: '[风险] - 反向下行风险 Alpha (252d) [Refined-Rank]',
           source: 'MANUAL',
           lifecycle_status: 'VERIFIED',
           diagnostic_status: 'COMPLETED',
@@ -1888,7 +1939,7 @@ describe('FactorModelBuilderPage', () => {
 
     renderLegacyFactorLibraryPage();
 
-    const factorButton = await screen.findByRole('button', { name: '反向下行风险 Alpha (精炼)' });
+    const factorButton = await screen.findByRole('button', { name: '[风险] - 反向下行风险 Alpha (252d) [Refined-Rank]' });
     const row = factorButton.closest('tr') as HTMLElement;
     expect(row).not.toBeNull();
     expect(within(row).getByText(reverseFactorId)).toBeInTheDocument();
@@ -1903,7 +1954,7 @@ describe('FactorModelBuilderPage', () => {
       items: [
         makeFactor({
           id: 's_alpha_ffblend_cur_rank',
-          name: 'GSL-多因子全能动力',
+          name: '[综合] - FF3 风格复合基石 (等权) [Beta-Free]',
           diagnostic_status: 'SANDBOX_READY',
           ui_state: 'sandbox',
           ui_state_label: '沙箱',
@@ -1987,7 +2038,7 @@ describe('FactorModelBuilderPage', () => {
 
     renderLegacyFactorLibraryPage();
 
-    const factorButton = await screen.findByRole('button', { name: 'GSL-多因子全能动力' });
+    const factorButton = await screen.findByRole('button', { name: '[综合] - FF3 风格复合基石 (等权) [Beta-Free]' });
     const row = factorButton.closest('tr') as HTMLElement;
     expect(row).not.toBeNull();
     expect(within(row).getByText('B')).toBeInTheDocument();
@@ -2057,7 +2108,7 @@ describe('FactorModelBuilderPage', () => {
         }),
         makeFactor({
           id: 's_alpha_ffblend_cur_rank',
-          name: 'GSL-多因子全能动力',
+          name: '[综合] - FF3 风格复合基石 (等权) [Beta-Free]',
           descriptor: {
             canonical_id: 's_alpha_ffblend_cur_rank',
             source_prefix: 's',
@@ -2088,7 +2139,7 @@ describe('FactorModelBuilderPage', () => {
     expect(within(capexCell).getByText('质量')).toHaveClass('factor-category-tag');
     const turnoverCell = await factorCell('换手率代理（20日）');
     expect(within(turnoverCell).getByText('情绪')).toHaveClass('factor-category-tag');
-    const alphaCell = await factorCell('GSL-多因子全能动力');
+    const alphaCell = await factorCell('[综合] - FF3 风格复合基石 (等权) [Beta-Free]');
     expect(within(alphaCell).getByText('综合')).toHaveClass('factor-category-tag');
 
     const familyFilter = screen.getByLabelText('因子族多选');
@@ -2105,7 +2156,7 @@ describe('FactorModelBuilderPage', () => {
 
     fireEvent.click(within(familyFilter).getByRole('button', { name: '全部因子族' }));
     fireEvent.click(within(familyFilter).getByRole('button', { name: '综合' }));
-    expect(screen.getByRole('button', { name: 'GSL-多因子全能动力' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '[综合] - FF3 风格复合基石 (等权) [Beta-Free]' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '换手率代理（20日）' })).not.toBeInTheDocument();
   });
 
@@ -2114,7 +2165,7 @@ describe('FactorModelBuilderPage', () => {
       makeFactor(),
       makeFactor({
         id: 's_val_ep_ltm_raw',
-        name: '盈利收益率 (LTM) (原始)',
+        name: '盈利收益率 (LTM) [Raw]',
         descriptor: {
           canonical_id: 's_val_ep_ltm_raw',
           source_prefix: 's',
@@ -2150,7 +2201,7 @@ describe('FactorModelBuilderPage', () => {
           comparison: {
             mvp: {
               factor_id: 's_val_ep_ltm_raw',
-              factor_name: '盈利收益率 (LTM) (原始)',
+              factor_name: '盈利收益率 (LTM) [Raw]',
             },
           },
         },
@@ -2198,7 +2249,7 @@ describe('FactorModelBuilderPage', () => {
     expect(screen.queryByText('阻断 / 风险')).not.toBeInTheDocument();
     expect(screen.queryByText('比对 / 操作')).not.toBeInTheDocument();
     expect(screen.getAllByText(/已归档/).length).toBeGreaterThan(0);
-    expect(screen.queryByText('盈利收益率 (LTM) (原始)')).not.toBeInTheDocument();
+    expect(screen.queryByText('盈利收益率 (LTM) [Raw]')).not.toBeInTheDocument();
     await waitFor(() => expect(document.querySelector('.factor-correlation__grid')?.getAttribute('style')).toContain('--factor-count: 2'));
   });
 
@@ -2336,7 +2387,12 @@ describe('FactorModelBuilderPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '确认执行' }));
     await waitFor(() => expect(fakeFactorApi.executeFactorGovernanceAction).toHaveBeenCalledWith(
       'gq_deprecate_s_mom_12m1m_rank',
-      expect.objectContaining({ confirm: true, command: 'DEPRECATE', factor_ids: ['s_mom_12m1m_rank'] }),
+      expect.objectContaining({
+        confirm: true,
+        command: 'DEPRECATE',
+        factor_ids: ['s_mom_12m1m_rank'],
+        include_governance_overview: false,
+      }),
     ));
     expect(await screen.findByText('[Auto-Mined] 动量因子策略')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '带入创建页' }));
@@ -2511,7 +2567,7 @@ describe('FactorModelBuilderPage', () => {
           severity: 'info',
           optimized_factor: {
             id: 's_alpha_vol_downsiderev_std_rk',
-            name: '反向下行风险 Alpha (精炼)',
+            name: '[风险] - 反向下行风险 Alpha (252d) [Refined-Rank]',
             expression: 'DownsideStd(Return(Close, 1), 252)',
             direction: 'HIGH_IS_BETTER',
             grade: 'B',
@@ -2533,7 +2589,7 @@ describe('FactorModelBuilderPage', () => {
       items: [
         makeFactor({
           id: 's_alpha_vol_downsiderev_std_rk',
-          name: '反向下行风险 Alpha (精炼)',
+          name: '[风险] - 反向下行风险 Alpha (252d) [Refined-Rank]',
           source: 'MANUAL',
           lifecycle_status: 'VERIFIED',
           diagnostic_status: 'COMPLETED',
@@ -2555,7 +2611,7 @@ describe('FactorModelBuilderPage', () => {
 
     const confirmDialog = await screen.findByRole('dialog', { name: '确认治理任务' });
     expect(confirmDialog).toHaveTextContent('优化后因子');
-    expect(confirmDialog).toHaveTextContent('反向下行风险 Alpha (精炼)');
+    expect(confirmDialog).toHaveTextContent('[风险] - 反向下行风险 Alpha (252d) [Refined-Rank]');
     expect(confirmDialog).toHaveTextContent('s_alpha_vol_downsiderev_std_rk');
     expect(confirmDialog).toHaveTextContent('Grade B');
     expect(confirmDialog).toHaveTextContent('Rank IC');
@@ -2568,6 +2624,7 @@ describe('FactorModelBuilderPage', () => {
         confirm: true,
         command: 'PUBLISH_OPTIMIZED_FACTOR',
         factor_ids: ['s_vol_downside_252d_rank'],
+        include_governance_overview: false,
       }),
     ));
   });
@@ -2671,7 +2728,7 @@ describe('FactorModelBuilderPage', () => {
       items: [
         makeFactor({
           id: 's_beta_market_252d_raw',
-          name: '市场 Beta (252日) (原始)',
+          name: '市场 Beta (252d) [Raw]',
           diagnostic_status: 'READY_TO_DIAGNOSE',
           ui_state: 'sandbox',
           ui_state_label: '沙箱',
@@ -2699,13 +2756,13 @@ describe('FactorModelBuilderPage', () => {
 
     renderLegacyFactorLibraryPage();
 
-    expect((await screen.findAllByText('市场 Beta (252日) (原始)')).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText('市场 Beta (252d) [Raw]')).length).toBeGreaterThan(0);
     const rankFallback = screen.getByText('Rank IC: 暂无');
     expect(rankFallback).toBeInTheDocument();
     expect(rankFallback).toHaveAttribute('title', 'Rank IC: 尚未提交诊断');
     expect(screen.queryByText('Rank IC: 尚未提交诊断')).not.toBeInTheDocument();
     expect(screen.getByText('暂无 IC')).toBeInTheDocument();
-    const factorButton = screen.getByRole('button', { name: '市场 Beta (252日) (原始)' });
+    const factorButton = screen.getByRole('button', { name: '市场 Beta (252d) [Raw]' });
     expect(factorButton.closest('tr')).toHaveTextContent('线上');
     expect(screen.queryByLabelText('IC 累积曲线缩略图')).not.toBeInTheDocument();
   });
@@ -2715,7 +2772,7 @@ describe('FactorModelBuilderPage', () => {
       items: [
         makeFactor({
           id: 's_alpha_valvol_blend_resid_std_rk',
-          name: '风险调整现金流回报 (精炼)',
+          name: '[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined-Rank]',
           descriptor: {
             canonical_id: 's_alpha_valvol_blend_resid_std_rk',
             source_prefix: 's',
@@ -2783,10 +2840,10 @@ describe('FactorModelBuilderPage', () => {
             ir: 0.42,
             coverage: 92.4,
             source_factor_id: 's_mom_12m1m_rank',
-            source_factor_name: 'Rank-12-1月截面动量 (排序)',
+            source_factor_name: '截面动量排名 (12-1m) [Rank]',
             data_lineage: {
               kind: 'REFERENCE_DEFAULT_FACTOR',
-              label: '参考口径：Rank-12-1月截面动量 (排序)',
+              label: '参考口径：截面动量排名 (12-1m) [Rank]',
             },
           },
           last_diagnostic_run_id: null,
@@ -2926,11 +2983,56 @@ describe('FactorModelBuilderPage', () => {
 
     render(<FactorDetailPage factorId="s_alpha_ffblend_cur_rank" />);
 
-    expect(await screen.findByRole('heading', { level: 1, name: /GSL-多因子全能动力诊断报告/ })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { level: 1, name: '[综合] - FF3 风格复合基石 (等权) [Beta-Free]诊断报告' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '点击诊断' })).toBeDisabled();
     expect(screen.getByText('尚未生成诊断报告')).toBeInTheDocument();
     expect(screen.getByText('等待 PIT 数据门禁恢复后可诊断')).toBeInTheDocument();
     expect(fakeFactorApi.getPitDataOverview).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks reused quarantine IC_IR as pending formal recompute on factor detail', async () => {
+    const irEvidence = {
+      value: 6.91,
+      display_value: null,
+      reference_only: true,
+      label: '待正式重算',
+      reason: '检疫发布摘要复用值缺少正式/调整后 IR 证据。',
+    };
+    const summary = makeFactorDiagnosticSummary({
+      run_id: 'fdiag_a_alpha_custom_cur_raw_publish',
+      factor_id: 'a_alpha_custom_cur_raw',
+      rank_ic: 0.3455,
+      ir: 6.91,
+      ir_display_value: null,
+      ir_reference_only: true,
+      ir_evidence: irEvidence,
+      data_lineage: { kind: 'QUARANTINE_PUBLISH_SUMMARY' },
+    });
+    fakeFactorApi.getFactor.mockResolvedValue(makeFactorDetail({
+      id: 'a_alpha_custom_cur_raw',
+      name: '[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined]',
+      diagnostic_status: 'COMPLETED',
+      latest_diagnostic_summary: summary,
+      last_diagnostic_run_id: summary.run_id,
+      quality_view: {
+        rank_ic: 0.3455,
+        ir: null,
+        raw_ir: 6.91,
+        ir_label: '待正式重算',
+        ir_reference_only: true,
+        ir_evidence: irEvidence,
+        coverage: 100,
+        decay_label: '252天',
+        sparkline: [],
+      },
+    }));
+    fakeFactorApi.getPitDataOverview.mockResolvedValue(makePitOverview());
+
+    render(<FactorDetailPage factorId="a_alpha_custom_cur_raw" />);
+
+    expect(await screen.findByText('待正式重算')).toBeInTheDocument();
+    expect(screen.getByText('检疫摘要，仅作审计参考')).toBeInTheDocument();
+    expect(screen.queryByText('6.91')).not.toBeInTheDocument();
   });
 
   it('keeps long factor formulas out of the detail subtitle and audit summary', async () => {
@@ -2989,7 +3091,7 @@ describe('FactorModelBuilderPage', () => {
       expression: 'FFBlend(Residual(MarketStd(Return())))',
       lifecycle_status: 'PRUNED',
       offline_command: 'PRUNE',
-      offline_reason: '冗余裁剪：同簇高相关且弱于风险调整现金流回报 (精炼)',
+      offline_reason: '冗余裁剪：同簇高相关且弱于[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined]',
       offline_at: '2026-05-20T09:10:10Z',
       offline_detail: {
         keep_factor_id: 'a_alpha_custom_cur_raw',
@@ -2997,7 +3099,7 @@ describe('FactorModelBuilderPage', () => {
         comparison: {
           mvp: {
             factor_id: 'a_alpha_custom_cur_raw',
-            factor_name: '风险调整现金流回报 (精炼)',
+            factor_name: '[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined]',
           },
         },
       },
@@ -3028,8 +3130,8 @@ describe('FactorModelBuilderPage', () => {
     expect(auditList).toHaveTextContent('检疫通过');
     expect(auditList).toHaveTextContent('自动发布落版');
     expect(auditList).toHaveTextContent('冗余裁剪');
-    expect(auditList).toHaveTextContent('保留因子：风险调整现金流回报 (精炼)（a_alpha_custom_cur_raw）');
-    expect(auditList).toHaveTextContent('冗余裁剪：同簇高相关且弱于风险调整现金流回报 (精炼)');
+    expect(auditList).toHaveTextContent('保留因子：[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined]（a_alpha_custom_cur_raw）');
+    expect(auditList).toHaveTextContent('冗余裁剪：同簇高相关且弱于[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined]');
     expect(auditList).toHaveTextContent('相关性 0.94');
     expect(auditList).not.toHaveTextContent('治理任务消息生成');
     expect(auditList).not.toHaveTextContent('生成多因子策略草稿建议，只进入待审查创建流。');
@@ -3089,7 +3191,7 @@ describe('FactorModelBuilderPage', () => {
         },
         {
           factor_id: 'f1_price_close',
-          name: '交易所-复权收盘价 (原始)',
+          name: '交易所 - 前复权收盘价 (原始)',
           category: '价格',
           pit_layer: 'L1',
           source_refs: { dataset_snapshot_id: 'ds-price', source: 'runtime_price' },
@@ -3254,8 +3356,17 @@ describe('FactorModelBuilderPage', () => {
     expect(factorsCss).toContain('.factor-sparkline__zero-label');
     expect(factorsCss).toContain('.factor-diagnostic-cell__separator');
     expect(factorsCss).toMatch(/\.factor-table-wrap\s*\{[^}]*overflow-x:\s*auto;/s);
+    expect(factorsCss).toMatch(/\.factor-table-wrap:has\(\.factor-table--f3-composite\)\s*\{[^}]*overflow-x:\s*hidden;/s);
     expect(factorsCss).toMatch(/\.factor-table\s*\{[^}]*width:\s*100%;[^}]*min-width:\s*100%;[^}]*table-layout:\s*auto;/s);
     expect(factorsCss).toMatch(/\.factor-table--phase1\s*\{[^}]*min-width:\s*1420px;/s);
+    expect(factorsCss).toMatch(/\.factor-table--f3-composite\s*\{[^}]*min-width:\s*0;[^}]*table-layout:\s*fixed;/s);
+    expect(factorsCss).toMatch(/\.factor-table--f3-composite th:nth-child\(1\),\s*\.factor-table--f3-composite td:nth-child\(1\)\s*\{[^}]*width:\s*22%;/s);
+    expect(factorsCss).toMatch(/\.factor-table--f3-composite th:nth-child\(3\),\s*\.factor-table--f3-composite td:nth-child\(3\)\s*\{[^}]*width:\s*8%;/s);
+    expect(factorsCss).toMatch(/@media\s*\(max-width:\s*900px\)[\s\S]*\.factor-table--f3-composite thead\s*\{[\s\S]*display:\s*none;/s);
+    expect(factorsCss).toMatch(/@media\s*\(max-width:\s*900px\)[\s\S]*\.factor-table--f3-composite td:nth-child\(n\)\s*\{[\s\S]*width:\s*100%;/s);
+    expect(factorsCss).toContain(".factor-table--f3-composite td:nth-child(3)::before { content: '算子状态灯'; }");
+    expect(factorsCss).toContain(".factor-table--f3-composite td:nth-child(4)::before { content: '信号质量'; }");
+    expect(factorsCss).toContain(".factor-table--f3-composite td:nth-child(10)::before { content: '操作'; }");
     expect(factorsCss).toMatch(/\.factor-table--phase1 th:nth-child\(1\),\s*\.factor-table--phase1 td:nth-child\(1\)\s*\{[^}]*min-width:\s*310px;[^}]*max-width:\s*none;/s);
     expect(factorsCss).toMatch(/\.factor-table--phase1 th:nth-child\(4\),\s*\.factor-table--phase1 td:nth-child\(4\)\s*\{[^}]*min-width:\s*430px;[^}]*width:\s*430px;/s);
     expect(factorsCss).toMatch(/\.factor-table--phase1 th:nth-child\(5\),\s*\.factor-table--phase1 td:nth-child\(5\)\s*\{[^}]*min-width:\s*138px;[^}]*white-space:\s*nowrap;/s);

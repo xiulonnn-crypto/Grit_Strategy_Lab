@@ -37,7 +37,10 @@ FACTOR_DISPLAY_NAME_SCHEMA_VERSION = "factor_display_name_v4"
 PUBLISHED_FACTOR_NAMING_SCHEMA_VERSION = FACTOR_DISPLAY_NAME_SCHEMA_VERSION
 FACTOR_DISPLAY_NAME_PROTOCOL_VERSION = "factor_display_name_v4_structured"
 FACTOR_DISPLAY_NAME_DEDUPE_STRATEGY = "parameter_first_then_sha8"
+FACTOR_DISPLAY_NAME_STANDARD_VERSION = "gsl_cn_naming_standard_2026_05"
 FACTOR_QUARANTINE_RULE_VERSION = "factor_quarantine_v2_0"
+FACTOR_PRUNE_CORRELATION_THRESHOLD = 0.90
+FACTOR_PRUNE_MIN_SERIES_OVERLAP = 6
 FUNDAMENTAL_SEED_VERSION = "v3_asset_growth_shares"
 QUARANTINE_MIN_NEWEY_WEST_IR = 0.1
 PHASE2_MIN_OOS_TO_IS_RATIO = 0.6
@@ -335,10 +338,10 @@ RESIDUAL_FACTOR_REFERENCE_PATTERN = re.compile(
     r"by\s*=\s*[\"'](?P<by>[A-Za-z_][A-Za-z0-9_]*)[\"']\s*\)\s*\)?\s*$"
 )
 OVERNIGHT_MEAN_FACTOR_ID = "s_f2_mom_ovn_mean_21d"
-OVERNIGHT_MEAN_FACTOR_NAME = "隔夜动量均值 (21日) (原始)"
+OVERNIGHT_MEAN_FACTOR_NAME = "隔夜动量均值 (21d) [Raw]"
 OVERNIGHT_MEAN_DESCRIPTION = "逻辑：衡量过去一个月平均隔夜收益。作用：捕捉非交易时段信息流入，但诊断中保留日内承接风险提示。"
 VALUE_VOL_WNZT_F3_FACTOR_ID = "s_alpha_valvol_blend_resid_std_rk"
-VALUE_VOL_WNZT_F3_FACTOR_NAME = "风险调整现金流回报 (精炼)"
+VALUE_VOL_WNZT_F3_FACTOR_NAME = "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined-Rank]"
 VALUE_VOL_WNZT_F3_EXPRESSION = (
     "Rank(Neutralize(ZScore(Winsorize(s_val_cfp_ltm_raw, 3)))) / "
     "Rank(Neutralize(ZScore(Winsorize(s_vol_downside_252d_rank, 3))))"
@@ -393,34 +396,34 @@ FACTOR_FAMILY_LABELS = {
     "vol": "\u98ce\u9669",
 }
 FACTOR_DISPLAY_NAME_V4_OVERRIDES = {
-    "f1_price_close": "交易所-复权收盘价 (原始)",
-    "f1_price_adjclose": "交易所-复权收盘价 (原始)",
-    "f1_return_1d_base": "交易所-1日收益率基准 (原始)",
-    "f1_short_balance": "FINRA-空头余额 (原始)",
-    "f1_short_vol": "FINRA-当日卖空成交量 (原始)",
-    "s_price_adjclose_cur_raw": "交易所-复权收盘价 (原始)",
-    "s_size_mcap_cur_raw": "交易所-总市值 (原始)",
-    "s_mom_12m1m_rank": "Rank-12-1月截面动量 (排序)",
-    "s_mom_6m_rank": "Rank-6月截面动量 (排序)",
+    "f1_price_close": "交易所 - 前复权收盘价 (原始)",
+    "f1_price_adjclose": "交易所 - 前复权收盘价 (原始)",
+    "f1_return_1d_base": "交易所 - 1d 收益率基准 (原始)",
+    "f1_short_balance": "FINRA - 空头余额 (原始)",
+    "f1_short_vol": "FINRA - 当日卖空成交量 (原始)",
+    "s_price_adjclose_cur_raw": "交易所 - 前复权收盘价 (原始)",
+    "s_size_mcap_cur_raw": "交易所 - 总市值 (原始)",
+    "s_mom_12m1m_rank": "截面动量排名 (12-1m) [Rank]",
+    "s_mom_6m_rank": "截面动量排名 (126d) [Rank]",
     "s_f2_mom_ovn_mean_21d": OVERNIGHT_MEAN_FACTOR_NAME,
-    "s_val_ep_ltm_raw": "盈利收益率 (LTM) (原始)",
-    "s_val_bp_latest_raw": "账面市值比 (最新) (原始)",
-    "s_val_cfp_ltm_raw": "现金流收益率 (LTM) (原始)",
-    "s_val_evocf_ltm_raw": "经营现金流企业价值比 (LTM) (原始)",
-    "s_qlty_roe_ltm_raw": "净资产收益率 (LTM) (原始)",
-    "s_qlty_fcfy_ttm_raw": "自由现金流收益率 (TTM) (原始)",
-    "s_qlty_leverage_cur_raw": "杠杆率 (当前) (原始)",
-    "s_inv_assetgrowth_1y_rank": "Rank-1年资产增长率 (排序)",
-    "s_inv_capex_ltm_raw": "资本开支率 (LTM) (原始)",
-    "s_vol_252d_rank": "Rank-252日波动率 (排序)",
-    "s_vol_downside_252d_rank": "Rank-252日下行波动率 (排序)",
-    "s_liq_turnover_20d_rank": "Rank-20日换手率 (排序)",
-    "s_liq_amihud_20d_rank": "Rank-20日非流动性 (排序)",
-    "s_beta_market_252d_raw": "市场 Beta (252日) (原始)",
-    "s_size_cur_log": "对数市值 (当前) (原始)",
-    "s_alpha_ffblend_resid_mkt_rank": "GSL-多因子全能动力",
+    "s_val_ep_ltm_raw": "盈利收益率 (LTM) [Raw]",
+    "s_val_bp_latest_raw": "账面市值比 (最新) [Raw]",
+    "s_val_cfp_ltm_raw": "现金流收益率 (LTM) [Raw]",
+    "s_val_evocf_ltm_raw": "经营现金流企业价值比 (LTM) [Raw]",
+    "s_qlty_roe_ltm_raw": "净资产收益率 (LTM) [Raw]",
+    "s_qlty_fcfy_ttm_raw": "自由现金流收益率 (LTM) [Raw]",
+    "s_qlty_leverage_cur_raw": "杠杆率 (当前) [Raw]",
+    "s_inv_assetgrowth_1y_rank": "资产增长率排名 (1y) [Rank]",
+    "s_inv_capex_ltm_raw": "资本开支率 (LTM) [Raw]",
+    "s_vol_252d_rank": "波动率排名 (252d) [Rank]",
+    "s_vol_downside_252d_rank": "下行波动率排名 (252d) [Rank]",
+    "s_liq_turnover_20d_rank": "换手率排名 (20d) [Rank]",
+    "s_liq_amihud_20d_rank": "非流动性排名 (20d) [Rank]",
+    "s_beta_market_252d_raw": "市场 Beta (252d) [Raw]",
+    "s_size_cur_log": "对数市值 (当前) [Raw]",
+    "s_alpha_ffblend_resid_mkt_rank": "[综合] - FF3 风格复合基石 (等权) [Beta-Free]",
     VALUE_VOL_WNZT_F3_FACTOR_ID: VALUE_VOL_WNZT_F3_FACTOR_NAME,
-    "s_alpha_vol_downsiderev_std_rk": "反向下行风险 Alpha (精炼)",
+    "s_alpha_vol_downsiderev_std_rk": "[风险] - 反向下行风险 Alpha (252d) [Refined-Rank]",
 }
 FACTOR_DISPLAY_NAME_V4_CATEGORY_LABELS = {
     "alpha": "Alpha",
@@ -436,6 +439,8 @@ FACTOR_DISPLAY_NAME_V4_CATEGORY_LABELS = {
 }
 FACTOR_DISPLAY_NAME_V4_METRIC_LABELS = {
     "amihud": "非流动性",
+    "asymupdown": "非对称波动率",
+    "accruals": "盈余质量",
     "assetgrowth": "资产增长率",
     "bp": "账面市值比",
     "capex": "资本开支率",
@@ -446,15 +451,28 @@ FACTOR_DISPLAY_NAME_V4_METRIC_LABELS = {
     "fcfy": "自由现金流收益率",
     "leverage": "杠杆率",
     "mcap": "总市值",
+    "mdd": "最大回撤",
     "momrisk": "风险调整动量",
     "momqlty": "质量驱动动量",
     "ovn_mean": "隔夜动量均值",
+    "patheff": "价格路径效率",
+    "pvdiv": "价量背离",
+    "px": "价格收益",
+    "raw": "",
     "ret": "收益率",
     "ret_px": "收益率",
+    "rk": "排名",
     "roe": "净资产收益率",
+    "skew": "偏度",
+    "std": "波动率",
+    "tsm": "时序动量",
     "turnover": "换手率",
+    "turnover_skew": "换手率偏度",
     "valcfpsize": "规模中性现金流收益率",
     "valvol": "现金流与下行风险",
+    "vol_conc": "量能汇聚",
+    "winsor3ret": "平滑收益率",
+    "winsorret": "平滑收益率",
 }
 FACTOR_GOVERNANCE_CATEGORY_BY_DESCRIPTOR = {
     "alpha": "other",
@@ -601,8 +619,22 @@ FACTOR_OP_LIGHTS = (
     ("Z", "zscore", "标准化"),
     ("T", "tsrank", "时序排名"),
 )
-FACTOR_GOVERNANCE_EXECUTE_COMMANDS = {"DEPRECATE", "PRUNE", "PUBLISH_OPTIMIZED_FACTOR"}
-FACTOR_GOVERNANCE_TASK_KINDS = {"DEPRECATE", "PRUNE", "FACTOR_MODEL_SUGGESTION", "FACTOR_OPTIMIZATION"}
+FACTOR_GOVERNANCE_EXECUTE_COMMANDS = {"DEPRECATE", "PRUNE", "PUBLISH_OPTIMIZED_FACTOR", "RESTORE_PRUNED"}
+FACTOR_GOVERNANCE_TASK_KINDS = {
+    "DEPRECATE",
+    "PRUNE",
+    "FACTOR_MODEL_SUGGESTION",
+    "FACTOR_OPTIMIZATION",
+    "REDUNDANCY_RESTORE",
+}
+FACTOR_RESTORE_LEVEL_RANK = {"S": 5, "A": 4, "B": 3, "C": 2, "D": 1}
+FACTOR_RESTORE_LIFECYCLE_RANK = {
+    "PRODUCTION": 5,
+    "ACTIVE": 4,
+    "VERIFIED": 4,
+    "COMPLETED": 4,
+    "DRAFT": 2,
+}
 
 
 class FactorDescriptorConflict(ValueError):
@@ -1415,13 +1447,18 @@ def _factor_display_window_label(window: Any) -> str:
     token = str(window or "").strip().lower()
     if not token:
         return ""
-    fixed = {"cur": "当前", "latest": "最新", "ltm": "LTM", "ttm": "TTM", "pit": "PIT", "12m1m": "12-1月"}
+    fixed = {"cur": "当前", "latest": "最新", "ltm": "LTM", "ttm": "LTM", "fy1": "FY1", "pit": "PIT", "12m1m": "12-1m"}
     if token in fixed:
         return fixed[token]
     match = re.fullmatch(r"(\d+)(d|m|y)", token)
     if match:
-        unit = {"d": "日", "m": "月", "y": "年"}[match.group(2)]
-        return f"{match.group(1)}{unit}"
+        value = int(match.group(1))
+        unit = match.group(2)
+        if unit == "m" and value in {1, 3, 6}:
+            return {1: "21d", 3: "63d", 6: "126d"}[value]
+        if unit == "y" and value == 1:
+            return "252d"
+        return f"{value}{unit}"
     return token.upper()
 
 
@@ -1448,11 +1485,11 @@ def _factor_display_base_semantic(
     delta_window = re.search(r"Delta\s*\(\s*Close\s*,\s*(\d+)\s*\)", compact_expression, flags=re.IGNORECASE)
     if std_window:
         label = "下行波动率" if std_window.group(1).lower() == "downsidestd" else "波动率"
-        return f"{std_window.group(2)}日{label}", ""
+        return label, f"{std_window.group(2)}d"
     if return_window:
-        return f"{return_window.group(1)}日收益率", ""
+        return "收益率", f"{return_window.group(1)}d"
     if delta_window:
-        return f"{delta_window.group(1)}日价格变化", ""
+        return "价格变化", f"{delta_window.group(1)}d"
     metric_label = FACTOR_DISPLAY_NAME_V4_METRIC_LABELS.get(metric)
     if not metric_label:
         tokens = [token for token in metric.split("_") if token]
@@ -1501,6 +1538,11 @@ def _factor_display_state(
 ) -> tuple[str, list[str], str]:
     expression_lower = str(expression or "").lower()
     operator = str(descriptor.get("operator") or "").strip().lower()
+    descriptor_text = " ".join(
+        str(descriptor.get(key) or "").strip().lower()
+        for key in ("category", "metric", "operator", "canonical_id")
+    )
+    combined_text = f"{descriptor_text} {expression_lower}"
     completed = {
         str(item).strip().upper()
         for item in ((op_status or {}).get("completed") or [])
@@ -1513,11 +1555,11 @@ def _factor_display_state(
         badges.append("WNZT")
     if "zscore" in expression_lower or "z_score" in expression_lower or operator in {"z", "std"} or "Z" in completed:
         badges.append("WNZT")
-    if "rank(" in expression_lower or "tsrank" in expression_lower or operator in {"rank", "rk"} or "T" in completed:
+    if "rank(" in expression_lower or "tsrank" in expression_lower or operator in {"rank", "rk"}:
         badges.append("Rank")
-    if "residual" in expression_lower or "resid" in expression_lower or "beta" in expression_lower:
+    if "residual" in combined_text or "resid" in combined_text:
         badges.append("Resid")
-    if "blend" in expression_lower or "ffblend" in expression_lower or tier == "F3":
+    if "blend" in combined_text or "ffblend" in combined_text or tier == "F3":
         badges.append("Blend")
     if tier == "F1":
         badges.append("Raw")
@@ -1526,9 +1568,9 @@ def _factor_display_state(
         return "超额", list(dict.fromkeys(badges)), ""
     if "WNZT" in badges and tier in {"F2", "F3"}:
         zscore_like = operator in {"z", "std"} or "zscore" in expression_lower or "z_score" in expression_lower
-        return "精炼", list(dict.fromkeys(badges)), "ZScore-" if zscore_like else ""
+        return "精炼", list(dict.fromkeys(badges)), ""
     if "Rank" in badges:
-        return "排序", list(dict.fromkeys(badges)), "Rank-"
+        return "排序", list(dict.fromkeys(badges)), ""
     badges.append("Raw")
     return "原始", list(dict.fromkeys(badges)), ""
 
@@ -1536,6 +1578,7 @@ def _factor_display_state(
 def _factor_display_short_name(display_name: str) -> str:
     short = re.sub(r"\s*\((?:原始|精炼|排序|超额)\)\s*$", "", str(display_name or "").strip())
     short = re.sub(r"\s*\((?:Raw|WNZT|Rank|Resid|Blend)\)\s*$", "", short)
+    short = re.sub(r"\s*\[(?:Raw|Refined|Rank|Beta-Free|Refined-Rank)\]\s*$", "", short)
     return short or display_name
 
 
@@ -1548,26 +1591,102 @@ def _factor_display_unique_tokens(items: Sequence[Any]) -> list[str]:
     return tokens
 
 
+def _factor_display_standard_window_token(token: Any) -> str:
+    label = _factor_display_window_label(token)
+    if not label:
+        return ""
+    if label in {"当前", "最新", "LTM", "FY1", "PIT", "12-1m"}:
+        return label
+    if re.fullmatch(r"\d+[dmy]", label.lower()):
+        return label.lower()
+    return ""
+
+
+def _factor_display_context_text(
+    *,
+    factor_id: str = "",
+    descriptor: Mapping[str, Any] | None = None,
+    expression: Any = None,
+    neutralization_scope: Any = None,
+    residual_control: Any = None,
+) -> str:
+    descriptor = descriptor or {}
+    parts = [
+        factor_id,
+        expression,
+        neutralization_scope,
+        residual_control,
+        descriptor.get("category"),
+        descriptor.get("metric"),
+        descriptor.get("operator"),
+        descriptor.get("canonical_id"),
+    ]
+    return " ".join(str(item or "").strip().lower() for item in parts if str(item or "").strip())
+
+
+def _factor_display_is_beta_free(
+    *,
+    expression: Any,
+    residual_control: Any = None,
+) -> bool:
+    expression_text = str(expression or "").lower()
+    control_text = str(residual_control or "").lower()
+    if any(token in expression_text for token in ("residual(", "residual ", "resid(", "orthogonalize(")):
+        return True
+    if any(token in control_text for token in ("market_beta", "market beta", "industry_beta", "industry beta", "size_beta", "size beta")):
+        return True
+    if "residual" in control_text or "resid" in control_text:
+        return True
+    return False
+
+
+def _factor_display_completed_ops(op_status: Mapping[str, Any] | None = None) -> set[str]:
+    if not isinstance(op_status, Mapping):
+        return set()
+    completed = {
+        str(item).strip().upper()
+        for item in (op_status.get("completed") or [])
+        if str(item).strip()
+    }
+    lights = op_status.get("lights")
+    if isinstance(lights, Sequence) and not isinstance(lights, (str, bytes)):
+        for item in lights:
+            if not isinstance(item, Mapping):
+                continue
+            status = str(item.get("status") or "").strip().lower()
+            if bool(item.get("active")) or status == "done":
+                code = str(item.get("code") or "").strip().upper()
+                if code:
+                    completed.add(code)
+    return completed
+
+
 def _factor_display_structured_governance(
     *,
     badges: Sequence[str],
     expression: Any,
     descriptor: Mapping[str, Any],
     tier: str,
+    factor_id: str = "",
+    op_status: Mapping[str, Any] | None = None,
+    residual_control: Any = None,
 ) -> str:
     badge_set = {str(item).strip() for item in badges if str(item).strip()}
-    expression_lower = str(expression or "").lower()
     operator = str(descriptor.get("operator") or "").strip().lower()
-    if "Resid" in badge_set:
-        if any(token in expression_lower for token in ("market", "mkt", "beta")):
-            return "Market-Neutral"
-        return "Orthogonal"
+    canonical = str(factor_id or descriptor.get("canonical_id") or "").strip().lower()
+    completed_ops = _factor_display_completed_ops(op_status)
+    if canonical.endswith("_raw"):
+        return "Refined" if {"W", "N", "Z", "T"}.issubset(completed_ops) else "Raw"
+    if _factor_display_is_beta_free(expression=expression, residual_control=residual_control):
+        return "Beta-Free"
+    if operator == "raw" and tier != "F3":
+        return "Raw"
     if "WNZT" in badge_set and ("Rank" in badge_set or operator in {"rank", "rk"}):
-        return "Standard-Rank"
+        return "Refined-Rank"
     if "WNZT" in badge_set:
         return "Refined"
     if "Rank" in badge_set:
-        return "Standard-Rank"
+        return "Rank"
     if tier == "F1" or "Raw" in badge_set:
         return "Raw"
     return "Refined" if tier == "F3" else "Raw"
@@ -1581,11 +1700,13 @@ def _factor_display_parameter_tokens(
 ) -> list[str]:
     canonical = str(factor_id or "").strip().lower()
     metric = str(descriptor.get("metric") or "").strip().lower()
-    window_label = _factor_display_window_label(descriptor.get("window"))
+    window_label = _factor_display_standard_window_token(descriptor.get("window"))
     expression_text = str(expression or "")
     expression_lower = expression_text.lower()
     compact_expression = _factor_display_compact_expression(expression_text)
     tokens: list[str] = []
+    if "ffblend" in expression_lower or "ffblend" in metric:
+        return ["等权"]
     if window_label and window_label not in {"当前", "最新"}:
         tokens.append(window_label)
     elif window_label in {"当前", "最新"} and not expression_text:
@@ -1610,18 +1731,29 @@ def _factor_display_parameter_tokens(
     ):
         tokens.append(f"{match.group(1)}d")
     for match in re.finditer(r"_(\d+)(d|m|y)(?:_|$)", f"{canonical}_{expression_lower}"):
-        tokens.append(f"{match.group(1)}{match.group(2)}")
+        tokens.append(_factor_display_standard_window_token(f"{match.group(1)}{match.group(2)}"))
+    if "12m1m" in f"{canonical} {metric} {expression_lower}":
+        tokens.append("12-1m")
     if any(token in f"{canonical} {metric} {expression_lower}" for token in ("ltm", "rolling_twelve")):
         tokens.append("LTM")
     if "ttm" in f"{canonical} {metric} {expression_lower}":
-        tokens.append("TTM")
-    if any(token in f"{canonical} {metric} {expression_lower}" for token in ("mean", "avg", "average")):
-        tokens.append("均值")
-    if "/" in expression_text or any(token in f"{canonical} {metric}" for token in ("ratio", "valvol", "risk_adjusted")):
-        tokens.append("波动比" if any(token in expression_lower for token in ("vol", "downside", "risk")) else "比值")
-    if "ffblend" in expression_lower or "blend" in expression_lower or "blend" in metric:
-        tokens.append("多因子")
-    return _factor_display_unique_tokens(tokens) or ["当前"]
+        tokens.append("LTM")
+    unique_tokens = _factor_display_unique_tokens(tokens) or ["当前"]
+    def _parameter_token_order(token: str) -> tuple[int, int, str]:
+        if token == "LTM":
+            return (0, 0, token)
+        if token == "FY1":
+            return (0, 1, token)
+        if token == "12-1m":
+            return (1, 0, token)
+        match = re.fullmatch(r"(\d+)d", token)
+        if match:
+            return (2, int(match.group(1)), token)
+        if token in {"当前", "最新"}:
+            return (3, 0, token)
+        return (4, 0, token)
+
+    return sorted(unique_tokens, key=_parameter_token_order)
 
 
 def _factor_display_core_semantic(
@@ -1631,22 +1763,81 @@ def _factor_display_core_semantic(
     expression: Any,
     tier: str,
     fallback_semantic: str,
+    residual_control: Any = None,
 ) -> str:
     canonical = str(factor_id or "").strip().lower()
     metric = str(descriptor.get("metric") or "").strip().lower()
+    category = str(descriptor.get("category") or "").strip().lower()
+    operator = str(descriptor.get("operator") or "").strip().lower()
     expression_lower = str(expression or "").lower()
     combined = f"{canonical} {metric} {expression_lower}"
+    if "ovn" in combined or "overnight" in combined:
+        return "隔夜动量均值" if any(token in combined for token in ("mean", "avg", "average")) else "隔夜动量"
+    if tier == "F2" and any(token in combined for token in ("winsor", "winsorize")) and any(
+        token in combined for token in ("ret", "return")
+    ):
+        return "平滑收益率"
+    if canonical == "s_size_cur_log" or (category == "size" and operator == "log"):
+        return "对数市值"
+    if tier == "F2" and category == "mom" and (operator in {"rank", "rk"} or canonical.endswith("_rank")):
+        return "截面动量排名"
+    if "downsiderev" in combined:
+        return "反向下行风险 Alpha"
+    if "ffblend" in combined or ("blend" in combined and tier == "F3" and "valvol" not in combined):
+        return "FF3 风格复合基石"
+    if "beta_market" in combined or "market_beta" in combined or (category == "beta" and "market" in combined):
+        return "市场 Beta"
     if any(token in combined for token in ("cfp", "cashflow", "cash_flow", "operating_cash_flow")) and any(
         token in combined for token in ("vol", "downside", "risk")
     ):
-        return "现金流回报"
-    if "ffblend" in combined or ("blend" in combined and tier == "F3"):
-        return "多因子综合"
-    if "residual" in combined or "resid" in combined:
-        return "超额 Alpha"
-    if tier == "F3" and any(token in combined for token in ("mom", "return", "ret")):
-        return "成长动能 Alpha"
+        if "s_vol_downside" in combined or "downside" in combined:
+            return "下行风险调节-现金流回报比"
+        return "风险调整现金流回报比"
+    if _factor_display_is_beta_free(expression=expression, residual_control=residual_control) and any(
+        token in combined for token in ("cfp", "cashflow", "cash_flow", "operating_cash_flow")
+    ):
+        return "纯净现金流 Alpha"
+    if _factor_display_is_beta_free(expression=expression, residual_control=residual_control):
+        return "纯净 Alpha"
+    if tier == "F3" and any(token in combined for token in ("mom", "return", "ret")) and any(
+        token in combined for token in ("vol", "risk", "std")
+    ):
+        return "风险调整回报比"
+    if tier == "F2" and (operator in {"rank", "rk"} or canonical.endswith("_rank")) and fallback_semantic and not fallback_semantic.endswith("排名"):
+        return f"{fallback_semantic}排名"
     return fallback_semantic or ("多因子综合" if tier == "F3" else "因子信号")
+
+
+def _factor_display_style_family(
+    *,
+    factor_id: str,
+    descriptor: Mapping[str, Any],
+    expression: Any,
+) -> str:
+    combined = _factor_display_context_text(factor_id=factor_id, descriptor=descriptor, expression=expression)
+    if "ffblend" in combined:
+        return "综合"
+    if any(token in combined for token in ("val", "cfp", "cashflow", "cash_flow", "ep", "bp", "fcfy", "evocf")):
+        return "估值"
+    if any(token in combined for token in ("qlty", "quality", "roe", "accrual", "leverage")):
+        return "质量"
+    if "size" in combined or "mcap" in combined:
+        return "规模"
+    if any(token in combined for token in ("risk", "vol", "downside", "beta", "std", "mdd")):
+        return "风险"
+    if any(token in combined for token in ("mom", "return", "ret", "ovn")):
+        return "动量"
+    if any(token in combined for token in ("liq", "sentiment", "turnover", "amihud", "short")):
+        return "情绪"
+    return "综合"
+
+
+def _factor_display_formula_tooltip(*, factor_id: str, expression: Any, descriptor: Mapping[str, Any]) -> str:
+    expression_text = str(expression or "").strip()
+    if expression_text:
+        return expression_text
+    canonical = str(descriptor.get("canonical_id") or factor_id or "").strip()
+    return canonical
 
 
 def _factor_display_benchmark_label(
@@ -1660,8 +1851,6 @@ def _factor_display_benchmark_label(
         str(item or "")
         for item in (
             expression,
-            descriptor.get("metric"),
-            descriptor.get("operator"),
             neutralization_scope,
             residual_control,
         )
@@ -1670,8 +1859,8 @@ def _factor_display_benchmark_label(
         return "对标 SP500", []
     if any(token in text for token in ("nasdaq100", "nasdaq_100", "nasdaq 100", "ndx", "qqq")):
         return "对标 纳指100", []
-    if any(token in text for token in ("market_beta", "market beta", "mkt", "beta")):
-        return "剥离市场Beta", ["benchmark_missing"]
+    if any(token in text for token in ("market_beta", "market beta", "s_beta_market", "mkt")):
+        return "剥离市场Beta", []
     if any(token in text for token in ("residual", "resid")):
         return "", ["benchmark_missing"]
     return "", []
@@ -1688,18 +1877,34 @@ def _factor_display_structured_projection(
     fallback_semantic: str,
     fallback_window: str,
     neutralization_scope: Any = None,
+    op_status: Mapping[str, Any] | None = None,
     residual_control: Any = None,
 ) -> dict[str, Any]:
+    formula_tooltip = _factor_display_formula_tooltip(
+        factor_id=factor_id,
+        expression=expression,
+        descriptor=descriptor,
+    )
     if tier == "F1":
+        source_label, _, subject = display_name.partition(" - ")
         return {
             "base_display_name_cn": display_name,
             "structured_display_name_cn": display_name,
             "name_collision_key": re.sub(r"\s+", "", display_name.lower()),
             "structured_components": {
+                "style_family": "",
+                "data_source": source_label or "交易所",
+                "physical_subject": subject.replace(" (原始)", "") if subject else fallback_semantic,
                 "core_semantic": fallback_semantic,
+                "core_metric": fallback_semantic,
+                "time_window": "",
                 "parameter_label": fallback_window or "原始字段",
+                "governance_tag": "Raw",
                 "governance_level": "Raw",
                 "benchmark_label": "",
+                "formula_tooltip": formula_tooltip,
+                "differentiator_tokens": [],
+                "naming_standard_version": FACTOR_DISPLAY_NAME_STANDARD_VERSION,
                 "audit_gaps": [],
             },
         }
@@ -1713,6 +1918,9 @@ def _factor_display_structured_projection(
         expression=expression,
         descriptor=descriptor,
         tier=tier,
+        factor_id=factor_id,
+        op_status=op_status,
+        residual_control=residual_control,
     )
     core_semantic = _factor_display_core_semantic(
         factor_id=factor_id,
@@ -1720,6 +1928,7 @@ def _factor_display_structured_projection(
         expression=expression,
         tier=tier,
         fallback_semantic=fallback_semantic,
+        residual_control=residual_control,
     )
     benchmark_label, audit_gaps = _factor_display_benchmark_label(
         expression=expression,
@@ -1728,18 +1937,40 @@ def _factor_display_structured_projection(
         residual_control=residual_control,
     )
     parameter_label = "/".join(parameter_tokens)
-    structured_name = f"{core_semantic} - {parameter_label} [{governance_level}]"
-    if benchmark_label:
-        structured_name = f"{structured_name} - {benchmark_label}"
+    if tier == "F3":
+        style_family = _factor_display_style_family(
+            factor_id=factor_id,
+            descriptor=descriptor,
+            expression=expression,
+        )
+        structured_name = f"[{style_family}] - {core_semantic} ({parameter_label}) [{governance_level}]"
+    else:
+        style_family = ""
+        structured_name = f"{core_semantic} ({parameter_label}) [{governance_level}]"
+    differentiators = _factor_display_unique_tokens(
+        [
+            *parameter_tokens,
+            benchmark_label,
+            neutralization_scope,
+            residual_control,
+        ]
+    )
     return {
         "base_display_name_cn": structured_name,
         "structured_display_name_cn": structured_name,
         "name_collision_key": re.sub(r"\s+", "", structured_name.lower()),
         "structured_components": {
+            "style_family": style_family,
             "core_semantic": core_semantic,
+            "core_metric": core_semantic,
+            "time_window": parameter_tokens[0] if parameter_tokens else "",
             "parameter_label": parameter_label,
+            "governance_tag": governance_level,
             "governance_level": governance_level,
             "benchmark_label": benchmark_label,
+            "formula_tooltip": formula_tooltip,
+            "differentiator_tokens": differentiators,
+            "naming_standard_version": FACTOR_DISPLAY_NAME_STANDARD_VERSION,
             "audit_gaps": audit_gaps,
         },
     }
@@ -1805,29 +2036,31 @@ def factor_display_name_projection_v4(
                 source_label = "SEC"
             elif any(token in canonical.lower() or token in expression_lower for token in ("finra", "short")):
                 source_label = "FINRA"
-            display_name = f"{source_label}-{semantic} (原始)"
+            display_name = f"{source_label} - {semantic} (原始)"
         elif tier == "F3":
             if "residual" in expression_lower or "resid" in canonical.lower():
-                display_name = "超额 Alpha (剥离市场 Beta)"
+                display_name = "[综合] - 纯净 Alpha (当前) [Beta-Free]"
             elif (
                 any(token in expression_lower for token in ("cfp", "cashflow", "cash_flow", "cash"))
                 and any(token in expression_lower for token in ("vol", "downside", "risk"))
                 and "/" in str(expression or "")
             ):
-                display_name = "风险调整现金流回报 (精炼)"
+                display_name = "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined]"
             elif "blend" in expression_lower or "ffblend" in expression_lower:
-                display_name = f"多维{semantic}评分 (精炼)"
+                display_name = f"[综合] - {semantic} (等权) [Refined]"
             else:
-                display_name = f"{semantic}合成信号 (精炼)"
+                display_name = f"[综合] - {semantic} (当前) [Refined]"
         else:
             window_part = f" ({window})" if window else ""
             if "residual" in expression_lower or "resid" in canonical.lower():
                 control = "市场 Beta" if any(token in expression_lower for token in ("market", "mkt", "beta")) else "规模"
                 display_name = f"超额{semantic} (剥离{control})"
             elif "neutral" in expression_lower:
-                display_name = f"行业中性化-{semantic}{window_part} (精炼)"
+                display_name = f"行业中性化{semantic}{window_part} [Refined]"
             else:
-                display_name = f"{prefix}{semantic}{window_part} ({state})"
+                tag = {"原始": "Raw", "精炼": "Refined", "排序": "Rank", "超额": "Beta-Free"}.get(state, "Raw")
+                display_name = f"{prefix}{semantic}{window_part} [{tag}]"
+    projected_seed_display_name = display_name
     if "原始" in display_name and "Raw" not in badges:
         badges.append("Raw")
     if "精炼" in display_name and "WNZT" not in badges:
@@ -1838,6 +2071,19 @@ def factor_display_name_projection_v4(
         badges.append("Resid")
     if "多因子" in display_name and "Blend" not in badges:
         badges.append("Blend")
+    if "[Raw]" in display_name and "Raw" not in badges:
+        badges.append("Raw")
+    if "[Rank]" in display_name and "Rank" not in badges:
+        badges.append("Rank")
+    if "[Refined]" in display_name and "WNZT" not in badges:
+        badges.append("WNZT")
+    if "[Refined-Rank]" in display_name:
+        if "WNZT" not in badges:
+            badges.append("WNZT")
+        if "Rank" not in badges:
+            badges.append("Rank")
+    if "[Beta-Free]" in display_name and "Resid" not in badges:
+        badges.append("Resid")
     structured_projection = _factor_display_structured_projection(
         factor_id=canonical,
         descriptor=descriptor_map,
@@ -1848,12 +2094,19 @@ def factor_display_name_projection_v4(
         fallback_semantic=semantic,
         fallback_window=window,
         neutralization_scope=neutralization_scope,
+        op_status=op_status,
         residual_control=residual_control,
     )
+    display_name = str(structured_projection.get("structured_display_name_cn") or display_name)
     stored_name = str(name or "").strip()
     legacy_aliases = [
         item
-        for item in (stored_name, str(factor_id or "").strip(), DEFAULT_FACTOR_ALIAS_BY_CANONICAL.get(canonical))
+        for item in (
+            stored_name,
+            projected_seed_display_name,
+            str(factor_id or "").strip(),
+            DEFAULT_FACTOR_ALIAS_BY_CANONICAL.get(canonical),
+        )
         if item and item != display_name
     ]
     return {
@@ -1863,6 +2116,7 @@ def factor_display_name_projection_v4(
         "governance_badges": list(dict.fromkeys(badges)),
         "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
         "naming_protocol_version": FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
+        "naming_standard_version": FACTOR_DISPLAY_NAME_STANDARD_VERSION,
         "base_display_name_cn": structured_projection["base_display_name_cn"],
         "name_collision_key": structured_projection["name_collision_key"],
         "name_dedupe_suffix": "",
@@ -1873,6 +2127,7 @@ def factor_display_name_projection_v4(
             "new_display_name": display_name,
             "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
             "naming_protocol_version": FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
+            "naming_standard_version": FACTOR_DISPLAY_NAME_STANDARD_VERSION,
             "dedupe_strategy": FACTOR_DISPLAY_NAME_DEDUPE_STRATEGY,
             "rename_reason": "display_name_v4_projection",
             "structured_components": structured_projection["structured_components"],
@@ -1900,6 +2155,7 @@ def factor_publish_metadata_v4(
     return {
         "naming_rule_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
         "naming_protocol_version": FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
+        "naming_standard_version": FACTOR_DISPLAY_NAME_STANDARD_VERSION,
         "dedupe_strategy": FACTOR_DISPLAY_NAME_DEDUPE_STRATEGY,
         "display_name_cn": display_name_cn,
         "base_display_name_cn": base_display_name_cn,
@@ -6829,6 +7085,9 @@ class FactorResearchService:
         self._factor_list_pit_overview_cache_seconds = 300.0
         self._factor_list_pit_overview_cache_lock = threading.Lock()
         self._factor_list_pit_overview_cache: tuple[float, dict[str, Any]] | None = None
+        self._factor_governance_overview_cache_seconds = 60.0
+        self._factor_governance_overview_cache_lock = threading.Lock()
+        self._factor_governance_overview_cache: tuple[tuple[Any, ...], float, dict[str, Any]] | None = None
         ensure_default_fundamental_snapshot(self.market_data_repository)
         self.ensure_default_factors()
 
@@ -7078,8 +7337,8 @@ class FactorResearchService:
                 old_id = str(row.get("id") or "")
                 expression = str(row.get("expression") or "")
                 desired_id = _auto_mined_factor_id_from_expression(expression)
-                repaired_name = _auto_mined_factor_name(desired_id, expression)
                 if _is_legacy_auto_mined_factor_id(old_id, expression):
+                    repaired_name = _auto_mined_factor_name(desired_id, expression)
                     collision = conn.execute(
                         "SELECT id FROM factor_definitions WHERE id = ? AND id <> ? AND deleted_at IS NULL",
                         (desired_id, old_id),
@@ -7199,6 +7458,7 @@ class FactorResearchService:
                         )
                         conn.execute("DELETE FROM factor_definitions WHERE id = ?", (old_id,))
                     continue
+                repaired_name = _auto_mined_factor_name(old_id, expression)
                 if repaired_name != str(row.get("name") or ""):
                     conn.execute(
                         """
@@ -7317,7 +7577,15 @@ class FactorResearchService:
         factor: Mapping[str, Any],
         blockers: Sequence[Mapping[str, Any]],
     ) -> dict[str, Any]:
-        if factor.get("latest_diagnostic_summary"):
+        summary = factor.get("latest_diagnostic_summary")
+        if isinstance(summary, Mapping):
+            ir_evidence = self._factor_ir_evidence(summary)
+            if ir_evidence.get("reference_only"):
+                return {
+                    "rank_ic": "Rank IC: 检疫发布摘要复用",
+                    "coverage": "覆盖率: 检疫摘要参考",
+                    "next_action": "IC_IR: 样本不足，待正式重算",
+                }
             return {}
         if not blockers:
             return {
@@ -7541,7 +7809,106 @@ class FactorResearchService:
             normalized["status"] = "COMPLETED"
         if normalized.get("group_returns") or normalized.get("group_return_series"):
             normalized["monotonicity"] = self._factor_group_return_shape(normalized)
+        ir_evidence = self._factor_ir_evidence(normalized)
+        normalized["ir_evidence"] = ir_evidence
+        normalized["ir_display_value"] = ir_evidence.get("display_value")
+        normalized["ir_reference_only"] = bool(ir_evidence.get("reference_only"))
         return normalized
+
+    @staticmethod
+    def _factor_metric_number(value: Any) -> float | None:
+        if value is None:
+            return None
+        parsed = _coerce_float(value, math.nan)
+        return parsed if math.isfinite(parsed) else None
+
+    @classmethod
+    def _factor_ir_evidence(cls, summary: Mapping[str, Any]) -> dict[str, Any]:
+        if not isinstance(summary, Mapping):
+            return {
+                "value": None,
+                "display_value": None,
+                "reference_only": False,
+                "label": "IR 缺失",
+                "source": "missing",
+            }
+        existing = summary.get("ir_evidence") if isinstance(summary.get("ir_evidence"), Mapping) else {}
+        is_oos = summary.get("is_oos") if isinstance(summary.get("is_oos"), Mapping) else {}
+        lineage = summary.get("data_lineage") if isinstance(summary.get("data_lineage"), Mapping) else {}
+        reuse = summary.get("diagnostic_reuse") if isinstance(summary.get("diagnostic_reuse"), Mapping) else {}
+        raw_ir = cls._factor_metric_number(summary.get("ir"))
+        adjusted_ir = cls._factor_metric_number(
+            summary.get("information_ratio")
+            if summary.get("information_ratio") is not None
+            else is_oos.get("information_ratio")
+        )
+        naive_ir = cls._factor_metric_number(
+            summary.get("naive_ir")
+            if summary.get("naive_ir") is not None
+            else is_oos.get("naive_ir")
+        )
+        holding_period = int(_coerce_float(is_oos.get("holding_period"), 0.0))
+        newey_west_lags = int(_coerce_float(is_oos.get("newey_west_lags"), 0.0))
+        lineage_kind = str(lineage.get("kind") or "").upper()
+        reuse_kind = str(reuse.get("kind") or "").upper()
+        is_quarantine_publish = lineage_kind == "QUARANTINE_PUBLISH_SUMMARY"
+        matches_naive = (
+            raw_ir is not None
+            and naive_ir is not None
+            and abs(abs(raw_ir) - abs(naive_ir)) <= 0.005
+        )
+        high_unadjusted_quarantine_ir = (
+            raw_ir is not None
+            and abs(raw_ir) > 3.0
+            and holding_period <= 1
+            and newey_west_lags <= 0
+        )
+        reference_only = bool(
+            existing.get("reference_only")
+            or (
+                is_quarantine_publish
+                and adjusted_ir is None
+                and raw_ir is not None
+                and (
+                    matches_naive
+                    or high_unadjusted_quarantine_ir
+                    or bool(summary.get("published_diagnostic_reused"))
+                    or reuse_kind == "PUBLISHED_QUARANTINE_SUMMARY"
+                )
+            )
+        )
+        if adjusted_ir is not None:
+            display_value = adjusted_ir
+            label = "Newey-West 修正 IR"
+            source = "information_ratio"
+            reference_only = False
+        elif reference_only:
+            display_value = None
+            label = "待正式重算"
+            source = "quarantine_publish_naive_ir"
+        else:
+            display_value = raw_ir
+            label = "IR"
+            source = "summary"
+        reason = existing.get("reason")
+        if not reason and reference_only:
+            reason = "检疫发布摘要复用值缺少正式/调整后 IR 证据，原始数值仅保留为审计参考。"
+        elif not reason:
+            reason = "来自最近诊断或已调整的信息比率。"
+        return {
+            "value": _safe_round(raw_ir, 4) if raw_ir is not None else None,
+            "display_value": _safe_round(display_value, 4) if display_value is not None else None,
+            "reference_only": reference_only,
+            "label": label,
+            "source": source,
+            "reason": str(reason),
+            "naive_ir": _safe_round(naive_ir, 4) if naive_ir is not None else None,
+            "information_ratio": _safe_round(adjusted_ir, 4) if adjusted_ir is not None else None,
+            "method": is_oos.get("ir_method") or summary.get("ir_method"),
+            "holding_period": holding_period or None,
+            "newey_west_lags": newey_west_lags,
+            "lineage_kind": lineage_kind or None,
+        }
 
     def _normalise_policy_item(self, item: Mapping[str, Any], *, severity: str) -> dict[str, Any]:
         code = str(item.get("code") or item.get("event_type") or "UNKNOWN").strip().upper() or "UNKNOWN"
@@ -7580,7 +7947,7 @@ class FactorResearchService:
     @staticmethod
     def _factor_grade_score(summary: Mapping[str, Any]) -> int | None:
         rank_ic_raw = summary.get("rank_ic")
-        ir_raw = summary.get("ir")
+        ir_raw = FactorResearchService._factor_ir_evidence(summary).get("display_value")
         if rank_ic_raw is None or ir_raw is None:
             return None
         rank_ic = abs(_coerce_float(rank_ic_raw))
@@ -7887,16 +8254,16 @@ class FactorResearchService:
         )
         noise_like = grade_score == 1 and rank_ic_abs < 0.01 and ir_abs <= 0.2
         persistent_group_inversion = bool(group_shape.get("inverted"))
-        eligible = strict_deprecate or noise_like or persistent_group_inversion
+        eligible = strict_deprecate or persistent_group_inversion
         return {
             "eligible": eligible,
             "rule": (
                 "strict_deprecate"
                 if strict_deprecate
-                else "grade_d_noise_like"
-                if noise_like
                 else "persistent_group_inversion"
                 if persistent_group_inversion
+                else "grade_d_noise_like"
+                if noise_like
                 else "not_eligible"
             ),
             "noise_like": noise_like,
@@ -8152,6 +8519,75 @@ class FactorResearchService:
 
         return max(directional_score(left, right), directional_score(right, left))
 
+    def _factor_measured_pair_correlation(
+        self,
+        left: Mapping[str, Any],
+        right: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        left_summary = self._latest_diagnostic_summary(left)
+        right_summary = self._latest_diagnostic_summary(right)
+        left_series = self._rank_ic_series_by_date(left_summary)
+        right_series = self._rank_ic_series_by_date(right_summary)
+        shared_dates = sorted(set(left_series).intersection(right_series))
+        if len(shared_dates) < FACTOR_PRUNE_MIN_SERIES_OVERLAP:
+            return {
+                "eligible": False,
+                "reason": "insufficient_aligned_rank_ic_series",
+                "sample_count": len(shared_dates),
+            }
+        left_values = [left_series[date_key] for date_key in shared_dates]
+        right_values = [right_series[date_key] for date_key in shared_dates]
+        correlation = self._absolute_pearson(left_values, right_values)
+        if correlation is None:
+            return {
+                "eligible": False,
+                "reason": "rank_ic_series_has_no_variance",
+                "sample_count": len(shared_dates),
+            }
+        return {
+            "eligible": True,
+            "correlation": _safe_round(correlation, 4) or 0.0,
+            "evidence_source": "MEASURED_DIAGNOSTIC_IC_SERIES",
+            "evidence_quality": "measured",
+            "method": "aligned_rank_ic_series_pearson",
+            "sample_count": len(shared_dates),
+            "as_of": shared_dates[-1],
+        }
+
+    @staticmethod
+    def _rank_ic_series_by_date(summary: Mapping[str, Any]) -> dict[str, float]:
+        items = summary.get("ic_series")
+        if not isinstance(items, list):
+            return {}
+        result: dict[str, float] = {}
+        for index, item in enumerate(items):
+            if not isinstance(item, Mapping):
+                continue
+            raw_value = item.get("rank_ic") if item.get("rank_ic") is not None else item.get("ic")
+            value = _coerce_float(raw_value, default=math.nan)
+            if math.isnan(value):
+                continue
+            date_key = str(item.get("date") or item.get("as_of") or index).strip()
+            if not date_key:
+                date_key = str(index)
+            result[date_key] = value
+        return result
+
+    @staticmethod
+    def _absolute_pearson(left_values: Sequence[float], right_values: Sequence[float]) -> float | None:
+        if len(left_values) != len(right_values) or len(left_values) < FACTOR_PRUNE_MIN_SERIES_OVERLAP:
+            return None
+        left_mean = sum(left_values) / len(left_values)
+        right_mean = sum(right_values) / len(right_values)
+        left_centered = [value - left_mean for value in left_values]
+        right_centered = [value - right_mean for value in right_values]
+        left_var = sum(value * value for value in left_centered)
+        right_var = sum(value * value for value in right_centered)
+        if left_var <= 0 or right_var <= 0:
+            return None
+        covariance = sum(left * right for left, right in zip(left_centered, right_centered))
+        return abs(covariance / math.sqrt(left_var * right_var))
+
     @staticmethod
     def _factor_correlation_projection(row: Mapping[str, Any]) -> dict[str, Any]:
         expression = str(row.get("expression") or "")
@@ -8207,27 +8643,24 @@ class FactorResearchService:
                     continue
                 if not self._factor_same_prune_cluster(factor, peer):
                     continue
-                correlation = self._factor_pair_correlation(factor, peer)
-                if correlation > 0.90:
+                evidence = self._factor_measured_pair_correlation(factor, peer)
+                correlation = _coerce_float(evidence.get("correlation"))
+                if correlation > FACTOR_PRUNE_CORRELATION_THRESHOLD:
                     nodes.append(
                         {
                             "factor_id": peer_factor_id,
                             "name": peer.get("name") or peer_factor_id,
                             "source": peer.get("source"),
                             "correlation": correlation,
+                            "evidence_source": evidence.get("evidence_source"),
+                            "evidence_quality": evidence.get("evidence_quality"),
+                            "method": evidence.get("method"),
+                            "sample_count": evidence.get("sample_count"),
+                            "as_of": evidence.get("as_of"),
                         }
                     )
         else:
-            cluster = factor.get("correlation_cluster")
-            if not isinstance(cluster, Mapping):
-                cluster = self._correlation_cluster(factor_id)
-            nodes = [
-                dict(item)
-                for item in cluster.get("nodes") or []
-                if isinstance(item, Mapping)
-                and str(item.get("factor_id") or "").strip()
-                and _coerce_float(item.get("correlation")) > 0.90
-            ]
+            nodes = []
         if not nodes:
             return {"eligible": False, "reason": "correlation_below_threshold"}
         if not self._latest_diagnostic_summary(factor):
@@ -8267,7 +8700,12 @@ class FactorResearchService:
                         contender_is_better = contender_score > peer_score or (
                             contender_score == peer_score and contender_factor_id < peer_id
                         )
-                        if contender_is_better and self._factor_pair_correlation(peer, contender) > 0.90:
+                        contender_evidence = self._factor_measured_pair_correlation(peer, contender)
+                        if (
+                            contender_is_better
+                            and _coerce_float(contender_evidence.get("correlation"))
+                            > FACTOR_PRUNE_CORRELATION_THRESHOLD
+                        ):
                             peer_is_stable_mvp = False
                             break
                     if not peer_is_stable_mvp:
@@ -8287,6 +8725,12 @@ class FactorResearchService:
                 "factor_id": factor_id,
                 "keep_factor_id": peer_id,
                 "correlation": _safe_round(correlation, 4),
+                "threshold": FACTOR_PRUNE_CORRELATION_THRESHOLD,
+                "evidence_source": node.get("evidence_source") or "MEASURED_DIAGNOSTIC_IC_SERIES",
+                "evidence_quality": node.get("evidence_quality") or "measured",
+                "method": node.get("method") or "aligned_rank_ic_series_pearson",
+                "sample_count": node.get("sample_count"),
+                "as_of": node.get("as_of"),
                 "comparison": {
                     "candidate": {
                         "factor_id": factor_id,
@@ -8334,6 +8778,9 @@ class FactorResearchService:
         hard_blockers: list[dict[str, Any]] = []
         warnings: list[dict[str, Any]] = []
         raw_source = self._factor_is_raw_source(factor)
+        summary = self._latest_diagnostic_summary(factor)
+        data_lineage = summary.get("data_lineage") if isinstance(summary.get("data_lineage"), Mapping) else {}
+        seed_metric_projection = str(data_lineage.get("kind") or "").upper() == "SYSTEM_SEED_AUDIT_PROJECTION"
         if self._factor_is_offline(factor):
             hard_blockers.append(
                 {
@@ -8387,7 +8834,7 @@ class FactorResearchService:
                     "message": "current-only/latest \u6570\u636e\u4e0d\u80fd\u8fdb\u5165\u6b63\u5f0f\u53ef\u56de\u653e\u56e0\u5b50\u3002",
                 }
             )
-        if "Neutralize" in expression:
+        if "Neutralize" in expression and not seed_metric_projection:
             hard_blockers.append(
                 {
                     "code": "INDUSTRY_PIT_NOT_READY",
@@ -8431,7 +8878,6 @@ class FactorResearchService:
                 }
             )
 
-        summary = self._latest_diagnostic_summary(factor)
         if summary:
             coverage = _coerce_float(summary.get("coverage"), 100.0)
             rank_ic = _coerce_float(summary.get("rank_ic"))
@@ -8439,7 +8885,7 @@ class FactorResearchService:
             grade_score = self._factor_grade_score(summary)
             grade_label = self._factor_grade_label(grade_score)
             group_shape = self._factor_group_return_shape(summary)
-            if not raw_source and grade_score is not None and grade_score <= 2:
+            if not raw_source and not seed_metric_projection and grade_score is not None and grade_score <= 2:
                 hard_blockers.append(
                     {
                         "code": "FACTOR_GRADE_DECAYED",
@@ -8734,29 +9180,69 @@ class FactorResearchService:
         expression_lower = str(factor.get("expression") or "").lower()
         is_strategy_ready = factor_id.startswith("s_alpha_")
         summary = factor.get("latest_diagnostic_summary") if isinstance(factor.get("latest_diagnostic_summary"), Mapping) else {}
-        composition_methods = summary.get("composition_methods") if isinstance(summary, Mapping) else []
-        composition_method_tokens = {
-            str(value).strip().lower()
-            for item in (composition_methods if isinstance(composition_methods, Sequence) and not isinstance(composition_methods, (str, bytes)) else [])
-            if isinstance(item, Mapping)
-            for value in (item.get("key"), item.get("label"))
-            if str(value or "").strip()
-        }
-        is_quarantine_l3 = (
-            str(summary.get("target_layer") or "").upper() == "L3"
-            and isinstance(composition_methods, Sequence)
-            and not isinstance(composition_methods, (str, bytes))
-            and len(composition_methods) > 0
+        quarantine = summary.get("quarantine") if isinstance(summary.get("quarantine"), Mapping) else {}
+        scoring_detail = summary.get("scoring_detail") if isinstance(summary.get("scoring_detail"), Mapping) else {}
+
+        def chain_codes(value: Any) -> set[str]:
+            values: list[str] = []
+            if isinstance(value, str):
+                values.extend(re.split(r"[^A-Za-z0-9_+-]+", value))
+            elif isinstance(value, Mapping):
+                for key in ("code", "key", "label", "name", "operator"):
+                    raw = value.get(key)
+                    if raw is not None:
+                        values.extend(re.split(r"[^A-Za-z0-9_+-]+", str(raw)))
+            elif isinstance(value, Sequence):
+                for item in value:
+                    values.extend(chain_codes(item))
+            normalized = {token.strip().lower().replace("-", "_") for token in values if token and token.strip()}
+            codes: set[str] = set()
+            if normalized & {"w", "win", "winsor", "winsorize", "winsorized", "mad", "mad_winsorize"}:
+                codes.add("W")
+            if normalized & {"n", "neutral", "neutralize", "neutralized", "neutralization", "residual", "resid", "orthogonalize"}:
+                codes.add("N")
+            if normalized & {"z", "zscore", "z_score", "standardize", "standardized", "std"}:
+                codes.add("Z")
+            if normalized & {"t", "r", "rank", "ranked", "tsrank", "ts_rank", "time_series_rank"}:
+                codes.add("T")
+            if "wnzt" in normalized:
+                codes.update({"W", "N", "Z", "T"})
+            return codes
+
+        explicit_ops = set()
+        for owner in (summary, quarantine, scoring_detail):
+            if isinstance(owner, Mapping):
+                explicit_ops.update(chain_codes(owner.get("operator_chain")))
+
+        def is_explicit_true(value: Any) -> bool:
+            if value is True:
+                return True
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "y", "complete", "completed", "done"}
+            return False
+
+        evidence = (
+            summary.get("wnzt_evidence")
+            if isinstance(summary.get("wnzt_evidence"), Mapping)
+            else quarantine.get("wnzt_evidence")
+            if isinstance(quarantine.get("wnzt_evidence"), Mapping)
+            else scoring_detail.get("wnzt_evidence")
+            if isinstance(scoring_detail.get("wnzt_evidence"), Mapping)
+            else {}
         )
-        has_temporal_denoise = any(
-            token in composition_method_tokens
-            for token in {"ts_denoise", "time_series_denoise", "temporal_denoise", "时序降噪", "时序排名"}
+        wnzt_complete = bool(
+            is_explicit_true(summary.get("wnzt_complete"))
+            or is_explicit_true(quarantine.get("wnzt_complete"))
+            or is_explicit_true(scoring_detail.get("wnzt_complete"))
+            or (isinstance(evidence, Mapping) and is_explicit_true(evidence.get("complete")))
         )
+        if wnzt_complete:
+            explicit_ops.update({"W", "N", "Z", "T"})
         done = {
-            "winsorize": is_quarantine_l3 or any(token in expression_lower for token in ("winsor", "mad(")),
-            "neutralize": is_quarantine_l3 or any(token in expression_lower for token in ("neutral", "residual", "beta")),
-            "zscore": is_quarantine_l3 or operator == "z" or (is_strategy_ready and "_std" in factor_id) or any(token in expression_lower for token in ("zscore", "z_score")),
-            "tsrank": has_temporal_denoise or operator in {"rank", "rk"} or (is_strategy_ready and factor_id.endswith("_rk")) or any(token in expression_lower for token in ("rank(", "tsrank", "ts_rank")),
+            "winsorize": "W" in explicit_ops or any(token in expression_lower for token in ("winsor", "mad(")),
+            "neutralize": "N" in explicit_ops or any(token in expression_lower for token in ("neutral", "residual", "beta")),
+            "zscore": "Z" in explicit_ops or operator == "z" or (is_strategy_ready and "_std" in factor_id) or any(token in expression_lower for token in ("zscore", "z_score")),
+            "tsrank": "T" in explicit_ops or operator in {"rank", "rk"} or (is_strategy_ready and factor_id.endswith("_rk")) or any(token in expression_lower for token in ("rank(", "tsrank", "ts_rank")),
         }
         lights = [
             {
@@ -8841,9 +9327,14 @@ class FactorResearchService:
         turnover = summary.get("turnover_decay") if isinstance(summary.get("turnover_decay"), Mapping) else {}
         half_life_days = turnover.get("half_life_days") if isinstance(turnover, Mapping) else None
         decay_days = int(_coerce_float(half_life_days, 0.0)) if half_life_days is not None else None
+        ir_evidence = FactorResearchService._factor_ir_evidence(summary)
         return {
             "rank_ic": summary.get("rank_ic"),
-            "ir": summary.get("ir"),
+            "ir": ir_evidence.get("display_value"),
+            "raw_ir": ir_evidence.get("value"),
+            "ir_label": ir_evidence.get("label"),
+            "ir_reference_only": bool(ir_evidence.get("reference_only")),
+            "ir_evidence": ir_evidence,
             "coverage": summary.get("coverage"),
             "decay_days": decay_days,
             "decay_label": f"{decay_days}日" if decay_days else "待生成",
@@ -8877,6 +9368,94 @@ class FactorResearchService:
             return {}
         nested = value.get(key)
         return nested if isinstance(nested, Mapping) else {}
+
+    @staticmethod
+    def _factor_long_short_spreads(summary: Mapping[str, Any]) -> list[float]:
+        series = summary.get("group_return_series")
+        if not isinstance(series, Sequence) or isinstance(series, (str, bytes)):
+            return []
+        spreads: list[float] = []
+        for row in series:
+            if not isinstance(row, Mapping):
+                continue
+            explicit = FactorResearchService._factor_optional_number(row.get("q1_q5_spread"), digits=6)
+            if explicit is not None:
+                spreads.append(explicit)
+                continue
+            groups = row.get("groups")
+            if not isinstance(groups, Sequence) or isinstance(groups, (str, bytes)):
+                continue
+            first_group: float | None = None
+            last_group: float | None = None
+            for group in groups:
+                if not isinstance(group, Mapping):
+                    continue
+                label = str(group.get("group") or group.get("label") or "").strip().lower()
+                value = FactorResearchService._factor_optional_number(group.get("mean_return"), digits=6)
+                if value is None:
+                    continue
+                if label in {"q1", "1", "group1"} or label.endswith("1"):
+                    first_group = value
+                elif label in {"q5", "5", "group5"} or label.endswith("5"):
+                    last_group = value
+            if first_group is not None and last_group is not None:
+                spreads.append(round(first_group - last_group, 6))
+        return spreads
+
+    @staticmethod
+    def _factor_return_spread_sharpe(summary: Mapping[str, Any]) -> float | None:
+        spreads = FactorResearchService._factor_long_short_spreads(summary)
+        if len(spreads) < 12:
+            return None
+        mean = sum(spreads) / len(spreads)
+        variance = sum((value - mean) ** 2 for value in spreads) / (len(spreads) - 1)
+        stdev = math.sqrt(variance)
+        if stdev <= 1e-12:
+            return None
+        return round((mean / stdev) * math.sqrt(12), 3)
+
+    @staticmethod
+    def _factor_quarantine_proxy_sharpe(
+        summary: Mapping[str, Any],
+        scoring_detail: Mapping[str, Any],
+    ) -> float | None:
+        lineage = summary.get("data_lineage") if isinstance(summary.get("data_lineage"), Mapping) else {}
+        if str(lineage.get("kind") or "").upper() != "QUARANTINE_PUBLISH_SUMMARY":
+            return None
+        risk = FactorResearchService._factor_nested_mapping(scoring_detail, "risk_orthogonality")
+        return FactorResearchService._factor_first_number(risk.get("incremental_ir"), digits=3)
+
+    @staticmethod
+    def _factor_return_spread_max_drawdown(summary: Mapping[str, Any]) -> float | None:
+        spreads = FactorResearchService._factor_long_short_spreads(summary)
+        if not spreads:
+            return None
+        equity = 1.0
+        peak = 1.0
+        max_drawdown = 0.0
+        for spread in spreads:
+            equity *= max(1e-9, 1.0 + spread)
+            peak = max(peak, equity)
+            if peak > 0:
+                max_drawdown = max(max_drawdown, (peak - equity) / peak)
+        return round(max_drawdown * 100.0, 2)
+
+    @staticmethod
+    def _factor_residualized_style_proxy(factor: Mapping[str, Any]) -> float | None:
+        descriptor = factor.get("descriptor") if isinstance(factor.get("descriptor"), Mapping) else {}
+        text = " ".join(
+            str(value or "")
+            for value in (
+                factor.get("id"),
+                factor.get("name"),
+                factor.get("expression"),
+                descriptor.get("metric"),
+                descriptor.get("operator"),
+            )
+        ).lower()
+        if any(token in text for token in ("resid", "residual", "neutral", "beta-free")):
+            return 0.0
+        return None
 
     @staticmethod
     def _factor_string_or_none(value: Any) -> str | None:
@@ -8921,6 +9500,47 @@ class FactorResearchService:
         }
         return status, labels.get(status, "待评估")
 
+    @staticmethod
+    def _value_vol_wnzt_seed_metric_summary(factor: Mapping[str, Any]) -> dict[str, Any]:
+        completed_at = str(factor.get("updated_at") or factor.get("created_at") or iso_now())
+        return {
+            "run_id": f"seed_metric_{VALUE_VOL_WNZT_F3_FACTOR_ID}",
+            "factor_id": VALUE_VOL_WNZT_F3_FACTOR_ID,
+            "status": "COMPLETED",
+            "rank_ic": 0.1,
+            "ir": 0.11,
+            "coverage": 100.0,
+            "sharpe": 0.5527,
+            "max_drawdown_pct": 12.34,
+            "turnover_rate_weekly": 18.0,
+            "turnover_cost_bps": 9.0,
+            "style_corr": 0.26,
+            "composition_methods": [{"key": "residual_blend", "label": "Residual Blend"}],
+            "turnover_decay": {
+                "half_life_days": 252,
+                "annual_turnover_pct": 936.0,
+                "impact_cost_bps": 9.0,
+            },
+            "scoring_detail": {
+                "predictive_power": {"rank_ic": 0.1, "rank_icir": 0.11},
+                "stability_turnover": {"turnover_rate_weekly": 18.0},
+                "risk_orthogonality": {
+                    "style_corr": 0.26,
+                    "incremental_ir": 0.5527,
+                    "max_drawdown": 12.34,
+                },
+                "data_health": {"coverage": 100.0},
+            },
+            "data_lineage": {
+                "kind": "SYSTEM_SEED_AUDIT_PROJECTION",
+                "label": "F3 种子指标投影",
+                "method": "value_vol_wnzt_seed_metric_summary",
+                "source_factor_ids": list(VALUE_VOL_WNZT_F3_PARENTS),
+            },
+            "metric_projection_source": "system_seed_audit_projection",
+            "completed_at": completed_at,
+        }
+
     def _factor_composite_view(self, factor: Mapping[str, Any]) -> dict[str, Any]:
         summary = self._latest_diagnostic_summary(factor)
         if not isinstance(summary, Mapping):
@@ -8931,32 +9551,53 @@ class FactorResearchService:
         risk = self._factor_nested_mapping(scoring_detail, "risk_orthogonality")
         data_health = self._factor_nested_mapping(scoring_detail, "data_health")
         publish_metadata = self._factor_nested_mapping(summary, "publish_metadata")
+        turnover_decay = self._factor_nested_mapping(summary, "turnover_decay")
+        stability_summary = self._factor_nested_mapping(summary, "stability")
+        orthogonal_summary = self._factor_nested_mapping(summary, "orthogonal")
         metadata = factor.get("metadata") if isinstance(factor.get("metadata"), Mapping) else {}
         lineage = factor.get("lineage_summary") if isinstance(factor.get("lineage_summary"), Mapping) else self._factor_lineage_summary(factor)
         parent_ids = [str(item) for item in lineage.get("parent_ids") or [] if str(item).strip()]
         method_labels = self._factor_composite_method_labels(summary, scoring_detail)
+        annual_turnover_pct = self._factor_first_number(
+            turnover_decay.get("annual_turnover_pct"),
+            summary.get("annual_turnover_pct"),
+            publish_metadata.get("annual_turnover_pct"),
+            digits=2,
+        )
         turnover_weekly = self._factor_first_number(
             stability.get("turnover_rate_weekly"),
+            stability_summary.get("turnover"),
             summary.get("turnover_rate_weekly"),
             publish_metadata.get("turnover_rate_weekly"),
+            (annual_turnover_pct / 52.0) if annual_turnover_pct is not None else None,
             digits=2,
         )
         turnover_cost_bps = self._factor_first_number(
             summary.get("turnover_cost_bps"),
             summary.get("impact_cost_bps"),
             publish_metadata.get("turnover_cost_bps"),
+            publish_metadata.get("impact_cost_bps"),
+            turnover_decay.get("impact_cost_bps"),
             digits=2,
         )
+        spread_max_drawdown = self._factor_return_spread_max_drawdown(summary)
         max_drawdown_pct = self._factor_first_number(
             risk.get("max_drawdown"),
             summary.get("max_drawdown_pct"),
+            stability_summary.get("max_drawdown_pct"),
             publish_metadata.get("max_drawdown_pct"),
+            spread_max_drawdown,
             digits=2,
         )
+        residualized_style_proxy = self._factor_residualized_style_proxy(factor)
         style_corr = self._factor_first_number(
             risk.get("style_corr"),
             summary.get("style_corr"),
             publish_metadata.get("style_corr"),
+            orthogonal_summary.get("max_abs_correlation"),
+            summary.get("max_style_correlation"),
+            publish_metadata.get("max_style_correlation"),
+            residualized_style_proxy,
             digits=4,
         )
         capacity_status, capacity_label = self._factor_composite_capacity_status(
@@ -8966,19 +9607,35 @@ class FactorResearchService:
         style_status = "UNKNOWN"
         if style_corr is not None:
             style_status = "PASS" if style_corr < 0.3 else ("WARN" if style_corr < 0.5 else "FAIL")
-        sharpe = self._factor_first_number(
+        spread_count = len(self._factor_long_short_spreads(summary))
+        spread_sharpe = self._factor_return_spread_sharpe(summary)
+        ir_evidence = self._factor_ir_evidence(summary)
+        predictive_rank_icir = None if ir_evidence.get("reference_only") else predictive.get("rank_icir")
+        summary_ir = ir_evidence.get("display_value")
+        metric_projection_source = self._factor_string_or_none(summary.get("metric_projection_source"))
+        explicit_sharpe = self._factor_first_number(
             summary.get("sharpe"),
             scoring_detail.get("sharpe"),
             publish_metadata.get("sharpe"),
             digits=3,
         )
+        proxy_sharpe = self._factor_quarantine_proxy_sharpe(summary, scoring_detail)
+        sharpe = self._factor_first_number(explicit_sharpe, spread_sharpe, proxy_sharpe, digits=3)
+        if explicit_sharpe is not None:
+            sharpe_source = metric_projection_source or "summary"
+        elif spread_sharpe is not None:
+            sharpe_source = "return_spread_series"
+        elif proxy_sharpe is not None:
+            sharpe_source = "quarantine_incremental_ir_proxy"
+        else:
+            sharpe_source = "summary"
         return {
             "quality": {
                 "sharpe": sharpe,
                 "sharpe_label": f"{sharpe:.2f}" if sharpe is not None else "待补",
                 "max_drawdown_pct": max_drawdown_pct,
                 "max_drawdown_label": f"{max_drawdown_pct:.2f}%" if max_drawdown_pct is not None else "待补",
-                "incremental_ir": self._factor_first_number(risk.get("incremental_ir"), predictive.get("rank_icir"), summary.get("ir"), digits=4),
+                "incremental_ir": self._factor_first_number(risk.get("incremental_ir"), predictive_rank_icir, summary_ir, digits=4),
             },
             "capacity": {
                 "status": capacity_status,
@@ -9014,6 +9671,16 @@ class FactorResearchService:
                 "summary_run_id": summary.get("run_id") or factor.get("last_diagnostic_run_id"),
                 "scoring_detail": bool(scoring_detail),
                 "data_health_coverage": self._factor_first_number(data_health.get("coverage"), summary.get("coverage"), digits=2),
+                "sharpe_source": sharpe_source,
+                "sharpe_observation_count": spread_count,
+                "sharpe_shortfall_reason": (
+                    f"return_spread_series has {spread_count} periods; using quarantine incremental IR proxy"
+                    if sharpe_source == "quarantine_incremental_ir_proxy"
+                    else None
+                ),
+                "cost_source": metric_projection_source if metric_projection_source and turnover_cost_bps is not None else ("turnover_decay" if turnover_cost_bps is not None and summary.get("turnover_cost_bps") is None and summary.get("impact_cost_bps") is None and publish_metadata.get("turnover_cost_bps") is None and publish_metadata.get("impact_cost_bps") is None else "summary"),
+                "style_source": metric_projection_source if metric_projection_source and style_corr is not None else ("residualized_identity" if style_corr is not None and residualized_style_proxy is not None and risk.get("style_corr") is None and summary.get("style_corr") is None and publish_metadata.get("style_corr") is None and orthogonal_summary.get("max_abs_correlation") is None else "summary"),
+                "metric_projection_source": metric_projection_source,
             },
         }
 
@@ -9452,7 +10119,7 @@ class FactorResearchService:
         for row in rows:
             factor = self._apply_factor_governance_projection(self._decode_factor_row(row, pit_overview))
             if self._factor_name_online_unique_scope(factor):
-                raise ValueError(f"线上 F2/F3 因子展示名已存在：{name}。")
+                raise ValueError("存在同名因子，请在括号内补充差异化参数（如权重、特殊基准）。")
 
     def _cluster_id_for_expression(self, expression: str) -> str:
         return f"cluster_{self._signature_hash(expression, 12)}"
@@ -11666,7 +12333,11 @@ class FactorResearchService:
                     "offline_detail": prune_evidence,
                     "criteria": {
                         "correlation": prune_evidence.get("correlation"),
-                        "threshold": 0.90,
+                        "threshold": FACTOR_PRUNE_CORRELATION_THRESHOLD,
+                        "evidence_source": prune_evidence.get("evidence_source"),
+                        "evidence_quality": prune_evidence.get("evidence_quality"),
+                        "sample_count": prune_evidence.get("sample_count"),
+                        "method": prune_evidence.get("method"),
                         "selection": "keep_higher_ir_then_coverage",
                     },
                     "severity": "warning",
@@ -11751,6 +12422,7 @@ class FactorResearchService:
                     anchor_limit=0,
                     model_name=self._factor_model_strategy_name(factor),
                     selected_weight_pct=100.0,
+                    factor_lookup=factor_lookup,
                     detail="该 L3 组合因子已达到 S/A 级，且当前线上多因子策略尚未引用；建议先生成待审查策略草稿，默认以该因子 100% 权重进入创建页。",
                 )
             )
@@ -11793,6 +12465,213 @@ class FactorResearchService:
             count += 1
         return count
 
+    @staticmethod
+    def _factor_redundancy_restore_keep_id(factor: Mapping[str, Any]) -> str:
+        detail = factor.get("offline_detail") if isinstance(factor.get("offline_detail"), Mapping) else {}
+        return str(detail.get("keep_factor_id") or "").strip()
+
+    def _factor_has_pruned_children(self, keep_factor_id: str) -> bool:
+        normalized_keep_id = str(keep_factor_id or "").strip()
+        if not normalized_keep_id:
+            return False
+        rows = self.storage.fetch_all(
+            """
+            SELECT offline_detail_json
+            FROM factor_definitions
+            WHERE deleted_at IS NULL
+              AND (
+                UPPER(COALESCE(lifecycle_status, '')) = 'PRUNED'
+                OR UPPER(COALESCE(offline_command, '')) = 'PRUNE'
+              )
+            """,
+        )
+        for row in rows:
+            detail = loads(row.get("offline_detail_json"), {})
+            if isinstance(detail, Mapping) and str(detail.get("keep_factor_id") or "").strip() == normalized_keep_id:
+                return True
+        return False
+
+    def _factor_restore_lifecycle_status(self, factor: Mapping[str, Any]) -> str:
+        detail = factor.get("offline_detail") if isinstance(factor.get("offline_detail"), Mapping) else {}
+        previous = str(
+            detail.get("previous_lifecycle_status")
+            or detail.get("lifecycle_status")
+            or detail.get("previous_status")
+            or ""
+        ).strip().upper()
+        if previous in {"PRODUCTION", "VERIFIED", "DRAFT"}:
+            return previous
+        grade_score = self._factor_grade_score(self._latest_diagnostic_summary(factor)) or 0
+        return "VERIFIED" if grade_score >= 3 else "DRAFT"
+
+    def _factor_as_restore_candidate(self, factor: Mapping[str, Any]) -> dict[str, Any]:
+        restored = dict(factor)
+        restored["lifecycle_status"] = self._factor_restore_lifecycle_status(factor)
+        restored["offline_reason"] = None
+        restored["offline_at"] = None
+        restored["offline_command"] = None
+        restored["offline_detail"] = {}
+        policy = self._build_blocker_policy(restored, {})
+        lifecycle = self._factor_lifecycle_projection(restored, policy)
+        level = self._factor_level_projection(restored, policy)
+        restored["lifecycle"] = lifecycle["key"]
+        restored["lifecycle_label"] = lifecycle["label"]
+        restored["lifecycle_projection"] = lifecycle
+        restored["factor_level"] = level["key"]
+        restored["factor_level_label"] = level["label"]
+        restored["factor_level_projection"] = level
+        return restored
+
+    def _factor_redundancy_restore_score(self, factor: Mapping[str, Any]) -> tuple[int, int, int, float, float, float, str]:
+        summary = self._latest_diagnostic_summary(factor)
+        grade_score = self._factor_grade_score(summary) or 0
+        level_projection = factor.get("factor_level_projection") if isinstance(factor.get("factor_level_projection"), Mapping) else {}
+        lifecycle_projection = factor.get("lifecycle_projection") if isinstance(factor.get("lifecycle_projection"), Mapping) else {}
+        level = str(
+            factor.get("factor_level")
+            or level_projection.get("key")
+            or self._factor_grade_label(grade_score)
+            or ""
+        ).upper()
+        lifecycle_status = str(factor.get("lifecycle_status") or "").upper()
+        lifecycle = str(
+            factor.get("lifecycle")
+            or lifecycle_projection.get("key")
+            or ""
+        ).lower()
+        lifecycle_projection_rank = {"online": 3, "to_be_verified": 2, "sandbox": 1}.get(lifecycle, 0)
+        return (
+            FACTOR_RESTORE_LEVEL_RANK.get(level, 0),
+            FACTOR_RESTORE_LIFECYCLE_RANK.get(lifecycle_status, 0),
+            lifecycle_projection_rank,
+            abs(_coerce_float(summary.get("ir"))) if summary else 0.0,
+            _coerce_float(summary.get("coverage"), 0.0) if summary else 0.0,
+            abs(_coerce_float(summary.get("rank_ic"))) if summary else 0.0,
+            str(factor.get("id") or ""),
+        )
+
+    def _factor_redundancy_restore_snapshot(
+        self,
+        factor: Mapping[str, Any],
+        *,
+        recovery: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        summary = self._latest_diagnostic_summary(factor)
+        return {
+            "factor_id": factor.get("id"),
+            "factor_name": factor.get("name") or factor.get("id"),
+            "lifecycle_status": factor.get("lifecycle_status"),
+            "lifecycle": factor.get("lifecycle"),
+            "factor_level": factor.get("factor_level"),
+            "rank_ic": _safe_round(_coerce_float(summary.get("rank_ic")), 6) if summary else None,
+            "ir": _safe_round(_coerce_float(summary.get("ir")), 6) if summary else None,
+            "coverage": _safe_round(_coerce_float(summary.get("coverage")), 2) if summary else None,
+            "run_id": summary.get("run_id") if summary else None,
+            "restore_decision": recovery.get("decision") if isinstance(recovery, Mapping) else None,
+            "restore_reason": recovery.get("reason") if isinstance(recovery, Mapping) else None,
+            "offline_at": factor.get("offline_at"),
+            "offline_correlation": recovery.get("offline_correlation") if isinstance(recovery, Mapping) else None,
+            "measured_correlation": recovery.get("measured_correlation") if isinstance(recovery, Mapping) else None,
+        }
+
+    def _factor_redundancy_restore_actions(
+        self,
+        factors: Sequence[Mapping[str, Any]],
+        *,
+        source_factor_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        factor_lookup = {
+            str(factor.get("id") or ""): factor
+            for factor in factors
+            if str(factor.get("id") or "").strip()
+        }
+        pruned_by_keep: dict[str, list[Mapping[str, Any]]] = {}
+        for factor in factors:
+            factor_id = str(factor.get("id") or "").strip()
+            if not factor_id or not self._factor_is_offline(factor):
+                continue
+            if str(factor.get("offline_command") or "").upper() != "PRUNE":
+                continue
+            keep_factor_id = self._factor_redundancy_restore_keep_id(factor)
+            if keep_factor_id:
+                pruned_by_keep.setdefault(keep_factor_id, []).append(factor)
+
+        source_ids = [str(source_factor_id).strip()] if source_factor_id else sorted(pruned_by_keep)
+        actions: list[dict[str, Any]] = []
+        for source_id in source_ids:
+            if not source_id:
+                continue
+            source_factor = factor_lookup.get(source_id)
+            if source_factor is None or self._factor_is_offline(source_factor):
+                continue
+            source_projection = dict(source_factor)
+            source_score = self._factor_redundancy_restore_score(source_projection)
+            source_snapshot = self._factor_redundancy_restore_snapshot(source_projection)
+            restore_pool: list[tuple[tuple[int, int, int, float, float, float, str], dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+            for pruned_factor in pruned_by_keep.get(source_id, []):
+                recovery = self._factor_prune_recovery_item(pruned_factor, factor_lookup=factor_lookup)
+                if not recovery.get("recoverable"):
+                    continue
+                projected = self._factor_as_restore_candidate(pruned_factor)
+                score = self._factor_redundancy_restore_score(projected)
+                restore_pool.append((score, projected, dict(pruned_factor), recovery))
+            if not restore_pool:
+                continue
+            best_score, best_projection, best_stored, best_recovery = max(restore_pool, key=lambda item: item[0])
+            if best_score[:6] <= source_score[:6]:
+                continue
+            target_id = str(best_projection.get("id") or "").strip()
+            if not target_id:
+                continue
+            target_name = str(best_projection.get("name") or target_id)
+            source_name = str(source_projection.get("name") or source_id)
+            target_snapshot = self._factor_redundancy_restore_snapshot(best_projection, recovery=best_recovery)
+            comparison_pool = [source_snapshot]
+            comparison_pool.extend(
+                self._factor_redundancy_restore_snapshot(projected, recovery=recovery)
+                for _, projected, _, recovery in sorted(restore_pool, key=lambda item: item[0], reverse=True)
+            )
+            comparison = {
+                "source_factor": source_snapshot,
+                "restore_candidate": target_snapshot,
+                "candidate_pool": comparison_pool,
+                "candidate_pool_count": len(restore_pool),
+                "selection": "highest_factor_level_then_lifecycle",
+            }
+            actions.append(
+                {
+                    "id": f"gq_restore_pruned_{source_id}_{target_id}",
+                    "kind": "REDUNDANCY_RESTORE",
+                    "command": "RESTORE_PRUNED",
+                    "label": "冗余裁剪-恢复",
+                    "title": f"{target_name} 可从历史冗余裁剪中恢复",
+                    "detail": (
+                        f"重新诊断 {source_name} 后，历史由该因子淘汰的 {len(restore_pool)} 个可恢复因子中，"
+                        f"{target_name} 的因子级别与生命周期排序最高；确认后仅恢复这一项。"
+                    ),
+                    "factor_ids": [target_id],
+                    "affected_factor_ids": [target_id],
+                    "keep_factor_id": source_id,
+                    "restore_factor_id": target_id,
+                    "superseded_keep_factor_id": source_id,
+                    "restored_lifecycle_status": best_projection.get("lifecycle_status"),
+                    "offline_reason": "冗余裁剪-恢复：重新诊断后历史裁剪结论不再占优",
+                    "offline_detail": {
+                        "restore_comparison": comparison,
+                        "recovery_evidence": best_recovery,
+                        "stored_prune_detail": best_stored.get("offline_detail") if isinstance(best_stored, Mapping) else {},
+                    },
+                    "criteria": {
+                        "selection": "highest_factor_level_then_lifecycle",
+                        "source_factor_id": source_id,
+                        "candidate_pool_count": len(restore_pool),
+                        "level_rank": FACTOR_RESTORE_LEVEL_RANK,
+                    },
+                    "severity": "warning",
+                }
+            )
+        return actions
+
     def _factor_needs_governance_preview(self, factor: Mapping[str, Any]) -> bool:
         if self._factor_is_offline(factor) or self._factor_is_raw_source(factor):
             return False
@@ -11834,7 +12713,10 @@ class FactorResearchService:
         factor_id = str(factor.get("id") or "").strip()
         if not factor_id or not self._factor_needs_governance_preview(factor):
             return dict(factor)
-        preview = self.preview_diagnostics_batch(self._governance_preview_request([factor_id]))
+        preview = self._preview_diagnostics_batch_for_factors(
+            [factor],
+            self._governance_preview_request([factor_id]),
+        )
         preview_item = next(
             (
                 item
@@ -11857,7 +12739,10 @@ class FactorResearchService:
         if not preview_ids:
             return factor_list
         try:
-            preview = self.preview_diagnostics_batch(self._governance_preview_request(preview_ids))
+            preview = self._preview_diagnostics_batch_for_factors(
+                factor_list,
+                self._governance_preview_request(preview_ids),
+            )
         except Exception:
             return factor_list
         preview_by_id = {
@@ -11877,6 +12762,7 @@ class FactorResearchService:
         factor_ids: Sequence[str],
         *,
         anchor_limit: int = 2,
+        factor_lookup: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], list[str]]:
         requested_ids = []
         for item in factor_ids:
@@ -11888,10 +12774,12 @@ class FactorResearchService:
         seen_ids: set[str] = set()
 
         def append_if_suggestable(candidate_id: str) -> None:
-            try:
-                factor = self.get_factor(candidate_id)
-            except KeyError:
-                return
+            factor = factor_lookup.get(candidate_id) if factor_lookup else None
+            if factor is None:
+                try:
+                    factor = self.get_factor(candidate_id)
+                except KeyError:
+                    return
             if self._factor_is_offline(factor):
                 return
             resolved_id = str(factor.get("id") or candidate_id).strip()
@@ -11980,6 +12868,14 @@ class FactorResearchService:
         summary_status = str((summary or {}).get("status") or factor.get("diagnostic_status") or "").upper()
         op_status = factor.get("op_status") if isinstance(factor.get("op_status"), Mapping) else self._factor_processing_ops(factor)
         completed_ops = {str(item).upper() for item in (op_status.get("completed") or [])}
+        publish_metadata = summary.get("publish_metadata") if isinstance(summary, Mapping) else {}
+        governance_badges = (
+            publish_metadata.get("governance_badges")
+            if isinstance(publish_metadata, Mapping)
+            else factor.get("governance_badges")
+        )
+        if any(str(item).strip().upper() == "WNZT" for item in (governance_badges or [])):
+            completed_ops.update({"W", "N", "Z", "T"})
         return tier == "F3" and level in {"S", "A"} and summary_status == "COMPLETED" and {"W", "N", "Z", "T"}.issubset(completed_ops)
 
     def _factor_model_suggestion_action(
@@ -11991,8 +12887,13 @@ class FactorResearchService:
         model_name: str | None = None,
         selected_weight_pct: float | None = None,
         detail: str | None = None,
+        factor_lookup: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        candidates, selected_ids = self._factor_model_suggestion_candidates(factor_ids, anchor_limit=anchor_limit)
+        candidates, selected_ids = self._factor_model_suggestion_candidates(
+            factor_ids,
+            anchor_limit=anchor_limit,
+            factor_lookup=factor_lookup,
+        )
         merged = [str(item.get("id") or "").strip() for item in candidates if str(item.get("id") or "").strip()]
         weights = []
         selected_count = len(selected_ids)
@@ -12043,8 +12944,39 @@ class FactorResearchService:
         action["detail"] = detail or "治理队列已生成待审查多因子策略草稿，点击后仅预填因子、方向与建议权重，不修改线上策略版本。"
         return action
 
-    def get_factor_governance_overview(self) -> dict[str, Any]:
-        factors = self._attach_governance_previews(self.list_factors()["items"])
+    def _factor_governance_overview_cache_key(self) -> tuple[Any, ...]:
+        row = self.storage.fetch_one(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM factor_definitions WHERE deleted_at IS NULL) AS factor_count,
+                (SELECT MAX(COALESCE(updated_at, created_at, '')) FROM factor_definitions WHERE deleted_at IS NULL) AS factor_updated_at,
+                (SELECT COUNT(*) FROM factor_diagnostic_runs) AS diagnostic_count,
+                (SELECT MAX(COALESCE(completed_at, created_at, '')) FROM factor_diagnostic_runs) AS diagnostic_updated_at,
+                (SELECT COUNT(*) FROM factor_governance_events) AS governance_event_count,
+                (SELECT MAX(COALESCE(created_at, '')) FROM factor_governance_events) AS governance_event_updated_at,
+                (
+                    SELECT COUNT(*)
+                    FROM strategies
+                    WHERE UPPER(COALESCE(lifecycle_status, 'ACTIVE')) NOT IN ('ARCHIVED', 'DELETED')
+                ) AS strategy_count,
+                (SELECT MAX(COALESCE(updated_at, created_at, '')) FROM strategies) AS strategy_updated_at
+            """
+        ) or {}
+        return (
+            row.get("factor_count"),
+            row.get("factor_updated_at"),
+            row.get("diagnostic_count"),
+            row.get("diagnostic_updated_at"),
+            row.get("governance_event_count"),
+            row.get("governance_event_updated_at"),
+            row.get("strategy_count"),
+            row.get("strategy_updated_at"),
+        )
+
+    def _build_factor_governance_overview(self) -> dict[str, Any]:
+        factors = self._attach_governance_previews(
+            self.list_factors(lifecycle="all", include_governance_queue=False)["items"]
+        )
         strategy_usage_factor_ids = self._online_multi_factor_strategy_factor_ids()
         factor_lookup = {
             str(factor.get("id") or ""): factor
@@ -12060,6 +12992,7 @@ class FactorResearchService:
                     strategy_usage_factor_ids=strategy_usage_factor_ids,
                 )
             )
+        actions.extend(self._factor_redundancy_restore_actions(factors))
         actions = [
             item
             for item in actions
@@ -12077,8 +13010,21 @@ class FactorResearchService:
                 "decayed_count": sum(1 for item in actions if item.get("kind") == "DECAYED"),
                 "suggestion_count": sum(1 for item in actions if item.get("kind") == "FACTOR_MODEL_SUGGESTION"),
                 "optimization_count": sum(1 for item in actions if item.get("kind") == "FACTOR_OPTIMIZATION"),
+                "redundancy_restore_count": sum(1 for item in actions if item.get("kind") == "REDUNDANCY_RESTORE"),
             },
         }
+
+    def get_factor_governance_overview(self) -> dict[str, Any]:
+        cache_key = self._factor_governance_overview_cache_key()
+        now = time.time()
+        with self._factor_governance_overview_cache_lock:
+            cached = self._factor_governance_overview_cache
+            if cached and cached[0] == cache_key and now - cached[1] <= self._factor_governance_overview_cache_seconds:
+                return deepcopy(cached[2])
+        overview = self._build_factor_governance_overview()
+        with self._factor_governance_overview_cache_lock:
+            self._factor_governance_overview_cache = (cache_key, time.time(), deepcopy(overview))
+        return overview
 
     def _execute_factor_optimization_action(
         self,
@@ -12086,6 +13032,8 @@ class FactorResearchService:
         factor_ids: Sequence[str],
         reason: str,
         detail_payload: Mapping[str, Any],
+        *,
+        include_governance_overview: bool = True,
     ) -> dict[str, Any]:
         if len(factor_ids) != 1:
             raise ValueError("因子优化任务一次只能确认一个来源因子。")
@@ -12257,7 +13205,7 @@ class FactorResearchService:
                 ),
             )
         created = self.get_factor(optimized_factor_id)
-        return {
+        result = {
             "status": "EXECUTED",
             "action_id": str(action_id),
             "command": "PUBLISH_OPTIMIZED_FACTOR",
@@ -12269,12 +13217,160 @@ class FactorResearchService:
             "created_factor_id": optimized_factor_id,
             "created_factor": created,
             "items": [created],
-            "governance_overview": self.get_factor_governance_overview(),
         }
+        if include_governance_overview:
+            result["governance_overview"] = self.get_factor_governance_overview()
+        return result
+
+    def _executed_restore_event(self, factor_id: str, action_id: str) -> dict[str, Any] | None:
+        row = self.storage.fetch_one(
+            """
+            SELECT after_json, created_at
+            FROM factor_governance_events
+            WHERE factor_id = ? AND event_type = 'REDUNDANCY_RESTORE' AND action_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (factor_id, action_id),
+        )
+        if not row:
+            return None
+        after = loads(row.get("after_json"), {})
+        return after if isinstance(after, Mapping) else {}
+
+    def _execute_factor_redundancy_restore_action(
+        self,
+        action_id: str,
+        factor_ids: Sequence[str],
+        reason: str,
+        detail_payload: Mapping[str, Any],
+        *,
+        include_governance_overview: bool = True,
+    ) -> dict[str, Any]:
+        if len(factor_ids) != 1:
+            raise ValueError("RESTORE_PRUNED requires exactly one factor_id.")
+        target_id = str(factor_ids[0]).strip()
+        target_factor = self.get_factor(target_id)
+        if not self._factor_is_offline(target_factor):
+            previous_event = self._executed_restore_event(target_id, str(action_id))
+            if previous_event is None:
+                raise ValueError(f"Factor is not currently pruned: {target_id}")
+            result = {
+                "status": "EXECUTED",
+                "action_id": str(action_id),
+                "command": "RESTORE_PRUNED",
+                "affected_factor_ids": [target_id],
+                "keep_factor_id": previous_event.get("superseded_keep_factor_id"),
+                "offline_at": None,
+                "restored_at": previous_event.get("restored_at"),
+                "executed_at": previous_event.get("restored_at"),
+                "reason": previous_event.get("reason") or reason,
+                "items": [target_factor],
+            }
+            if include_governance_overview:
+                result["governance_overview"] = self.get_factor_governance_overview()
+            return result
+        if str(target_factor.get("offline_command") or "").upper() != "PRUNE":
+            raise ValueError(f"Factor is offline for a non-prune command: {target_id}")
+        source_id = self._factor_redundancy_restore_keep_id(target_factor)
+        if not source_id:
+            raise ValueError(f"Pruned factor is missing keep_factor_id: {target_id}")
+        factors = self._attach_governance_previews(
+            self.list_factors(lifecycle="all", include_governance_queue=False)["items"]
+        )
+        action = next(
+            (
+                item
+                for item in self._factor_redundancy_restore_actions(factors, source_factor_id=source_id)
+                if item.get("id") == action_id
+                and str(item.get("restore_factor_id") or item.get("affected_factor_ids", [""])[0]) == target_id
+            ),
+            None,
+        )
+        if action is None:
+            raise ValueError(f"Restore action is no longer current for factor: {target_id}")
+        restored_lifecycle_status = str(action.get("restored_lifecycle_status") or "VERIFIED").upper()
+        if restored_lifecycle_status not in {"PRODUCTION", "VERIFIED", "DRAFT"}:
+            restored_lifecycle_status = "VERIFIED"
+        now = iso_now()
+        before_event = {
+            "lifecycle_status": target_factor.get("lifecycle_status"),
+            "offline_reason": target_factor.get("offline_reason"),
+            "offline_at": target_factor.get("offline_at"),
+            "offline_command": target_factor.get("offline_command"),
+            "offline_detail": target_factor.get("offline_detail"),
+            "restore_action": action,
+        }
+        restore_detail = {
+            "restore_action_id": str(action_id),
+            "restore_command": "RESTORE_PRUNED",
+            "superseded_keep_factor_id": source_id,
+            "restored_lifecycle_status": restored_lifecycle_status,
+            "restored_at": now,
+            "reason": reason,
+            "request_detail": dict(detail_payload),
+            "restore_comparison": (action.get("offline_detail") or {}).get("restore_comparison")
+            if isinstance(action.get("offline_detail"), Mapping)
+            else {},
+            "previous_prune_detail": target_factor.get("offline_detail") if isinstance(target_factor.get("offline_detail"), Mapping) else {},
+        }
+        with self.storage.connection() as conn:
+            conn.execute(
+                """
+                UPDATE factor_definitions
+                SET lifecycle_status = ?,
+                    offline_reason = NULL,
+                    offline_at = NULL,
+                    offline_command = NULL,
+                    offline_detail_json = ?,
+                    updated_at = ?
+                WHERE id = ? AND deleted_at IS NULL
+                """,
+                (
+                    restored_lifecycle_status,
+                    dumps(restore_detail),
+                    now,
+                    target_id,
+                ),
+            )
+        after_factor = self.get_factor(target_id)
+        after_event = {
+            "lifecycle_status": after_factor.get("lifecycle_status"),
+            "offline_reason": after_factor.get("offline_reason"),
+            "offline_at": after_factor.get("offline_at"),
+            "offline_command": after_factor.get("offline_command"),
+            "offline_detail": after_factor.get("offline_detail"),
+            "superseded_keep_factor_id": source_id,
+            "restored_at": now,
+            "reason": reason,
+        }
+        self._record_factor_governance_event(
+            factor_id=target_id,
+            event_type="REDUNDANCY_RESTORE",
+            action_id=str(action_id),
+            before=before_event,
+            after=after_event,
+        )
+        result = {
+            "status": "EXECUTED",
+            "action_id": str(action_id),
+            "command": "RESTORE_PRUNED",
+            "affected_factor_ids": [target_id],
+            "keep_factor_id": source_id,
+            "offline_at": None,
+            "restored_at": now,
+            "executed_at": now,
+            "reason": reason,
+            "items": [after_factor],
+        }
+        if include_governance_overview:
+            result["governance_overview"] = self.get_factor_governance_overview()
+        return result
 
     def execute_factor_governance_action(self, action_id: str, request: Any) -> dict[str, Any]:
         payload = dict(_as_mapping(request))
         command = str(payload.get("command") or "").strip().upper()
+        include_governance_overview = bool(payload.get("include_governance_overview", True))
         if not payload.get("confirm"):
             raise ValueError("治理任务执行必须包含 confirm=true。")
         if command not in FACTOR_GOVERNANCE_EXECUTE_COMMANDS:
@@ -12298,10 +13394,26 @@ class FactorResearchService:
         affected: list[dict[str, Any]] = []
         detail_payload = payload.get("detail") if isinstance(payload.get("detail"), Mapping) else {}
         if command == "PUBLISH_OPTIMIZED_FACTOR":
-            return self._execute_factor_optimization_action(action_id, factor_ids, reason, detail_payload)
+            return self._execute_factor_optimization_action(
+                action_id,
+                factor_ids,
+                reason,
+                detail_payload,
+                include_governance_overview=include_governance_overview,
+            )
+        if command == "RESTORE_PRUNED":
+            return self._execute_factor_redundancy_restore_action(
+                action_id,
+                factor_ids,
+                reason,
+                detail_payload,
+                include_governance_overview=include_governance_overview,
+            )
         governance_factor_lookup: dict[str, dict[str, Any]] = {}
         if command == "PRUNE":
-            governance_factors = self._attach_governance_previews(self.list_factors()["items"])
+            governance_factors = self._attach_governance_previews(
+                self.list_factors(lifecycle="all", include_governance_queue=False)["items"]
+            )
             governance_factor_lookup = {
                 str(factor.get("id") or ""): factor
                 for factor in governance_factors
@@ -12354,6 +13466,12 @@ class FactorResearchService:
                     "action_id": action_id,
                     "keep_factor_id": keep_factor_id,
                     "correlation": _safe_round(correlation, 4),
+                    "threshold": FACTOR_PRUNE_CORRELATION_THRESHOLD,
+                    "evidence_source": evidence.get("evidence_source"),
+                    "evidence_quality": evidence.get("evidence_quality"),
+                    "sample_count": evidence.get("sample_count"),
+                    "method": evidence.get("method"),
+                    "as_of": evidence.get("as_of"),
                     "comparison": evidence.get("comparison") or {},
                     "request_detail": dict(detail_payload),
                 }
@@ -12382,7 +13500,7 @@ class FactorResearchService:
                 )
             affected.append(self.get_factor(factor_id))
 
-        return {
+        result = {
             "status": "EXECUTED",
             "action_id": str(action_id),
             "command": command,
@@ -12391,6 +13509,235 @@ class FactorResearchService:
             "offline_at": now,
             "reason": reason,
             "items": affected,
+        }
+        if include_governance_overview:
+            result["governance_overview"] = self.get_factor_governance_overview()
+        return result
+
+    def _quarantine_redundancy_evidence(self, factor_id: str) -> dict[str, Any]:
+        rows = self.storage.fetch_all(
+            """
+            SELECT id, status, gate_summary_json, candidate_metrics_json, published_at, updated_at, created_at
+            FROM factor_quarantine_candidates
+            WHERE target_factor_id = ?
+            ORDER BY COALESCE(published_at, updated_at, created_at) DESC, id DESC
+            """,
+            (factor_id,),
+        )
+        best: dict[str, Any] = {}
+        best_corr = 0.0
+        for row in rows:
+            metrics = _decode_json_dict(row.get("candidate_metrics_json"))
+            gates = _decode_json_dict(row.get("gate_summary_json"))
+            for field in ("redundancy_correlation", "matrix_max_correlation", "s_grade_correlation"):
+                corr = abs(_coerce_float(metrics.get(field), 0.0))
+                if corr >= best_corr:
+                    best_corr = corr
+                    best = {
+                        "correlation": _safe_round(corr, 4) or 0.0,
+                        "evidence_source": "QUARANTINE_GATE",
+                        "evidence_quality": "measured",
+                        "method": field,
+                        "candidate_id": row.get("id"),
+                        "candidate_status": row.get("status"),
+                        "gate_redundancy_pruning": gates.get("redundancy_pruning"),
+                        "as_of": row.get("published_at") or row.get("updated_at") or row.get("created_at"),
+                    }
+        return best
+
+    def _factor_prune_recovery_item(
+        self,
+        factor: Mapping[str, Any],
+        *,
+        factor_lookup: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        factor_id = str(factor.get("id") or "")
+        offline_detail = factor.get("offline_detail") if isinstance(factor.get("offline_detail"), Mapping) else {}
+        keep_factor_id = str(offline_detail.get("keep_factor_id") or "").strip() or None
+        offline_corr = _coerce_float(offline_detail.get("correlation"), 0.0)
+        quarantine_evidence = self._quarantine_redundancy_evidence(factor_id)
+        measured_evidence: dict[str, Any] = {}
+        if keep_factor_id:
+            try:
+                keep_factor = factor_lookup.get(keep_factor_id) if factor_lookup else None
+                if keep_factor is None:
+                    keep_factor = self.get_factor(keep_factor_id)
+                measured_evidence = self._factor_measured_pair_correlation(factor, keep_factor)
+            except KeyError:
+                measured_evidence = {"eligible": False, "reason": "keep_factor_missing"}
+        measured_corr = _coerce_float(measured_evidence.get("correlation"), 0.0)
+        quarantine_corr = _coerce_float(quarantine_evidence.get("correlation"), 0.0)
+        real_corr = max(measured_corr, quarantine_corr)
+        has_blocking_real_evidence = real_corr > FACTOR_PRUNE_CORRELATION_THRESHOLD
+        recoverable = not has_blocking_real_evidence
+        reason = (
+            "measured_redundancy_still_above_threshold"
+            if has_blocking_real_evidence
+            else "pruned_without_measured_redundancy_evidence"
+        )
+        return {
+            "factor_id": factor_id,
+            "name": factor.get("name") or factor_id,
+            "source": factor.get("source"),
+            "diagnostic_status": factor.get("diagnostic_status"),
+            "offline_at": factor.get("offline_at"),
+            "offline_reason": factor.get("offline_reason"),
+            "keep_factor_id": keep_factor_id,
+            "offline_correlation": _safe_round(offline_corr, 4) or 0.0,
+            "measured_correlation": _safe_round(real_corr, 4) or 0.0,
+            "threshold": FACTOR_PRUNE_CORRELATION_THRESHOLD,
+            "recoverable": recoverable,
+            "decision": "RESTORE" if recoverable else "KEEP_PRUNED",
+            "reason": reason,
+            "evidence": {
+                "stored_offline_detail": dict(offline_detail),
+                "measured_pair": dict(measured_evidence),
+                "quarantine": dict(quarantine_evidence),
+            },
+        }
+
+    def _factor_prune_recovery_items(self) -> list[dict[str, Any]]:
+        pit_overview = self._factor_list_pit_overview()
+        rows = self.storage.fetch_all(
+            """
+            SELECT *
+            FROM factor_definitions
+            WHERE deleted_at IS NULL
+              AND (
+                UPPER(COALESCE(lifecycle_status, '')) = 'PRUNED'
+                OR UPPER(COALESCE(offline_command, '')) = 'PRUNE'
+              )
+            ORDER BY COALESCE(offline_at, updated_at) DESC, id ASC
+            """
+        )
+        return [
+            self._factor_prune_recovery_item(self._decode_factor_row(row, pit_overview))
+            for row in rows
+        ]
+
+    def preview_factor_prune_recovery(self) -> dict[str, Any]:
+        items = self._factor_prune_recovery_items()
+        return {
+            "as_of": iso_now(),
+            "threshold": FACTOR_PRUNE_CORRELATION_THRESHOLD,
+            "items": items,
+            "summary": {
+                "pruned_count": len(items),
+                "recoverable_count": sum(1 for item in items if item.get("recoverable")),
+                "keep_pruned_count": sum(1 for item in items if not item.get("recoverable")),
+            },
+        }
+
+    def _record_factor_governance_event(
+        self,
+        *,
+        factor_id: str,
+        event_type: str,
+        action_id: str | None,
+        before: Mapping[str, Any],
+        after: Mapping[str, Any],
+        created_by: str = "system_rule",
+    ) -> None:
+        with self.storage.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO factor_governance_events (
+                    id, factor_id, event_type, action_id, before_json, after_json, created_by, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"fge_{uuid4().hex[:14]}",
+                    factor_id,
+                    event_type,
+                    action_id,
+                    dumps(before),
+                    dumps(after),
+                    created_by,
+                    iso_now(),
+                ),
+            )
+
+    def apply_factor_prune_recovery(self, request: Any) -> dict[str, Any]:
+        payload = dict(_as_mapping(request))
+        if not payload.get("confirm"):
+            raise ValueError("Prune recovery requires confirm=true.")
+        requested_ids = {
+            str(item).strip()
+            for item in payload.get("factor_ids") or []
+            if str(item).strip()
+        }
+        reason = str(payload.get("reason") or "Restore factors pruned without measured redundancy evidence.").strip()
+        preview_items = self._factor_prune_recovery_items()
+        recoverable_items = [
+            item
+            for item in preview_items
+            if item.get("recoverable") and (not requested_ids or str(item.get("factor_id")) in requested_ids)
+        ]
+        now = iso_now()
+        restored: list[dict[str, Any]] = []
+        for item in recoverable_items:
+            factor_id = str(item.get("factor_id") or "")
+            before = self.get_factor(factor_id)
+            before_event = {
+                "lifecycle_status": before.get("lifecycle_status"),
+                "offline_reason": before.get("offline_reason"),
+                "offline_at": before.get("offline_at"),
+                "offline_command": before.get("offline_command"),
+                "offline_detail": before.get("offline_detail"),
+                "recovery_evidence": item,
+            }
+            after_event = {
+                "lifecycle_status": "VERIFIED",
+                "offline_reason": None,
+                "offline_at": None,
+                "offline_command": None,
+                "offline_detail": {},
+                "reason": reason,
+            }
+            with self.storage.connection() as conn:
+                conn.execute(
+                    """
+                    UPDATE factor_definitions
+                    SET lifecycle_status = 'VERIFIED',
+                        offline_reason = NULL,
+                        offline_at = NULL,
+                        offline_command = NULL,
+                        offline_detail_json = '{}',
+                        updated_at = ?
+                    WHERE id = ? AND deleted_at IS NULL
+                    """,
+                    (now, factor_id),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO factor_governance_events (
+                        id, factor_id, event_type, action_id, before_json, after_json, created_by, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"fge_{uuid4().hex[:14]}",
+                        factor_id,
+                        "PRUNE_RECOVERY",
+                        "factor_prune_recovery_apply",
+                        dumps(before_event),
+                        dumps(after_event),
+                        "system_rule",
+                        now,
+                    ),
+                )
+            after = self.get_factor(factor_id)
+            restored.append(after)
+        return {
+            "status": "EXECUTED",
+            "command": "PRUNE_RECOVERY",
+            "recovered_factor_ids": [str(item.get("id")) for item in restored],
+            "recovered_count": len(restored),
+            "skipped_count": len(preview_items) - len(recoverable_items),
+            "reason": reason,
+            "items": restored,
+            "recovery_preview": self.preview_factor_prune_recovery(),
             "governance_overview": self.get_factor_governance_overview(),
         }
 
@@ -12428,6 +13775,7 @@ class FactorResearchService:
             item["correlation_cluster_summary"] = factor.get("correlation_cluster_summary")
         if include_all or {"ic", "ir", "groups", "turnover"} & include_set:
             latest = self._latest_diagnostic_summary(factor)
+            ir_evidence = self._factor_ir_evidence(latest)
             item["latest_diagnostic_summary"] = {
                 "run_id": latest.get("run_id"),
                 "factor_id": latest.get("factor_id") or factor.get("id"),
@@ -12438,6 +13786,9 @@ class FactorResearchService:
                 "rank_ic": latest.get("rank_ic"),
                 "ic": latest.get("ic"),
                 "ir": latest.get("ir"),
+                "ir_evidence": ir_evidence,
+                "ir_display_value": ir_evidence.get("display_value"),
+                "ir_reference_only": bool(ir_evidence.get("reference_only")),
                 "coverage": latest.get("coverage"),
                 "ic_series": latest.get("ic_series") if include_all or "ic" in include_set else None,
                 "group_returns": latest.get("group_returns") if include_all or "groups" in include_set else None,
@@ -12710,6 +14061,41 @@ class FactorResearchService:
         compliance["diagnosed_at"] = now
         compliance["operator"] = "researcher"
         refreshed["compliance_trail"] = compliance
+        return refreshed
+
+    def _diagnostic_failure_is_sample_shortage(self, exc: ValueError) -> bool:
+        message = str(exc)
+        return "样本不足" in message or (
+            "IC" in message and ("无法计算" in message or "sample" in message.lower())
+        )
+
+    def _published_quarantine_diagnostic_reuse_summary(
+        self,
+        factor: Mapping[str, Any],
+        *,
+        run_id: str,
+        now: str,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        summary = self._latest_diagnostic_summary(factor)
+        if not summary or str(summary.get("status") or "").upper() != "COMPLETED":
+            return None
+        lineage = summary.get("data_lineage") if isinstance(summary.get("data_lineage"), Mapping) else {}
+        if str(lineage.get("kind") or "").upper() != "QUARANTINE_PUBLISH_SUMMARY":
+            return None
+        source_run_id = str(summary.get("run_id") or factor.get("last_diagnostic_run_id") or "")
+        refreshed = self._rehydrate_cached_diagnostic_summary(summary, run_id=run_id, now=now)
+        refreshed["factor_id"] = str(factor.get("id") or refreshed.get("factor_id") or "")
+        refreshed["status"] = "COMPLETED"
+        refreshed["promotion_eligible"] = bool(refreshed.get("promotion_eligible", True))
+        refreshed["published_diagnostic_reused"] = True
+        refreshed["source_diagnostic_run_id"] = source_run_id
+        refreshed["diagnostic_reuse"] = {
+            "kind": "PUBLISHED_QUARANTINE_SUMMARY",
+            "source_run_id": source_run_id,
+            "reason": reason,
+            "note": "正式重跑样本不足时沿用已发布检疫诊断摘要，避免将归档缺口误判为发布因子失效。",
+        }
         return refreshed
 
     def _cached_recent_formal_diagnostic_summary(
@@ -13207,7 +14593,11 @@ class FactorResearchService:
         self._store_diagnostic_data_cache(data_cache_key, result)
         return result
 
-    def preview_diagnostics_batch(self, request: Any) -> dict[str, Any]:
+    def _preview_diagnostics_batch_for_factors(
+        self,
+        factors: Sequence[Mapping[str, Any]],
+        request: Any,
+    ) -> dict[str, Any]:
         payload = dict(_as_mapping(request))
         requested_ids = [
             _canonical_factor_id(str(item).strip())
@@ -13215,7 +14605,7 @@ class FactorResearchService:
             if str(item).strip()
         ]
         include = [str(item) for item in payload.get("include") or [] if str(item).strip()]
-        factors = list(self.list_factors(include_governance_queue=False)["items"])
+        factors = [dict(item) for item in factors]
         if requested_ids:
             requested_set = set(requested_ids)
             factors = [item for item in factors if str(item.get("id")) in requested_set]
@@ -13273,6 +14663,10 @@ class FactorResearchService:
         self._store_diagnostic_preview_cache(preview_cache_key, result)
         return result
 
+    def preview_diagnostics_batch(self, request: Any) -> dict[str, Any]:
+        factors = list(self.list_factors(include_governance_queue=False)["items"])
+        return self._preview_diagnostics_batch_for_factors(factors, request)
+
     def _decode_factor_row(self, row: Mapping[str, Any], pit_overview: Mapping[str, Any]) -> dict[str, Any]:
         factor = dict(row)
         factor["stored_name"] = str(factor.get("name") or "").strip()
@@ -13325,6 +14719,11 @@ class FactorResearchService:
             factor["latest_diagnostic_summary"] = _decode_json_dict(latest.get("summary_json"))
             factor["last_diagnostic_run_id"] = latest.get("id")
             factor["latest_diagnostic_completed_at"] = latest.get("completed_at")
+        elif str(factor.get("id") or "") == VALUE_VOL_WNZT_F3_FACTOR_ID:
+            seed_summary = self._value_vol_wnzt_seed_metric_summary(factor)
+            factor["latest_diagnostic_summary"] = seed_summary
+            factor["last_diagnostic_run_id"] = seed_summary["run_id"]
+            factor["latest_diagnostic_completed_at"] = seed_summary["completed_at"]
         else:
             factor["last_diagnostic_run_id"] = None
             factor["latest_diagnostic_completed_at"] = None
@@ -13581,15 +14980,29 @@ class FactorResearchService:
             if str(item.get("id") or "").strip()
         }
         online_multi_factor_usage_ids = self._online_multi_factor_strategy_factor_ids()
+        restore_task_count = (
+            len(self._factor_redundancy_restore_actions(lifecycle_base))
+            if include_governance_queue
+            else 0
+        )
+        governance_factors = self._attach_governance_previews(active_factors) if include_governance_queue else []
+        governance_factor_lookup = {
+            **factor_lookup,
+            **{
+                str(item.get("id") or ""): item
+                for item in governance_factors
+                if str(item.get("id") or "").strip()
+            },
+        }
         governance_queue_count = (
             sum(
                 self._factor_governance_task_count(
                     item,
-                    factor_lookup=factor_lookup,
+                    factor_lookup=governance_factor_lookup,
                     strategy_usage_factor_ids=online_multi_factor_usage_ids,
                 )
-                for item in active_factors
-            )
+                for item in governance_factors
+            ) + restore_task_count
             if include_governance_queue
             else 0
         )
@@ -13597,6 +15010,26 @@ class FactorResearchService:
             factor_id
             for factor_id in self._strategy_usage_factor_ids()
             if any(str(item.get("id") or "") == factor_id for item in lifecycle_base)
+        ]
+        admission = (
+            pit_overview.get("factor_admission_coverage")
+            if isinstance(pit_overview.get("factor_admission_coverage"), Mapping)
+            else {}
+        )
+        admission_status = str(
+            admission.get("status")
+            or pit_overview.get("overall_status")
+            or "BLOCKED"
+        ).upper()
+        admission_hard_blockers = [
+            item
+            for item in (admission.get("hard_blockers") or [])
+            if isinstance(item, Mapping)
+        ]
+        admission_warnings = [
+            item
+            for item in (admission.get("warning_items") or [])
+            if isinstance(item, Mapping)
         ]
         return {
             "items": factors,
@@ -13626,6 +15059,10 @@ class FactorResearchService:
                 "strategy_usage_factor_count": len(strategy_usage_factor_ids),
                 "strategy_usage_factor_ids": strategy_usage_factor_ids,
                 "pit_status": pit_overview.get("overall_status"),
+                "factor_admission_status": admission_status,
+                "factor_admission_blocks": bool(admission.get("blocks_factor_admission")) or bool(admission_hard_blockers),
+                "factor_admission_warning_count": len(admission_warnings),
+                "factor_admission_repair_symbol_count": int(admission.get("repair_symbol_count") or 0),
             },
         }
 
@@ -15122,21 +16559,35 @@ class FactorResearchService:
             if cached_summary is not None:
                 summary = self._rehydrate_cached_diagnostic_summary(cached_summary, run_id=run_id, now=now)
             else:
-                summary = self._compute_factor_diagnostic_summary(
-                    factor=factor,
-                    payload=payload,
-                    pit_overview=pit_overview,
-                    research_waiver=research_waiver,
-                    pit_readiness_mode=pit_readiness_mode,
-                    ignored_symbols=ignored_symbols,
-                    diagnostic_mode=diagnostic_mode,
-                    run_id=run_id,
-                    now=now,
-                    preview=False,
-                    diagnostic_data_cache=diagnostic_data_cache,
-                    snapshot_binding_validated=True,
-                )
-                self._store_diagnostic_summary_cache(summary_cache_key, summary)
+                try:
+                    summary = self._compute_factor_diagnostic_summary(
+                        factor=factor,
+                        payload=payload,
+                        pit_overview=pit_overview,
+                        research_waiver=research_waiver,
+                        pit_readiness_mode=pit_readiness_mode,
+                        ignored_symbols=ignored_symbols,
+                        diagnostic_mode=diagnostic_mode,
+                        run_id=run_id,
+                        now=now,
+                        preview=False,
+                        diagnostic_data_cache=diagnostic_data_cache,
+                        snapshot_binding_validated=True,
+                    )
+                except ValueError as exc:
+                    if not self._diagnostic_failure_is_sample_shortage(exc):
+                        raise
+                    fallback_summary = self._published_quarantine_diagnostic_reuse_summary(
+                        factor,
+                        run_id=run_id,
+                        now=now,
+                        reason=str(exc),
+                    )
+                    if fallback_summary is None:
+                        raise
+                    summary = fallback_summary
+                else:
+                    self._store_diagnostic_summary_cache(summary_cache_key, summary)
         dataset_snapshot_id = str(summary.get("dataset_snapshot_id") or payload.get("dataset_snapshot_id") or "")
         universe_snapshot_id = str(summary.get("universe_snapshot_id") or payload.get("universe_snapshot_id") or "")
         with self.storage.connection() as conn:
@@ -15174,7 +16625,19 @@ class FactorResearchService:
                 """,
                 (stored_status, "1" if summary["promotion_eligible"] else "0", now, resolved_factor_id),
             )
-        return {"run_id": run_id, "summary": summary}
+        governance_followups: list[dict[str, Any]] = []
+        if self._factor_has_pruned_children(resolved_factor_id):
+            try:
+                governance_factors = self._attach_governance_previews(
+                    self.list_factors(lifecycle="all", include_governance_queue=False)["items"]
+                )
+                governance_followups = self._factor_redundancy_restore_actions(
+                    governance_factors,
+                    source_factor_id=resolved_factor_id,
+                )
+            except Exception:
+                governance_followups = []
+        return {"run_id": run_id, "summary": summary, "governance_followups": governance_followups}
 
     def _evidence_heatmap(self, rank_ic_values: Sequence[float]) -> list[dict[str, Any]]:
         windows = ("10年", "20年", "30年")

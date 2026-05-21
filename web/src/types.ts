@@ -2832,6 +2832,9 @@ export type ApiFactorDiagnosticSummary = {
   ic?: number | null;
   rank_ic?: number | null;
   ir?: number | null;
+  ir_display_value?: number | null;
+  ir_reference_only?: boolean;
+  ir_evidence?: Record<string, unknown>;
   coverage?: number | null;
   group_returns?: Array<{ group: string; mean_return: number | null; sample_count: number }>;
   group_return_series?: Array<{
@@ -2959,6 +2962,10 @@ export type ApiFactorLineageSummary = {
 export type ApiFactorQualityView = {
   rank_ic?: number | null;
   ir?: number | null;
+  raw_ir?: number | null;
+  ir_label?: string | null;
+  ir_reference_only?: boolean;
+  ir_evidence?: Record<string, unknown>;
   coverage?: number | null;
   decay_days?: number | null;
   decay_label?: string | null;
@@ -3024,6 +3031,7 @@ export type ApiFactorListItem = {
   governance_badges?: string[];
   name_schema_version?: string | null;
   naming_protocol_version?: string | null;
+  naming_standard_version?: string | null;
   base_display_name_cn?: string | null;
   name_collision_key?: string | null;
   name_dedupe_suffix?: string | null;
@@ -3132,6 +3140,7 @@ export type ApiFactorDisplayNameBackfillItem = {
   short_name_cn?: string | null;
   governance_badges?: string[];
   name_schema_version: string;
+  naming_standard_version?: string | null;
   renamed_at?: string | null;
   rename_reason: string;
   legacy_name_aliases?: string[];
@@ -3141,6 +3150,7 @@ export type ApiFactorDisplayNameBackfillItem = {
 export type ApiFactorDisplayNameBackfillResponse = {
   dry_run: boolean;
   name_schema_version: string;
+  naming_standard_version?: string | null;
   items: ApiFactorDisplayNameBackfillItem[];
   summary: {
     candidate_count?: number;
@@ -3185,6 +3195,7 @@ export type ApiFactorDiagnosticPayload = {
 export type ApiFactorDiagnosticRunResponse = {
   run_id: string;
   summary: ApiFactorDiagnosticSummary;
+  governance_followups?: ApiFactorGovernanceAction[];
 };
 
 export type ApiFactorDiagnosticPreviewPayload = {
@@ -3302,7 +3313,7 @@ export type ApiFactorMiningJobListResponse = {
 export type ApiFactorGovernanceAction = {
   id: string;
   kind: string;
-  command?: "DEPRECATE" | "PRUNE" | "PUBLISH_OPTIMIZED_FACTOR" | "FACTOR_MODEL_SUGGESTION" | string;
+  command?: "DEPRECATE" | "PRUNE" | "PUBLISH_OPTIMIZED_FACTOR" | "RESTORE_PRUNED" | "FACTOR_MODEL_SUGGESTION" | string;
   label: string;
   title: string;
   detail: string;
@@ -3327,12 +3338,13 @@ export type ApiFactorGovernanceAction = {
 
 export type ApiFactorGovernanceExecutePayload = {
   confirm: boolean;
-  command: "DEPRECATE" | "PRUNE" | "PUBLISH_OPTIMIZED_FACTOR" | string;
+  command: "DEPRECATE" | "PRUNE" | "PUBLISH_OPTIMIZED_FACTOR" | "RESTORE_PRUNED" | string;
   factor_ids?: string[];
   factor_id?: string;
   reason: string;
   keep_factor_id?: string | null;
   detail?: Record<string, unknown>;
+  include_governance_overview?: boolean;
 };
 
 export type ApiFactorGovernanceExecuteResponse = {
@@ -3341,12 +3353,55 @@ export type ApiFactorGovernanceExecuteResponse = {
   command: string;
   affected_factor_ids: string[];
   keep_factor_id?: string | null;
-  offline_at: string;
+  offline_at?: string | null;
+  restored_at?: string;
   executed_at?: string;
   reason: string;
   items: ApiFactorListItem[];
   created_factor_id?: string;
   created_factor?: ApiFactorListItem;
+  governance_overview?: ApiFactorGovernanceOverview;
+};
+
+export type ApiFactorPruneRecoveryItem = {
+  factor_id: string;
+  name: string;
+  source?: ApiFactorSource | string;
+  diagnostic_status?: ApiFactorDiagnosticStatus | string;
+  offline_at?: string | null;
+  offline_reason?: string | null;
+  keep_factor_id?: string | null;
+  offline_correlation?: number;
+  measured_correlation?: number;
+  threshold?: number;
+  recoverable: boolean;
+  decision: "RESTORE" | "KEEP_PRUNED" | string;
+  reason: string;
+  evidence?: Record<string, unknown>;
+};
+
+export type ApiFactorPruneRecoveryPreview = {
+  as_of: string;
+  threshold: number;
+  items: ApiFactorPruneRecoveryItem[];
+  summary: Record<string, unknown>;
+};
+
+export type ApiFactorPruneRecoveryApplyPayload = {
+  confirm: boolean;
+  factor_ids?: string[];
+  reason?: string;
+};
+
+export type ApiFactorPruneRecoveryApplyResponse = {
+  status: string;
+  command: "PRUNE_RECOVERY" | string;
+  recovered_factor_ids: string[];
+  recovered_count: number;
+  skipped_count: number;
+  reason: string;
+  items: ApiFactorListItem[];
+  recovery_preview?: ApiFactorPruneRecoveryPreview;
   governance_overview?: ApiFactorGovernanceOverview;
 };
 
@@ -3367,6 +3422,7 @@ export type ApiFactorQuarantineCandidate = {
   governance_badges?: string[];
   name_schema_version?: string | null;
   naming_protocol_version?: string | null;
+  naming_standard_version?: string | null;
   base_display_name_cn?: string | null;
   name_collision_key?: string | null;
   name_dedupe_suffix?: string | null;
@@ -3490,6 +3546,7 @@ export type ApiF1CatalogField = {
   governance_badges?: string[];
   name_schema_version?: string | null;
   naming_protocol_version?: string | null;
+  naming_standard_version?: string | null;
   base_display_name_cn?: string | null;
   name_collision_key?: string | null;
   name_dedupe_suffix?: string | null;
@@ -3656,6 +3713,7 @@ export type ApiFactorScoringCandidate = {
   governance_badges?: string[];
   name_schema_version?: string | null;
   naming_protocol_version?: string | null;
+  naming_standard_version?: string | null;
   base_display_name_cn?: string | null;
   name_collision_key?: string | null;
   name_dedupe_suffix?: string | null;
@@ -4181,6 +4239,10 @@ export type DemoApi = {
     actionId: string,
     payload: ApiFactorGovernanceExecutePayload,
   ) => Promise<ApiFactorGovernanceExecuteResponse>;
+  previewFactorPruneRecovery?: () => Promise<ApiFactorPruneRecoveryPreview>;
+  applyFactorPruneRecovery?: (
+    payload: ApiFactorPruneRecoveryApplyPayload,
+  ) => Promise<ApiFactorPruneRecoveryApplyResponse>;
   listFactorQuarantineCandidates?: (params?: {
     status?: string;
     source_job_id?: string;

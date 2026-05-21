@@ -105,6 +105,37 @@ function f1CatalogPayload() {
 }
 
 describe('FactorLibraryPage Phase 0 F1 catalog', () => {
+  it('uses factor admission status for the library hero instead of overall PIT status', async () => {
+    window.location.hash = '#/factors';
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/factors') {
+        return jsonResponse({
+          items: [],
+          summary: {
+            total: 0,
+            pit_status: 'BLOCKED',
+            factor_admission_status: 'READY',
+            factor_admission_blocks: false,
+          },
+        });
+      }
+      if (url.pathname === '/factor-governance/overview') {
+        return jsonResponse({ as_of: '2026-05-21T00:00:00Z', queue_count: 0, actions: [] });
+      }
+      return jsonResponse({});
+    });
+
+    render(
+      <ApiClientProvider>
+        <FactorLibraryPage />
+      </ApiClientProvider>,
+    );
+
+    expect(await screen.findByText('PIT 准入：正式诊断可用')).toBeInTheDocument();
+    expect(screen.queryByText('PIT 准入：阻塞')).not.toBeInTheDocument();
+  });
+
   it('renders the dedicated F1 raw catalog tab with PIT-only admission copy and table columns', async () => {
     window.location.hash = '#/factors?layer=F1';
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {

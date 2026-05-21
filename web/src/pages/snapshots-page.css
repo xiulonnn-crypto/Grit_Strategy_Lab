@@ -3692,21 +3692,50 @@
 
 .snapshots-ops-health-card {
   display: grid;
-  grid-template-rows: auto auto auto;
-  align-content: start;
-  gap: 10px;
-  min-height: 227px;
+  gap: 12px;
+  min-height: 188px;
+  height: 100%;
   padding: 14px;
   border: 1px solid var(--ops-border);
-  border-radius: 12px;
-  background: var(--ops-subtle);
+  border-radius: 14px;
+  background: #fbfcfd;
   box-shadow: none;
 }
 
+.snapshots-ops-health-card--ready {
+  border-color: var(--ops-border);
+  background: #fbfcfd;
+}
+
+.snapshots-ops-health-card--warning {
+  border-color: var(--ops-border);
+  background: #fbfcfd;
+}
+
+.snapshots-ops-health-card--danger {
+  border-color: var(--ops-border);
+  background: #fbfcfd;
+}
+
+.snapshots-ops-health-card--running {
+  border-color: var(--ops-border);
+  background: #fbfcfd;
+}
+
+.snapshots-ops-health-card--neutral {
+  border-color: var(--ops-border);
+  background: #fbfcfd;
+}
+
+.snapshots-ops-health-card--primary,
 .snapshots-ops-health-card--active,
 .snapshots-ops-drill-card--primary {
-  border-color: #9ad6cf;
-  box-shadow: inset 0 0 0 1px rgba(31, 135, 123, 0.1);
+  border-color: #91ccc3;
+  box-shadow: 0 0 0 2px rgba(31, 135, 123, 0.08);
+}
+
+.snapshots-ops-health-card--primary {
+  background: #ffffff;
 }
 
 .snapshots-ops-card-title {
@@ -3718,7 +3747,7 @@
 
 .snapshots-ops-metric-line {
   display: grid;
-  gap: 6px;
+  gap: 4px;
 }
 
 .snapshots-ops-metric-line strong {
@@ -3726,6 +3755,7 @@
   font-size: 22px;
   line-height: 26px;
   font-weight: 850;
+  overflow-wrap: anywhere;
 }
 
 .snapshots-ops-metric-line span {
@@ -3737,28 +3767,31 @@
 .snapshots-ops-mini-list {
   display: grid;
   gap: 6px;
-  align-content: start;
+  margin-top: auto;
 }
 
 .snapshots-ops-mini-row {
   display: flex;
-  align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
   border-top: 1px solid var(--ops-border-soft);
   padding-top: 6px;
   color: var(--ops-text-sub);
-  font-size: 13px;
+  font-size: 12px;
   line-height: 18px;
 }
 
 .snapshots-ops-mini-row strong {
   color: var(--ops-text-title);
-  font-size: 13px;
+  font-size: 12px;
   line-height: 18px;
-  font-weight: 800;
   text-align: right;
   white-space: nowrap;
+}
+
+.snapshots-ops-health-card .snapshots-ops-mini-row strong {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .snapshots-ops-console .snapshots-ops-link-plain {
@@ -3769,6 +3802,18 @@
   color: var(--ops-primary-strong);
   background: transparent;
   line-height: 21px;
+}
+
+.snapshots-ops-console .snapshots-ops-link-plain.snapshots-ops-health-action {
+  display: block;
+  justify-self: auto;
+  min-height: auto;
+  border: 0;
+  border-radius: 9px;
+  padding: 0;
+  background: transparent;
+  line-height: 21px;
+  text-align: center;
 }
 
 .snapshots-ops-queue-row {
@@ -3851,10 +3896,9 @@
 
 .snapshots-ops-drill-grid {
   display: grid;
-  grid-template-columns: 1.05fr 1.15fr 1.2fr 0.9fr;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 12px;
   align-items: start;
-  min-height: 279px;
 }
 
 .snapshots-ops-drill-card {
@@ -3875,6 +3919,38 @@
 .snapshots-ops-drill-card--highlight {
   border-color: var(--ops-primary);
   box-shadow: 0 0 0 3px rgba(31, 135, 123, 0.18);
+}
+
+.snapshots-ops-drill-card--empty {
+  min-height: 132px;
+}
+
+.snapshots-ops-source-fact-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.snapshots-ops-source-fact-grid div {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  border-top: 1px solid var(--ops-border-soft);
+  padding-top: 8px;
+}
+
+.snapshots-ops-source-fact-grid span {
+  color: var(--ops-text-sub);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.snapshots-ops-source-fact-grid strong {
+  color: var(--ops-text-title);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 18px;
+  overflow-wrap: anywhere;
 }
 
 .snapshots-ops-drill-list {
@@ -4082,6 +4158,12 @@
   background: #ffffff;
 }
 
+.snapshots-ops-credential-row--active {
+  border-left: 3px solid var(--ops-primary);
+  background: #f3fbf9;
+  box-shadow: inset 0 0 0 1px rgba(31, 135, 123, 0.14);
+}
+
 .snapshots-ops-credential-row:last-child {
   border-bottom: 0;
 }
@@ -4129,6 +4211,35 @@
   font-size: 12px;
   line-height: 20px;
   padding: 16px;
+}
+
+.snapshots-ops-command-selected {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 10px;
+  border: 1px solid var(--ops-border-soft);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #ffffff;
+}
+
+.snapshots-ops-command-selected span {
+  color: var(--ops-text-sub);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.snapshots-ops-command-selected strong {
+  color: var(--ops-text-title);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.snapshots-ops-command-selected p {
+  margin: 0;
+  color: var(--ops-text-sub);
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .snapshots-ops-modal-backdrop {
@@ -4194,6 +4305,10 @@
   .snapshots-ops-provider-summary,
   .snapshots-ops-bond-mini-grid {
     grid-template-columns: 1fr;
+  }
+
+  .snapshots-ops-health-card {
+    min-height: 0;
   }
 
   .snapshots-ops-queue-item,

@@ -1,0 +1,230 @@
+{
+  "target_id": "s_alpha_valvol_blend_resid_std_rk",
+  "factor_level": "D",
+  "lifecycle": "online",
+  "diagnostic_status": "READY_TO_DIAGNOSE",
+  "latest_diagnostic_summary": {
+    "run_id": "seed_metric_s_alpha_valvol_blend_resid_std_rk",
+    "factor_id": "s_alpha_valvol_blend_resid_std_rk",
+    "status": "COMPLETED",
+    "rank_ic": 0.1,
+    "ir": 0.11,
+    "coverage": 100,
+    "sharpe": 0.5527,
+    "max_drawdown_pct": 12.34,
+    "turnover_rate_weekly": 18,
+    "turnover_cost_bps": 9,
+    "style_corr": 0.26,
+    "composition_methods": [
+      {
+        "key": "residual_blend",
+        "label": "Residual Blend"
+      }
+    ],
+    "turnover_decay": {
+      "half_life_days": 252,
+      "annual_turnover_pct": 936,
+      "impact_cost_bps": 9
+    },
+    "scoring_detail": {
+      "predictive_power": {
+        "rank_ic": 0.1,
+        "rank_icir": 0.11
+      },
+      "stability_turnover": {
+        "turnover_rate_weekly": 18
+      },
+      "risk_orthogonality": {
+        "style_corr": 0.26,
+        "incremental_ir": 0.5527,
+        "max_drawdown": 12.34
+      },
+      "data_health": {
+        "coverage": 100
+      }
+    },
+    "data_lineage": {
+      "kind": "SYSTEM_SEED_AUDIT_PROJECTION",
+      "label": "F3 种子指标投影",
+      "method": "value_vol_wnzt_seed_metric_summary",
+      "source_factor_ids": [
+        "s_val_cfp_ltm_raw",
+        "s_vol_downside_252d_rank"
+      ]
+    },
+    "metric_projection_source": "system_seed_audit_projection",
+    "completed_at": "2026-05-21T07:22:39Z",
+    "ir_evidence": {
+      "value": 0.11,
+      "display_value": 0.11,
+      "reference_only": false,
+      "label": "IR",
+      "source": "summary",
+      "reason": "来自最近诊断或已调整的信息比率。",
+      "naive_ir": null,
+      "information_ratio": null,
+      "method": null,
+      "holding_period": null,
+      "newey_west_lags": 0,
+      "lineage_kind": "SYSTEM_SEED_AUDIT_PROJECTION"
+    },
+    "ir_display_value": 0.11,
+    "ir_reference_only": false
+  },
+  "quality_view": {
+    "rank_ic": 0.1,
+    "ir": 0.11,
+    "raw_ir": 0.11,
+    "ir_label": "IR",
+    "ir_reference_only": false,
+    "ir_evidence": {
+      "value": 0.11,
+      "display_value": 0.11,
+      "reference_only": false,
+      "label": "IR",
+      "source": "summary",
+      "reason": "来自最近诊断或已调整的信息比率。",
+      "naive_ir": null,
+      "information_ratio": null,
+      "method": null,
+      "holding_period": null,
+      "newey_west_lags": 0,
+      "lineage_kind": "SYSTEM_SEED_AUDIT_PROJECTION"
+    },
+    "coverage": 100,
+    "decay_days": 252,
+    "decay_label": "252日",
+    "sparkline": [],
+    "sparkline_window": "最近12期"
+  },
+  "composite_view": {
+    "quality": {
+      "sharpe": 0.553,
+      "sharpe_label": "0.55",
+      "max_drawdown_pct": 12.34,
+      "max_drawdown_label": "12.34%",
+      "incremental_ir": 0.5527
+    },
+    "capacity": {
+      "status": "PASS",
+      "label": "容量通过",
+      "score": null,
+      "source": "turnover_derived"
+    },
+    "turnover_cost": {
+      "turnover_rate_weekly": 18,
+      "turnover_rate_weekly_label": "18.00%/周",
+      "cost_bps": 9,
+      "cost_bps_label": "9.0 bps"
+    },
+    "style_exposure": {
+      "style_corr": 0.26,
+      "style_corr_label": "0.260",
+      "status": "PASS",
+      "label": "风格中性"
+    },
+    "execution": {
+      "portfolio_id": null,
+      "portfolio_label": "未绑定",
+      "execution_tag": null,
+      "execution_tag_label": "未绑定"
+    },
+    "blend_info": {
+      "component_count": 2,
+      "component_ids": [
+        "s_val_cfp_ltm_raw",
+        "s_vol_downside_252d_rank"
+      ],
+      "method_labels": [
+        "Residual Blend"
+      ],
+      "label": "2 个 F2 成分"
+    },
+    "source": {
+      "summary_run_id": "seed_metric_s_alpha_valvol_blend_resid_std_rk",
+      "scoring_detail": true,
+      "data_health_coverage": 100,
+      "sharpe_source": "system_seed_audit_projection",
+      "sharpe_observation_count": 0,
+      "sharpe_shortfall_reason": null,
+      "cost_source": "system_seed_audit_projection",
+      "style_source": "system_seed_audit_projection",
+      "metric_projection_source": "system_seed_audit_projection"
+    }
+  },
+  "op_status": {
+    "lights": [
+      {
+        "code": "W",
+        "key": "winsorize",
+        "label": "去极值",
+        "active": true,
+        "status": "done"
+      },
+      {
+        "code": "N",
+        "key": "neutralize",
+        "label": "中性化",
+        "active": true,
+        "status": "done"
+      },
+      {
+        "code": "Z",
+        "key": "zscore",
+        "label": "标准化",
+        "active": true,
+        "status": "done"
+      },
+      {
+        "code": "T",
+        "key": "tsrank",
+        "label": "时序排名",
+        "active": true,
+        "status": "done"
+      }
+    ],
+    "completed": [
+      "W",
+      "N",
+      "Z",
+      "T"
+    ],
+    "missing": [],
+    "summary": "W 去极值 / N 中性化 / Z 标准化 / T 时序排名"
+  },
+  "strategy_creation_risk": {
+    "can_create": true,
+    "status": "warning",
+    "label": "风险提示",
+    "warnings": [
+      {
+        "code": "FULL_READY_ARCHIVAL_GAP",
+        "severity": "warning",
+        "message": "121 个前置窗口或非核心标的仍在 Full Ready 归档修复队列。",
+        "fix_hash": "#/pit-data?section=coverage-gap"
+      },
+      {
+        "code": "HIGH_CORRELATION",
+        "severity": "warning",
+        "message": "与现有因子高相关，仅作策略创建风险提示。",
+        "top_factor_ids": [
+          "a_alpha_custom_cur_raw",
+          "s_alpha_ffblend_resid_mkt_rank",
+          "s_f2_liq_raw_cur_vol"
+        ],
+        "max_correlation": 0.94
+      },
+      {
+        "code": "TURNOVER_DECAY",
+        "severity": "warning",
+        "message": "换手衰减或交易成本偏高，不直接阻断。",
+        "annual_turnover_pct": 936
+      }
+    ],
+    "hard_blockers": [],
+    "warning_count": 3,
+    "hard_blocker_count": 0,
+    "blocked_count": 0,
+    "primary_reason": "121 个前置窗口或非核心标的仍在 Full Ready 归档修复队列。"
+  }
+}

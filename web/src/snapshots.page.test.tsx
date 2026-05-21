@@ -536,6 +536,62 @@ describe('SnapshotsPage operations console', () => {
     expect(within(queue).getAllByText(/公司行为|Corporate/).length).toBeGreaterThan(0);
   });
 
+  it('maps health card status to evidence or drilldown anchors', async () => {
+    renderSnapshotsPage();
+
+    await screen.findByText('L1-L4 数据层健康');
+    const healthCards = Array.from(document.querySelectorAll('.snapshots-ops-health-card')) as HTMLElement[];
+    expect(healthCards).toHaveLength(4);
+
+    const l1Card = healthCards.find((card) => within(card).queryByRole('heading', { name: 'L1 基础行情' }));
+    const l2Card = healthCards.find((card) => within(card).queryByRole('heading', { name: 'L2 财务截面' }));
+    const l3Card = healthCards.find((card) => within(card).queryByRole('heading', { name: 'L3 分析师与情绪' }));
+    const l4Card = healthCards.find((card) => within(card).queryByRole('heading', { name: 'L4 宏观与衍生品' }));
+    expect(l1Card).toBeTruthy();
+    expect(l2Card).toBeTruthy();
+    expect(l3Card).toBeTruthy();
+    expect(l4Card).toBeTruthy();
+
+    expect(screen.getByText('1 层部分可用')).toBeTruthy();
+    expect(within(l1Card as HTMLElement).getByText(/股票 .* · 债券/)).toBeTruthy();
+    expect(within(l1Card as HTMLElement).queryByText(/公司行动 .* ·/)).toBeNull();
+    expect(within(l2Card as HTMLElement).getByText('已就绪')).toHaveClass('snapshots-ops-status--ready');
+    expect(within(l3Card as HTMLElement).getByText('3 / 3')).toBeTruthy();
+    expect(l1Card as HTMLElement).toHaveClass('snapshots-ops-health-card--warning');
+    expect(l1Card as HTMLElement).toHaveClass('snapshots-ops-health-card--primary');
+    expect(l2Card as HTMLElement).toHaveClass('snapshots-ops-health-card--ready');
+    expect(l4Card as HTMLElement).toHaveClass('snapshots-ops-health-card--ready');
+    expect(within(l4Card as HTMLElement).getByText('已就绪')).toHaveClass('snapshots-ops-status--ready');
+
+    fireEvent.click(within(l2Card as HTMLElement).getByRole('button', { name: '查看观察项' }));
+    const fundamentalLedgerRow = screen.getByText(/ds-fundamentals/).closest('tr');
+    expect(fundamentalLedgerRow).toHaveAttribute('data-layer-id', 'l2');
+    expect(fundamentalLedgerRow).toHaveClass('snapshots-ops-ledger-row--highlight');
+
+    fireEvent.click(within(l3Card as HTMLElement).getByRole('button', { name: '查看证据' }));
+    const sentimentLedgerRow = screen.getByText(/ds-analyst-consensus/).closest('tr');
+    expect(sentimentLedgerRow).toHaveAttribute('data-layer-id', 'l3');
+
+    fireEvent.click(within(l4Card as HTMLElement).getByRole('button', { name: '查看证据' }));
+    const macroLedgerRow = screen.getByText(/ds-macro-rates/).closest('tr');
+    expect(macroLedgerRow).toHaveAttribute('data-layer-id', 'l4');
+    await waitFor(() => expect(macroLedgerRow).toHaveClass('snapshots-ops-ledger-row--highlight'));
+    const drilldown = screen.getByTestId('snapshots-drilldown-row');
+    expect(document.getElementById('snapshot-layer-l4')).toBeNull();
+    expect(document.getElementById('snapshot-layer-l2')).toBeNull();
+    expect(document.getElementById('snapshot-layer-l3')).toBeNull();
+    expect(document.getElementById('snapshot-source-ds-macro-rates')).toBeNull();
+    expect(document.getElementById('snapshot-source-ds-option-skew')).toBeNull();
+
+    fireEvent.click(within(l1Card as HTMLElement).getByRole('button', { name: '下钻缺口' }));
+    await waitFor(() =>
+      expect(document.getElementById('snapshot-source-ds-price')).toHaveClass('snapshots-ops-drill-card--highlight'),
+    );
+    expect(within(drilldown).getByRole('heading', { name: 'L1 基础行情 · 价格历史' })).toBeTruthy();
+    expect(within(document.getElementById('snapshot-source-ds-price') as HTMLElement).getByText(/缺 216 个标的/)).toBeTruthy();
+    expect(within(document.getElementById('snapshot-source-ds-corporate-actions') as HTMLElement).getByText(/缺 452 个标的/)).toBeTruthy();
+  });
+
   it('renders the bond compatibility URL as the same console and highlights bond evidence', async () => {
     renderSnapshotsPage('bond');
 
@@ -577,10 +633,13 @@ describe('SnapshotsPage operations console', () => {
     const dialog = await screen.findByRole('dialog', { name: '刷新日志' });
     expect(within(dialog).getByText(/snap_57ae046824c9/)).toBeTruthy();
     expect(within(dialog).getByText('L1 基础行情')).toBeTruthy();
-    expect(within(dialog).getByText('L2 财务基本面')).toBeTruthy();
-    expect(within(dialog).getByText('L3 情绪与微观结构')).toBeTruthy();
+    expect(within(dialog).getByText('L2 财务截面')).toBeTruthy();
+    expect(within(dialog).getByText('L3 分析师与情绪')).toBeTruthy();
     expect(within(dialog).getByText('L4 宏观与衍生品')).toBeTruthy();
-    expect(within(dialog).getByText(/1,482 行/)).toBeTruthy();
+    expect(within(dialog).getByText(/价格新增 1,482 行数据/)).toBeTruthy();
+    expect(within(dialog).getByText(/公司行为新增 1,030 行数据/)).toBeTruthy();
+    expect(within(dialog).getByText(/债券新增 7 行数据/)).toBeTruthy();
+    expect(within(dialog).queryByText(/覆盖 1,030 标的/)).toBeNull();
     expect(within(dialog).getByText(/混合来源|OpenBB 债券基础行情/)).toBeTruthy();
   });
 
@@ -596,10 +655,24 @@ describe('SnapshotsPage operations console', () => {
     expect(screen.getAllByRole('button', { name: '查看窗口' }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole('button', { name: '查看来源' }).length).toBeGreaterThan(0);
 
+    fireEvent.click(screen.getAllByRole('button', { name: '查看窗口' })[0]);
+    expect(screen.getByTestId('credential-row-tiingo')).toHaveClass('snapshots-ops-credential-row--active');
+    expect(screen.getByTestId('credential-selected-detail')).toHaveTextContent('当前选择');
+    expect(screen.getByTestId('credential-selected-detail')).toHaveTextContent('TIINGO_API_TOKEN');
+
+    fireEvent.click(screen.getByRole('button', { name: '暂不处理' }));
+    expect(screen.getByTestId('credential-row-iex')).toHaveClass('snapshots-ops-credential-row--active');
+    expect(screen.getByTestId('credential-selected-detail')).toHaveTextContent('IEX_TOKEN / IEX_CLOUD_TOKEN');
+
     fireEvent.click(screen.getAllByRole('button', { name: '配置路径' })[0]);
 
+    expect(screen.getByTestId('credential-row-crsp')).toHaveClass('snapshots-ops-credential-row--active');
+    expect(screen.getByText(/\$env:CRSP_DATA_PATH/)).toBeTruthy();
     expect(screen.getByText(/QuickStart-Grit\.ps1 -ForceRestart/)).toBeTruthy();
     expect(screen.getByText(/snapshot provider credentials updated/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: '复制命令' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /已复制|请手动复制/ })).toBeTruthy());
   });
 
   it('submits the merged repair refresh including bond as L1 base market data', async () => {

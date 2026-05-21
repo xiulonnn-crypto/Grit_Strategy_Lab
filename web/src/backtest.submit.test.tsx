@@ -1,4 +1,4 @@
-﻿import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BacktestSubmitPage } from './pages/backtest-submit-page-cn';
 import { ApiError } from './types';
@@ -126,7 +126,7 @@ describe('回测提交页', () => {
     expect(sectionHeadings.at(-1)).toBe('多因子预检');
     const precheckSection = screen.getByRole('heading', { name: '多因子预检' }).closest('section');
     expect(precheckSection).toHaveClass('backtest-submit-section--multi-factor-precheck');
-    expect(screen.getByText('Rank-12-1月截面动量 (排序)')).toBeInTheDocument();
+    expect(screen.getByText('截面动量排名 (12-1m) [Rank]')).toBeInTheDocument();
     expect(screen.getByText('缺少 PIT 行业字段，行业中性化未执行。')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '提交回测' })).toBeDisabled();
     expect(fakeApi.submitBacktestRun).not.toHaveBeenCalled();

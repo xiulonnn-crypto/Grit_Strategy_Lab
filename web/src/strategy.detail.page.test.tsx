@@ -242,14 +242,14 @@ describe('StrategyDetailPage', () => {
     render(<StrategyDetailPage strategyId="strat-mf-001" />);
 
     expect(await screen.findByText('多因子策略')).toBeInTheDocument();
-    expect(screen.getAllByText(/ZScore-126日收益率 \(精炼\)/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/GSL-多因子全能动力/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/收益率 \(126d\) \[Refined\]/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/\[综合\] - FF3 风格复合基石 \(等权\) \[Beta-Free\]/).length).toBeGreaterThan(0);
     expect(screen.getByText('再平衡')).toBeInTheDocument();
     expect(screen.getAllByText('每季度').length).toBeGreaterThan(0);
-    expect(screen.getByText('因子权重 · ZScore-126日收益率 (精炼)')).toBeInTheDocument();
-    expect(screen.getByText('因子权重 · GSL-多因子全能动力')).toBeInTheDocument();
-    expect(screen.getByText('因子权重 · ZScore-126日收益率 (精炼) 82→80')).toBeInTheDocument();
-    expect(screen.getByText('因子权重 · GSL-多因子全能动力 18→20')).toBeInTheDocument();
+    expect(screen.getByText('因子权重 · 收益率 (126d) [Refined]')).toBeInTheDocument();
+    expect(screen.getByText('因子权重 · [综合] - FF3 风格复合基石 (等权) [Beta-Free]')).toBeInTheDocument();
+    expect(screen.getByText('因子权重 · 收益率 (126d) [Refined] 82→80')).toBeInTheDocument();
+    expect(screen.getByText('因子权重 · [综合] - FF3 风格复合基石 (等权) [Beta-Free] 18→20')).toBeInTheDocument();
     expect(screen.getByText('权重方案 已配置→已配置')).toBeInTheDocument();
     expect(screen.getByText('中性化方法 空→行业中性')).toBeInTheDocument();
     expect(screen.getByText('打分方法 空→标准化加权')).toBeInTheDocument();
@@ -270,8 +270,8 @@ describe('StrategyDetailPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: HISTORY_OPEN_LABEL }));
     const dialog = await screen.findByRole('dialog', { name: HISTORY_DETAIL_TITLE });
-    expect(dialog.textContent).toContain('因子权重 · ZScore-126日收益率 (精炼)');
-    expect(dialog.textContent).toContain('因子权重 · GSL-多因子全能动力');
+    expect(dialog.textContent).toContain('因子权重 · 收益率 (126d) [Refined]');
+    expect(dialog.textContent).toContain('因子权重 · [综合] - FF3 风格复合基石 (等权) [Beta-Free]');
     expect(dialog.textContent).toContain('权重方案 已配置→已配置');
     expect(dialog.textContent).toContain('中性化方法 空→行业中性');
     expect(dialog.textContent).toContain('打分方法 空→标准化加权');
