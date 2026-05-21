@@ -75,6 +75,19 @@ def _git_lines(repo_root: Path, args: list[str]) -> list[str]:
     return [line.strip().replace("\\", "/") for line in completed.stdout.splitlines() if line.strip()]
 
 
+def _git_check(repo_root: Path, args: list[str]) -> tuple[bool, str]:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    output = "\n".join(part for part in (completed.stdout.strip(), completed.stderr.strip()) if part)
+    return completed.returncode == 0, output
+
+
 def _read_push_updates() -> list[list[str]]:
     if sys.stdin.isatty():
         return []
@@ -146,6 +159,29 @@ def _current_head_is_metadata_only_child(
     return True, f"current HEAD only adds generated push metadata: {', '.join(changed_files)}"
 
 
+def _metadata_child_reuse_checks(
+    repo_root: Path,
+    *,
+    validated_head_sha: str | None,
+    current_head_sha: str | None,
+    changelog_prepared: bool,
+) -> tuple[bool, str]:
+    if not changelog_prepared:
+        return False, "push metadata was not prepared and validated in this pre-push run"
+    if not validated_head_sha or not current_head_sha:
+        return False, "missing validated or current HEAD"
+
+    changed_files = _git_lines(repo_root, ["diff", "--name-only", f"{validated_head_sha}..{current_head_sha}"])
+    if not changed_files:
+        return False, "metadata child has no changed files to check"
+
+    ok, output = _git_check(repo_root, ["diff", "--check", f"{validated_head_sha}..{current_head_sha}", "--", *changed_files])
+    if not ok:
+        return False, f"metadata child whitespace check failed: {output or '<no output>'}"
+
+    return True, f"metadata child passed changelog preparation and whitespace checks: {', '.join(changed_files)}"
+
+
 def _impact_gate_matches_push(
     fields: dict[str, str],
     *,
@@ -177,6 +213,7 @@ def _impact_gate_allows_push(
     repo_root: Path,
     *,
     expected_base_sha: str | None,
+    changelog_prepared: bool = False,
 ) -> tuple[bool, str]:
     summary_path = repo_root / "harness" / "reports" / "smoke" / "latest-impact-gate.md"
     if not summary_path.exists():
@@ -190,6 +227,17 @@ def _impact_gate_allows_push(
         validated_head_sha=fields.get("head_sha"),
         current_head_sha=head_sha,
     )
+    if metadata_child_ok:
+        extra_ok, extra_reason = _metadata_child_reuse_checks(
+            repo_root,
+            validated_head_sha=fields.get("head_sha"),
+            current_head_sha=head_sha,
+            changelog_prepared=changelog_prepared,
+        )
+        if extra_ok:
+            metadata_child_reason = f"{metadata_child_reason}; {extra_reason}"
+        else:
+            return False, extra_reason
     return _impact_gate_matches_push(
         fields,
         report_text=report_text,
@@ -227,9 +275,22 @@ def _run_fast_gate(repo_root: Path, remote: str | None, push_updates: list[list[
     if base_ref:
         command.extend(["-BaseRef", base_ref])
 
+    impact_ok, impact_reason = _impact_gate_allows_push(
+        repo_root,
+        expected_base_sha=base_ref,
+        changelog_prepared=True,
+    )
+    if impact_ok:
+        print(f"pre-push: {impact_reason}; allowing push without rerunning fast gate.", file=sys.stderr)
+        return 0
+
     completed = subprocess.run(command, cwd=repo_root, check=False)
     if completed.returncode == 2:
-        impact_ok, impact_reason = _impact_gate_allows_push(repo_root, expected_base_sha=base_ref)
+        impact_ok, impact_reason = _impact_gate_allows_push(
+            repo_root,
+            expected_base_sha=base_ref,
+            changelog_prepared=True,
+        )
         if impact_ok:
             print(
                 f"pre-push: fast gate returned not-fast, but {impact_reason}; allowing push.",

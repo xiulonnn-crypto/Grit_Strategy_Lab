@@ -137,23 +137,44 @@ def test_fast_changed_backend_test_runs_only_itself() -> None:
 
 def test_contract_change_moves_from_fast_to_impact_contract_smoke() -> None:
     fast_plan = planner.build_plan("fast", "Committed", ["web/src/types.ts"])
-    impact_plan = planner.build_plan("impact", "Committed", ["web/src/types.ts"])
+    frontend_contract_plan = planner.build_plan("impact", "Committed", ["web/src/types.ts"])
+    backend_contract_plan = planner.build_plan("impact", "Committed", ["src/grit_backtest_platform/models.py"])
 
     assert fast_plan.eligible is False
     assert any("contract files" in reason for reason in fast_plan.ineligible_reasons)
-    assert impact_plan.backend_tests == [
+    assert frontend_contract_plan.backend_tests == []
+    assert set(frontend_contract_plan.frontend_tests) >= {
+        "factors.phase0.f1.test.tsx",
+        "factor.model-builder.test.tsx",
+        "factor.factory.test.tsx",
+        "app.routes.foundation.test.tsx",
+    }
+    assert backend_contract_plan.backend_tests == [
         "tests/test_factor_research_api.py",
         "tests/test_backend_api.py",
         "tests/test_factor_mining_api.py",
         "tests/test_factor_factory_api.py",
         "tests/test_factor_quarantine_api.py",
     ]
-    assert set(impact_plan.frontend_tests) >= {
-        "factors.phase0.f1.test.tsx",
-        "factor.model-builder.test.tsx",
-        "factor.factory.test.tsx",
-        "app.routes.foundation.test.tsx",
-    }
+    assert backend_contract_plan.frontend_tests == ["app.routes.foundation.test.tsx"]
+
+
+def test_impact_factor_backend_uses_composable_owner_slices_without_contract_fanout() -> None:
+    impact_plan = planner.build_plan(
+        "impact",
+        "Committed",
+        [
+            "src/grit_backtest_platform/factor_research.py",
+            "src/grit_backtest_platform/factor_factory.py",
+        ],
+    )
+
+    assert impact_plan.backend_tests == [
+        "tests/test_factor_research_api.py",
+        "tests/test_factor_factory_api.py",
+    ]
+    assert "tests/test_backend_api.py" not in impact_plan.backend_tests
+    assert "tests/test_factor_quarantine_api.py" not in impact_plan.backend_tests
 
 
 def test_validation_tooling_change_moves_from_fast_to_impact_release_workflow() -> None:
@@ -218,3 +239,38 @@ def test_cli_plan_only_shape_outputs_json_without_running_tests() -> None:
 
     assert payload["eligible"] is True
     assert payload["frontend_tests"] == ["optimization.module.test.tsx"]
+
+
+def test_collect_changed_files_can_start_from_last_validated_commit(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=tmp_path, check=True)
+    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
+    subprocess.run(["git", "add", "CHANGELOG.md"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "docs: base"], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "codex-validate-fast.ps1").write_text("Write-Host fast\n", encoding="utf-8")
+    subprocess.run(["git", "add", "scripts/codex-validate-fast.ps1"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "feat: validated gate"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    validated = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    ).stdout.strip()
+
+    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n\n## [0.1.1-001]\n", encoding="utf-8")
+    subprocess.run(["git", "add", "CHANGELOG.md"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "docs: metadata child"], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    changed = planner.collect_changed_files(
+        tmp_path,
+        "Committed",
+        base_ref=None,
+        since_last_validated=validated,
+    )
+
+    assert changed == ["CHANGELOG.md"]

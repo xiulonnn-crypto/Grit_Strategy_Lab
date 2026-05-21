@@ -56,6 +56,31 @@ def _write_repo_files(repo_root: Path, changelog: str, version: str = "0.1.1") -
     )
 
 
+def _write_impact_summary(repo_root: Path, *, head_sha: str, base_sha: str = "") -> None:
+    summary_dir = repo_root / "harness" / "reports" / "smoke"
+    summary_dir.mkdir(parents=True)
+    (summary_dir / "latest-impact-gate.md").write_text(
+        "\n".join(
+            [
+                "# Codex Impact Gate",
+                "",
+                "- status: ok",
+                "- scope: Committed",
+                "- plan_only: False",
+                "- skip_tests: False",
+                f"- head_sha: {head_sha}",
+                f"- base_sha: {base_sha}",
+                "- elapsed_seconds: 12.3",
+                "",
+                "## Steps",
+                "- [ok] backend targeted tests (duration=10.0s)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_pre_push_hook_uses_single_remote_sha_as_fast_gate_base() -> None:
     remote_sha = "1234567890abcdef1234567890abcdef12345678"
 
@@ -196,6 +221,99 @@ def test_pre_push_detects_single_generated_metadata_child(tmp_path: Path) -> Non
 
     assert ok is True
     assert "CHANGELOG.md" in reason
+
+
+def test_pre_push_reuses_parent_impact_after_metadata_child_checks(tmp_path: Path) -> None:
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "config", "user.name", "Test User")
+    _write_repo_files(
+        tmp_path,
+        """# 更新日志
+
+## [Unreleased]
+
+### 修复 (Fixed)
+
+- **推送元数据**: 用于测试父提交影响面证据复用。
+""",
+    )
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "feat: validated parent")
+    validated_head = _git(tmp_path, "rev-parse", "HEAD")
+    _write_impact_summary(tmp_path, head_sha=validated_head)
+
+    (tmp_path / "CHANGELOG.md").write_text(
+        """# 更新日志
+
+## [Unreleased]
+
+## [0.1.1-001] - 2026-05-21 - 修复推送元数据
+
+### 修复 (Fixed)
+
+- **推送元数据**: 用于测试父提交影响面证据复用。
+""",
+        encoding="utf-8",
+    )
+    _git(tmp_path, "add", "CHANGELOG.md")
+    _git(tmp_path, "commit", "-m", "docs(changelog): snapshot 0.1.1-001")
+
+    ok, reason = pre_push_hook._impact_gate_allows_push(
+        tmp_path,
+        expected_base_sha=None,
+        changelog_prepared=True,
+    )
+
+    assert ok is True
+    assert "validated parent" in reason
+    assert "whitespace" in reason
+
+
+def test_pre_push_rejects_metadata_reuse_without_changelog_preparation(tmp_path: Path) -> None:
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "config", "user.name", "Test User")
+    _write_repo_files(
+        tmp_path,
+        """# 更新日志
+
+## [Unreleased]
+
+### 修复 (Fixed)
+
+- **推送元数据**: 用于测试未校验元数据时拒绝复用。
+""",
+    )
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "feat: validated parent")
+    validated_head = _git(tmp_path, "rev-parse", "HEAD")
+    _write_impact_summary(tmp_path, head_sha=validated_head)
+
+    (tmp_path / "CHANGELOG.md").write_text(
+        """# 更新日志
+
+## [Unreleased]
+
+## [0.1.1-001] - 2026-05-21 - 修复推送元数据
+
+### 修复 (Fixed)
+
+- **推送元数据**: 用于测试未校验元数据时拒绝复用。
+""",
+        encoding="utf-8",
+    )
+    _git(tmp_path, "add", "CHANGELOG.md")
+    _git(tmp_path, "commit", "-m", "docs(changelog): snapshot 0.1.1-001")
+
+    ok, reason = pre_push_hook._impact_gate_allows_push(
+        tmp_path,
+        expected_base_sha=None,
+        changelog_prepared=False,
+    )
+
+    assert ok is False
+    assert "not prepared" in reason
 
 
 def test_pre_push_rejects_non_metadata_child(tmp_path: Path) -> None:

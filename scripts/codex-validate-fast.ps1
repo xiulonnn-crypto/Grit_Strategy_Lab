@@ -4,6 +4,7 @@ param(
     [string]$Scope = 'All',
     [string]$Remote = 'origin',
     [string]$BaseRef,
+    [string]$SinceLastValidated,
     [switch]$SkipFetch,
     [switch]$RequireSynced,
     [switch]$SkipTests,
@@ -40,6 +41,10 @@ $script:LastStepAt = $startedAt
 $script:ResolvedBaseRef = ''
 $script:ResolvedBaseSha = ''
 $script:ResolvedHeadSha = ''
+$script:ResolvedSinceLastValidatedSha = ''
+$script:ValidationFingerprint = ''
+$script:GateCancelled = $false
+$script:TrackedProcessIds = [System.Collections.Generic.List[int]]::new()
 $script:Plan = $null
 
 function Format-StepDuration {
@@ -103,6 +108,21 @@ function Format-ListSection {
     }
 }
 
+function Get-Sha256Text {
+    param(
+        [string]$Text
+    )
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+        $hash = $sha.ComputeHash($bytes)
+        return (($hash | ForEach-Object { $_.ToString('x2') }) -join '')
+    } finally {
+        $sha.Dispose()
+    }
+}
+
 function Write-Summary {
     param(
         [string]$Status,
@@ -131,6 +151,20 @@ function Write-Summary {
     } else {
         $script:ResolvedBaseSha
     }
+    $sinceShaValue = if ([string]::IsNullOrWhiteSpace($script:ResolvedSinceLastValidatedSha)) {
+        '<none>'
+    } else {
+        $script:ResolvedSinceLastValidatedSha
+    }
+    $fingerprintInput = @(
+        "mode=$GateMode",
+        "scope=$Scope",
+        "head=$headShaValue",
+        "base=$baseShaValue",
+        "since=$sinceShaValue",
+        "files=$($rawChanged -join '|')"
+    ) -join "`n"
+    $script:ValidationFingerprint = Get-Sha256Text -Text $fingerprintInput
 
     $lines = [System.Collections.Generic.List[string]]::new()
     foreach ($line in @(
@@ -152,6 +186,8 @@ function Write-Summary {
         ('- async_repeat_count: ' + $(if ($asyncRepeatTests.Count -eq 0) { 0 } else { $AsyncRepeatCount })),
         ('- head_sha: ' + $headShaValue),
         ('- base_sha: ' + $baseShaValue),
+        ('- since_last_validated: ' + $sinceShaValue),
+        ('- validation_fingerprint: ' + $script:ValidationFingerprint),
         ('- raw_changed_count: ' + $rawChanged.Count),
         ('- evidence_asset_count: ' + $evidenceFiles.Count),
         ('- documentation_count: ' + $docFiles.Count),
@@ -206,6 +242,97 @@ function Get-NodeExecutable {
         throw 'Node executable not found in PATH.'
     }
     return $nodeCommand.Source
+}
+
+function Stop-ProcessTree {
+    param(
+        [int]$ProcessId
+    )
+
+    try {
+        $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ProcessId" -ErrorAction SilentlyContinue)
+        foreach ($child in $children) {
+            Stop-ProcessTree -ProcessId ([int]$child.ProcessId)
+        }
+    } catch {
+        # Best-effort cleanup only; the original cancellation/failure should stay visible.
+    }
+
+    try {
+        Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+    } catch {
+        # Best-effort cleanup only.
+    }
+}
+
+function Stop-TrackedProcesses {
+    foreach ($processId in @($script:TrackedProcessIds)) {
+        Stop-ProcessTree -ProcessId $processId
+    }
+    $script:TrackedProcessIds.Clear()
+}
+
+function Invoke-TrackedProcess {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [string]$WorkingDirectory,
+        [string]$Label
+    )
+
+    $processReportDir = Join-Path $reportDir 'process'
+    New-Item -ItemType Directory -Path $processReportDir -Force | Out-Null
+    $safeLabel = ($Label -replace '[^A-Za-z0-9_.-]', '-')
+    $stamp = Get-Date -Format 'yyyyMMddHHmmssfff'
+    $stdoutPath = Join-Path $processReportDir "$reportPrefix-$safeLabel-$stamp.out.txt"
+    $stderrPath = Join-Path $processReportDir "$reportPrefix-$safeLabel-$stamp.err.txt"
+
+    $process = Start-Process `
+        -FilePath $FilePath `
+        -ArgumentList $Arguments `
+        -WorkingDirectory $WorkingDirectory `
+        -NoNewWindow `
+        -PassThru `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath
+    [void]$script:TrackedProcessIds.Add([int]$process.Id)
+
+    try {
+        while (-not $process.HasExited) {
+            Start-Sleep -Milliseconds 200
+            $process.Refresh()
+        }
+    } catch {
+        $script:GateCancelled = $true
+        Stop-ProcessTree -ProcessId ([int]$process.Id)
+        throw
+    } finally {
+        [void]$script:TrackedProcessIds.Remove([int]$process.Id)
+    }
+
+    $output = [System.Collections.Generic.List[string]]::new()
+    if (Test-Path -LiteralPath $stdoutPath) {
+        foreach ($line in @(Get-Content -LiteralPath $stdoutPath -ErrorAction SilentlyContinue)) {
+            [void]$output.Add([string]$line)
+        }
+    }
+    if (Test-Path -LiteralPath $stderrPath) {
+        foreach ($line in @(Get-Content -LiteralPath $stderrPath -ErrorAction SilentlyContinue)) {
+            [void]$output.Add([string]$line)
+        }
+    }
+
+    return [pscustomobject]@{
+        ExitCode = [int]$process.ExitCode
+        Output = [string[]]$output
+    }
+}
+
+trap [System.Management.Automation.PipelineStoppedException] {
+    $script:GateCancelled = $true
+    Stop-TrackedProcesses
+    Write-Host "$reportPrefix-gate: cancelled; latest summary was not updated." -ForegroundColor Yellow
+    exit 130
 }
 
 function Get-GitLines {
@@ -318,6 +445,9 @@ function Invoke-GatePlan {
     if (-not [string]::IsNullOrWhiteSpace($script:ResolvedBaseRef)) {
         $args += @('--base-ref', $script:ResolvedBaseRef)
     }
+    if (-not [string]::IsNullOrWhiteSpace($script:ResolvedSinceLastValidatedSha)) {
+        $args += @('--since-last-validated', $script:ResolvedSinceLastValidatedSha)
+    }
 
     $json = & $pythonExe @args
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($json | Out-String))) {
@@ -427,14 +557,9 @@ function Invoke-BackendTests {
 
         $args = @('-m', 'pytest') + $tests + @('--basetemp', $baseTemp)
         Write-Host "$reportPrefix-gate: backend targeted pytest -> $($tests -join ', ')" -ForegroundColor Cyan
-        $previousErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try {
-            $output = & $pythonExe @args 2>&1
-            $exitCode = $LASTEXITCODE
-        } finally {
-            $ErrorActionPreference = $previousErrorActionPreference
-        }
+        $result = Invoke-TrackedProcess -FilePath $pythonExe -Arguments $args -WorkingDirectory $repoRoot -Label 'backend-pytest'
+        $output = $result.Output
+        $exitCode = $result.ExitCode
         @(
             "# Codex $gateTitle Backend",
             "started_at = $(Get-Date -Format o)",
@@ -490,14 +615,9 @@ function Invoke-AsyncLifecycleRepeat {
             New-Item -ItemType Directory -Path $baseTemp -Force | Out-Null
             $args = @('-m', 'pytest') + $tests + @('--basetemp', $baseTemp)
             Write-Host "$reportPrefix-gate: async lifecycle repeat $index/$AsyncRepeatCount -> $($tests -join ', ')" -ForegroundColor Cyan
-            $previousErrorActionPreference = $ErrorActionPreference
-            $ErrorActionPreference = 'Continue'
-            try {
-                $output = & $pythonExe @args 2>&1
-                $exitCode = $LASTEXITCODE
-            } finally {
-                $ErrorActionPreference = $previousErrorActionPreference
-            }
+            $result = Invoke-TrackedProcess -FilePath $pythonExe -Arguments $args -WorkingDirectory $repoRoot -Label "async-lifecycle-$index"
+            $output = $result.Output
+            $exitCode = $result.ExitCode
             [void]$report.Add("## repeat $index")
             [void]$report.Add("command = $pythonExe $($args -join ' ')")
             foreach ($line in @($output)) {
@@ -540,6 +660,9 @@ function Invoke-GateSelfTest {
     $baseArgs = @('-Scope', $Scope, '-Remote', $Remote, '-SkipFetch', '-PlanOnly', '-SkipGateSelfTest')
     if (-not [string]::IsNullOrWhiteSpace($BaseRef)) {
         $baseArgs += @('-BaseRef', $BaseRef)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($SinceLastValidated)) {
+        $baseArgs += @('-SinceLastValidated', $SinceLastValidated)
     }
     if ($RequireSynced) {
         $baseArgs += '-RequireSynced'
@@ -589,18 +712,14 @@ function Invoke-FrontendTypes {
     }
 
     Write-Host 'impact-gate: frontend TypeScript -> tsc --project web/tsconfig.json --noEmit' -ForegroundColor Cyan
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        $output = & $nodeExe $tscEntry '--project' $tsconfigPath '--noEmit' 2>&1
-        $exitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
+    $args = @($tscEntry, '--project', $tsconfigPath, '--noEmit')
+    $result = Invoke-TrackedProcess -FilePath $nodeExe -Arguments $args -WorkingDirectory $repoRoot -Label 'frontend-types'
+    $output = $result.Output
+    $exitCode = $result.ExitCode
     @(
         "# Codex $gateTitle Frontend Types",
         "started_at = $(Get-Date -Format o)",
-        "command = $nodeExe $tscEntry --project $tsconfigPath --noEmit",
+        "command = $nodeExe $($args -join ' ')",
         ''
     ) + $output | Set-Content -LiteralPath $typesReportPath -Encoding utf8
     $output | ForEach-Object { Write-Host $_ }
@@ -625,22 +744,15 @@ function Invoke-FrontendTests {
     }
 
     Write-Host "$reportPrefix-gate: frontend targeted Vitest -> $($tests -join ', ')" -ForegroundColor Cyan
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    $previousLocation = Get-Location
-    try {
-        Set-Location -LiteralPath $webDir
-        $output = & $nodeExe $vitestRunner @tests 2>&1
-        $exitCode = $LASTEXITCODE
-    } finally {
-        Set-Location -LiteralPath $previousLocation
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
+    $args = @($vitestRunner) + $tests
+    $result = Invoke-TrackedProcess -FilePath $nodeExe -Arguments $args -WorkingDirectory $webDir -Label 'frontend-vitest'
+    $output = $result.Output
+    $exitCode = $result.ExitCode
     @(
         "# Codex $gateTitle Frontend Vitest",
         "started_at = $(Get-Date -Format o)",
         "cwd = $webDir",
-        "command = $nodeExe $vitestRunner $($tests -join ' ')",
+        "command = $nodeExe $($args -join ' ')",
         ''
     ) + $output | Set-Content -LiteralPath $vitestReportPath -Encoding utf8
     $output | ForEach-Object { Write-Host $_ }
@@ -661,6 +773,18 @@ try {
     $headSha = @(Get-GitLines -Arguments @('rev-parse', 'HEAD'))
     if ($headSha.Count -gt 0) {
         $script:ResolvedHeadSha = $headSha[0]
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($SinceLastValidated)) {
+        if (-not (Test-GitCommitRef -Ref $SinceLastValidated)) {
+            throw "SinceLastValidated is not a valid commit: $SinceLastValidated"
+        }
+        Invoke-GitCheck -Arguments @('merge-base', '--is-ancestor', $SinceLastValidated, 'HEAD') -Label "since-last-validated $SinceLastValidated -> HEAD"
+        $sinceSha = @(Get-GitLines -Arguments @('rev-parse', $SinceLastValidated))
+        if ($sinceSha.Count -gt 0) {
+            $script:ResolvedSinceLastValidatedSha = $sinceSha[0]
+        }
+        Add-StepResult -Label 'since-last-validated' -Status 'ok' -Details "validated_from=$script:ResolvedSinceLastValidatedSha"
     }
 
     $script:ResolvedBaseRef = Resolve-BaseRef
@@ -709,7 +833,9 @@ try {
         Add-StepResult -Label 'working-tree whitespace check' -Status 'skip' -Details "scope=$Scope"
     }
 
-    if ($includeCommittedChecks -and -not [string]::IsNullOrWhiteSpace($script:ResolvedBaseRef)) {
+    if ($includeCommittedChecks -and -not [string]::IsNullOrWhiteSpace($script:ResolvedSinceLastValidatedSha)) {
+        Invoke-GitCheckForPaths -Arguments @('diff', '--check', "$script:ResolvedSinceLastValidatedSha..HEAD") -Paths $validationPaths -Label 'committed whitespace check'
+    } elseif ($includeCommittedChecks -and -not [string]::IsNullOrWhiteSpace($script:ResolvedBaseRef)) {
         Invoke-GitCheckForPaths -Arguments @('diff', '--check', "$script:ResolvedBaseRef...HEAD") -Paths $validationPaths -Label 'committed whitespace check'
     } elseif ($includeCommittedChecks) {
         Add-StepResult -Label 'committed whitespace check' -Status 'skip' -Details 'no upstream or base ref found'
@@ -753,6 +879,12 @@ try {
     Write-Host "$reportPrefix-gate: passed. Summary: $summaryPath" -ForegroundColor Green
 } catch {
     $message = $_.Exception.Message
+    if ($script:GateCancelled -or $_.Exception -is [System.Management.Automation.PipelineStoppedException]) {
+        $script:GateCancelled = $true
+        Stop-TrackedProcesses
+        Write-Host "$reportPrefix-gate: cancelled; latest summary was not updated." -ForegroundColor Yellow
+        exit 130
+    }
     Add-StepResult -Label "$reportPrefix gate" -Status 'failed' -Details $message
     if ($null -eq $script:Plan) {
         $script:Plan = [pscustomobject]@{

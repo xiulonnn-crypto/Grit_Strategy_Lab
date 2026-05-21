@@ -57,6 +57,10 @@ CONTRACT_PATHS = {
     "web/src/lib/workspace-adapters.ts",
     "web/src/lib/demoStoreContext.tsx",
 }
+BACKEND_CONTRACT_PATHS = {
+    "src/grit_backtest_platform/api.py",
+    "src/grit_backtest_platform/models.py",
+}
 BACKEND_CONTRACT_OWNER_TESTS = (
     "tests/test_factor_research_api.py",
     "tests/test_backend_api.py",
@@ -70,9 +74,7 @@ ASYNC_LIFECYCLE_REPEAT_TESTS = (
 ASYNC_LIFECYCLE_PATTERNS = (
     r"^src/grit_backtest_platform/api\.py$",
     r"^src/grit_backtest_platform/_real_service_rebuilt\.py$",
-    r"^src/grit_backtest_platform/factor_research\.py$",
     r"factor_mining",
-    r"factor_factory",
 )
 F1_F2_FRONTEND_OWNER_TESTS = (
     "factors.phase0.f1.test.tsx",
@@ -239,6 +241,10 @@ def is_contract_path(path: str) -> bool:
     return normalize_path(path) in CONTRACT_PATHS
 
 
+def is_backend_contract_path(path: str) -> bool:
+    return normalize_path(path) in BACKEND_CONTRACT_PATHS
+
+
 def is_validation_tooling(path: str) -> bool:
     path = normalize_path(path)
     return any(fnmatch.fnmatch(path, pattern) for pattern in VALIDATION_TOOLING_PATTERNS)
@@ -351,9 +357,12 @@ def select_owner_tests(
             unmatched.append(path)
 
     if mode == "impact":
-        if contract_changed:
+        backend_contract_changed = any(is_backend_contract_path(path) for path in engineering_files)
+        if backend_contract_changed:
             add_selection(backend_tests, reasons, BACKEND_CONTRACT_OWNER_TESTS, "contract owner slice")
             add_selection(frontend_tests, reasons, ("app.routes.foundation.test.tsx",), "contract change")
+        elif contract_changed:
+            add_selection(frontend_tests, reasons, ("app.routes.foundation.test.tsx",), "frontend contract mirror change")
         if validation_tooling_changed:
             add_selection(backend_tests, reasons, ("tests/test_release_workflow.py",), "validation tooling change")
         if not backend_tests and any(is_backend_related(path) for path in engineering_files):
@@ -494,13 +503,20 @@ def git_lines(repo_root: Path, args: Sequence[str]) -> list[str]:
     return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
 
 
-def collect_changed_files(repo_root: Path, scope: str, base_ref: str | None) -> list[str]:
+def collect_changed_files(
+    repo_root: Path,
+    scope: str,
+    base_ref: str | None,
+    since_last_validated: str | None = None,
+) -> list[str]:
     files: list[str] = []
     include_committed = scope in {"All", "Committed", "Auto"}
     include_working_tree = scope in {"All", "WorkingTree", "Auto"}
 
     if include_committed:
-        if base_ref:
+        if since_last_validated:
+            files.extend(git_lines(repo_root, ["diff", "--name-only", f"{since_last_validated}..HEAD"]))
+        elif base_ref:
             files.extend(git_lines(repo_root, ["diff", "--name-only", f"{base_ref}...HEAD"]))
         elif scope == "Committed":
             files.extend(git_lines(repo_root, ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]))
@@ -518,6 +534,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=MODE_CHOICES, required=True)
     parser.add_argument("--scope", choices=SCOPE_CHOICES, default="All")
     parser.add_argument("--base-ref")
+    parser.add_argument("--since-last-validated")
     parser.add_argument("--remote", default="origin")
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--changed-file", action="append", default=[])
@@ -528,7 +545,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     repo_root = Path(args.repo_root).resolve()
-    changed_files = args.changed_file or collect_changed_files(repo_root, args.scope, args.base_ref)
+    changed_files = args.changed_file or collect_changed_files(
+        repo_root,
+        args.scope,
+        args.base_ref,
+        args.since_last_validated,
+    )
     plan = build_plan(args.mode, args.scope, changed_files)
     payload = asdict(plan)
     print(json.dumps(payload, ensure_ascii=False, indent=2 if args.pretty else None))

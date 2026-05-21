@@ -4,6 +4,7 @@ param(
     [string]$Scope = 'All',
     [string]$Remote = 'origin',
     [string]$BaseRef,
+    [string]$SinceLastValidated,
     [switch]$SkipFetch,
     [switch]$RequireSynced,
     [switch]$SkipTests,
@@ -22,6 +23,9 @@ $parameters = @{
 
 if (-not [string]::IsNullOrWhiteSpace($BaseRef)) {
     $parameters.BaseRef = $BaseRef
+}
+if (-not [string]::IsNullOrWhiteSpace($SinceLastValidated)) {
+    $parameters.SinceLastValidated = $SinceLastValidated
 }
 if ($SkipFetch) {
     $parameters.SkipFetch = $true
