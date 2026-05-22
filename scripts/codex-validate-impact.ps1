@@ -8,7 +8,8 @@ param(
     [switch]$SkipFetch,
     [switch]$RequireSynced,
     [switch]$SkipTests,
-    [switch]$PlanOnly
+    [switch]$PlanOnly,
+    [string]$SummaryPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,6 +39,9 @@ if ($SkipTests) {
 }
 if ($PlanOnly) {
     $parameters.PlanOnly = $true
+}
+if (-not [string]::IsNullOrWhiteSpace($SummaryPath)) {
+    $parameters.SummaryPath = $SummaryPath
 }
 
 & $fastScript @parameters

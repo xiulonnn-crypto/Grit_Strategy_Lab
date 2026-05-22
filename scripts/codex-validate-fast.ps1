@@ -10,6 +10,7 @@ param(
     [switch]$SkipTests,
     [switch]$PlanOnly,
     [switch]$SkipGateSelfTest,
+    [string]$SummaryPath,
     [int]$MaxSeconds = 300,
     [int]$AsyncRepeatCount = 3,
     [ValidateSet('fast', 'impact')]
@@ -24,7 +25,20 @@ $webDir = Join-Path $repoRoot 'web'
 $reportDir = Join-Path $repoRoot 'harness\reports\smoke'
 $gateTitle = if ($GateMode -eq 'impact') { 'Impact' } else { 'Fast' }
 $reportPrefix = if ($GateMode -eq 'impact') { 'impact' } else { 'fast' }
-$summaryPath = Join-Path $reportDir "latest-$reportPrefix-gate.md"
+$summaryPath = if ([string]::IsNullOrWhiteSpace($SummaryPath)) {
+    Join-Path $reportDir "latest-$reportPrefix-gate.md"
+} else {
+    $reportRoot = [System.IO.Path]::GetFullPath($reportDir).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $reportRootWithSeparator = $reportRoot + [System.IO.Path]::DirectorySeparatorChar
+    $summaryCandidate = [System.IO.Path]::GetFullPath($SummaryPath)
+    if (-not $summaryCandidate.StartsWith($reportRootWithSeparator, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "SummaryPath must stay under $reportRoot"
+    }
+    $summaryCandidate
+}
 $backendReportPath = Join-Path $reportDir "latest-$reportPrefix-backend.txt"
 $asyncRepeatReportPath = Join-Path $reportDir "latest-$reportPrefix-async-lifecycle.txt"
 $typesReportPath = Join-Path $reportDir "latest-$reportPrefix-frontend-types.txt"
@@ -33,6 +47,7 @@ $venvPython = Join-Path $repoRoot '.venv\Scripts\python.exe'
 $plannerPath = Join-Path $PSScriptRoot 'git_gate_plan.py'
 
 New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
+New-Item -ItemType Directory -Path (Split-Path -Parent $summaryPath) -Force | Out-Null
 Set-Location -LiteralPath $repoRoot
 
 $startedAt = Get-Date
@@ -719,8 +734,13 @@ function Invoke-GateSelfTest {
         $baseArgs += '-RequireSynced'
     }
 
+    $selfTestDir = Join-Path $reportDir 'self-test'
+    New-Item -ItemType Directory -Path $selfTestDir -Force | Out-Null
+    $selfTestStamp = Get-Date -Format 'yyyyMMddHHmmssfff'
+
     foreach ($mode in @('impact', 'fast')) {
-        $selfTestArgs = @('-GateMode', $mode) + $baseArgs
+        $selfTestSummaryPath = Join-Path $selfTestDir "$selfTestStamp-$mode-plan-gate.md"
+        $selfTestArgs = @('-GateMode', $mode, '-SummaryPath', $selfTestSummaryPath) + $baseArgs
         $commandArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $scriptPath) + $selfTestArgs
         Write-Host "$reportPrefix-gate: self-test $mode plan -> $powerShellExe $($commandArgs -join ' ')" -ForegroundColor Cyan
         $previousErrorActionPreference = $ErrorActionPreference

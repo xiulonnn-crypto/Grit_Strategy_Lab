@@ -33,6 +33,9 @@ def _load_pre_push_hook_module():
 pre_push_hook = _load_pre_push_hook_module()
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def _git(repo_root: Path, *args: str) -> str:
     completed = subprocess.run(
         ["git", *args],
@@ -175,6 +178,20 @@ def test_pre_push_rejects_stale_or_plan_only_impact_evidence() -> None:
 
     assert ok is False
     assert "PlanOnly" in reason
+
+
+def test_gate_self_test_plan_only_writes_non_latest_summary() -> None:
+    fast_script = (REPO_ROOT / "scripts" / "codex-validate-fast.ps1").read_text(encoding="utf-8")
+    impact_script = (REPO_ROOT / "scripts" / "codex-validate-impact.ps1").read_text(encoding="utf-8")
+
+    assert "[string]$SummaryPath" in fast_script
+    assert "[string]$SummaryPath" in impact_script
+    assert "SummaryPath must stay under $reportRoot" in fast_script
+    assert "$reportRootWithSeparator" in fast_script
+    assert "$selfTestDir = Join-Path $reportDir 'self-test'" in fast_script
+    assert "$selfTestSummaryPath = Join-Path $selfTestDir" in fast_script
+    assert "'-SummaryPath', $selfTestSummaryPath" in fast_script
+    assert "$parameters.SummaryPath = $SummaryPath" in impact_script
 
 
 def test_pre_push_detects_single_generated_metadata_child(tmp_path: Path) -> None:
