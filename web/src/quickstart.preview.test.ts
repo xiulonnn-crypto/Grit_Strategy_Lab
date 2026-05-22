@@ -100,5 +100,7 @@ describe("QuickStart local provider environment", () => {
     expect(quickStartLocalExampleSource).toContain("$env:KAGGLE_API_TOKEN");
     expect(quickStartLocalExampleSource).toContain("$env:NASDAQ_DATA_LINK_API_KEY");
     expect(quickStartLocalExampleSource).toContain("$env:FINNHUB_API_KEY");
+    expect(quickStartLocalExampleSource).toContain("$env:CRSP_DATA_PATH");
+    expect(quickStartLocalExampleSource).toContain("$env:NORGATE_DATA_PATH");
   });
 });

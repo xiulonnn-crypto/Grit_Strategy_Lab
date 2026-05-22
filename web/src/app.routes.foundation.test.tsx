@@ -34,6 +34,7 @@ const ROUTE_ROOT_SELECTOR = [
   '[data-page-root="factor-library"]',
   '[data-page-root="factor-detail"]',
   '[data-page-root="factor-editor"]',
+  '.pfic-page',
   '[data-page-root="factor-factory"]',
 ].join(', ');
 
@@ -419,6 +420,20 @@ describe('App runtime routes', () => {
     expect(screen.getByLabelText('换手率与衰减计算口径')).toBeInTheDocument();
     expect(screen.getByLabelText('分层收益与 IC 走势计算口径')).toBeInTheDocument();
     expect(screen.getByText('审计足迹')).toBeInTheDocument();
+
+    cleanup();
+    await renderApp('#/factors/imports');
+
+    expect(document.querySelector('.pfic-page')).not.toBeNull();
+    expect(await screen.findByRole('heading', { level: 1, name: '公开因子入库中心' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '导入本地文件' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '新建预检' })).toBeInTheDocument();
+    expect((await screen.findAllByText('French-Data Library')).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('AQR Data Library')).toBeInTheDocument();
+    expect(screen.getByText('Fama-French 5 Factors Daily')).toBeInTheDocument();
+    expect(screen.queryByText('Fama-French Data Library')).not.toBeInTheDocument();
+    expect(screen.queryByText('PUBLIC_DOWNLOAD')).not.toBeInTheDocument();
+    expect(screen.queryByText('US research factors daily')).not.toBeInTheDocument();
 
     cleanup();
     await renderApp('#/factors/new');

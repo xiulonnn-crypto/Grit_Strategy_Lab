@@ -1,0 +1,80 @@
+{
+  "desktop": {
+    "url": "http://127.0.0.1:4173/?v=public-factor-import-ui-review-final-desktop#/factors/imports",
+    "rawLeaks": [],
+    "mappingBadge": "5 / 5 已映射",
+    "flowBadge": "当前在语义映射",
+    "hero": {
+      "x": 266,
+      "y": 26,
+      "width": 1144,
+      "height": 229
+    },
+    "kpi": {
+      "x": 266,
+      "y": 271,
+      "width": 1144,
+      "height": 105
+    },
+    "source": {
+      "x": 266,
+      "y": 392,
+      "width": 322,
+      "height": 603
+    },
+    "flow": {
+      "x": 602,
+      "y": 392,
+      "width": 808,
+      "height": 248
+    },
+    "mainStack": {
+      "x": 602,
+      "y": 654,
+      "width": 476,
+      "height": 783
+    },
+    "candidates": {
+      "x": 602,
+      "y": 654,
+      "width": 476,
+      "height": 388
+    },
+    "mapping": {
+      "x": 602,
+      "y": 1056,
+      "width": 476,
+      "height": 381
+    },
+    "manifest": {
+      "x": 1092,
+      "y": 654,
+      "width": 318,
+      "height": 787
+    },
+    "overflowX": 0
+  },
+  "mobile": {
+    "url": "http://127.0.0.1:4173/?v=public-factor-import-ui-review-final-mobile#/factors/imports",
+    "rawLeaks": [],
+    "mappingBadge": "5 / 5 已映射",
+    "overflowX": 0
+  },
+  "precheckModal": {
+    "title": "新建预检",
+    "buttons": [
+      "×",
+      "取消",
+      "保存草稿",
+      "开始预检"
+    ]
+  },
+  "localFileModal": {
+    "title": "导入本地文件",
+    "templates": [
+      "公开源登记模板",
+      "数据集 manifest 模板",
+      "语义映射模板"
+    ]
+  }
+}

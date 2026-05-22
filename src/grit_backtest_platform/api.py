@@ -56,6 +56,12 @@ from .models import (
     FactorDiagnosticPreviewRequest,
     FactorDiagnosticRequest,
     FactorDisplayNameBackfillRequest,
+    ExternalFactorImportJobCreateRequest,
+    ExternalFactorImportJobMappingRequest,
+    ExternalFactorImportJobModel,
+    ExternalFactorLocalFileUploadRequest,
+    ExternalFactorLocalFileUploadResponse,
+    ExternalFactorSourceRegistryResponse,
     FactorFactoryAutomationRequest,
     FactorFactoryOnlineRawF2RefinementRequest,
     FactorFactoryRunNowRequest,
@@ -1588,6 +1594,52 @@ def create_app(
     @app.post('/factors/diagnostics/preview')
     def preview_factor_diagnostics(payload: FactorDiagnosticPreviewRequest):
         return invoke(service.preview_factor_diagnostics, payload)
+
+    @app.get('/factor-sources/registry', response_model=ExternalFactorSourceRegistryResponse)
+    def external_factor_source_registry():
+        return invoke(service.get_external_factor_source_registry)
+
+    @app.get('/factor-sources/templates/{template_key}')
+    def external_factor_template(
+        template_key: str,
+        format: str = Query(default='csv', pattern='^(csv|xlsx)$'),
+    ):
+        resolved_template_key = template_key
+        resolved_format = format
+        lower_template_key = template_key.lower()
+        if lower_template_key.endswith('.xlsx'):
+            resolved_template_key = template_key[:-5]
+            resolved_format = 'xlsx'
+        elif lower_template_key.endswith('.csv'):
+            resolved_template_key = template_key[:-4]
+            resolved_format = 'csv'
+        artifact = invoke(service.get_external_factor_template, resolved_template_key, resolved_format)
+        filename = str(artifact.get('filename') or f'{template_key}.{format}')
+        return Response(
+            content=artifact.get('content') or b'',
+            media_type=str(artifact.get('media_type') or 'application/octet-stream'),
+            headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+        )
+
+    @app.post('/factor-sources/local-files', response_model=ExternalFactorLocalFileUploadResponse)
+    def external_factor_local_file_upload(payload: ExternalFactorLocalFileUploadRequest):
+        return invoke(service.create_external_factor_local_file_upload, payload)
+
+    @app.post('/factor-sources/import-jobs', response_model=ExternalFactorImportJobModel)
+    def external_factor_import_job_create(payload: ExternalFactorImportJobCreateRequest):
+        return invoke(service.create_external_factor_import_job, payload)
+
+    @app.get('/factor-sources/import-jobs/{job_id}', response_model=ExternalFactorImportJobModel)
+    def external_factor_import_job_detail(job_id: str):
+        return invoke(service.get_external_factor_import_job, job_id)
+
+    @app.put('/factor-sources/import-jobs/{job_id}/mapping', response_model=ExternalFactorImportJobModel)
+    def external_factor_import_job_mapping(job_id: str, payload: ExternalFactorImportJobMappingRequest):
+        return invoke(service.update_external_factor_import_mapping, job_id, payload)
+
+    @app.post('/factor-sources/import-jobs/{job_id}/submit-review', response_model=ExternalFactorImportJobModel)
+    def external_factor_import_job_submit_review(job_id: str):
+        return invoke(service.submit_external_factor_import_review, job_id)
 
     @app.post('/factor-mining/jobs')
     def create_factor_mining_job(payload: FactorMiningJobCreateRequest):

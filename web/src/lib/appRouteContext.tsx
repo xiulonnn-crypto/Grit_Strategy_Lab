@@ -32,6 +32,7 @@ export type AppRoute =
   | { kind: 'factor-library'; source?: string; tag?: string; status?: string }
   | { kind: 'factor-detail'; factorId: string }
   | { kind: 'factor-editor'; factorId?: string }
+  | { kind: 'public-factor-imports' }
   | { kind: 'factor-sandbox' }
   | { kind: 'factor-factory'; section?: 'overview' | 'sandbox' | 'quarantine' }
   | {
@@ -256,6 +257,9 @@ export function parseAppHash(hash: string): AppRoute {
   }
   if (path === '/factors/new') {
     return { kind: 'factor-editor' };
+  }
+  if (path === '/factors/imports') {
+    return { kind: 'public-factor-imports' };
   }
   if (path === '/factors/factory') {
     const section = searchParams.get('section');

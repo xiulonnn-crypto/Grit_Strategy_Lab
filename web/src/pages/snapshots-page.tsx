@@ -20,8 +20,6 @@ import type {
 import './run-detail-page.css';
 import './snapshots-page.css';
 
-const FIRST_SCREEN_DEFER_MS = import.meta.env.MODE === 'test' ? 0 : 80;
-
 async function captureOptional<T>(promise: Promise<T> | undefined): Promise<{ value: T | null; error: string | null }> {
   if (!promise) {
     return { value: null, error: null };
@@ -915,27 +913,34 @@ export function SnapshotsPage(): JSX.Element {
 
   useEffect(() => {
     let cancelled = false;
+    let diagnosticsTimer: number | null = null;
+
+    async function loadProviderDiagnostics(): Promise<void> {
+      const [registryResult, attemptsResult] = await Promise.all([
+        captureOptional(api.getSnapshotProviderRegistry?.()),
+        captureOptional(api.getSnapshotProviderAttempts?.({ limit: 80 })),
+      ]);
+      if (!cancelled) {
+        setProviderRegistry(registryResult.value);
+        setProviderAttempts(attemptsResult.value);
+        setProviderRegistryError(registryResult.error ? `配置源暂不可用：${registryResult.error}` : null);
+      }
+    }
 
     async function load(): Promise<void> {
       try {
         if (!cancelled) {
           setLoading(true);
           setError(null);
+          setProviderRegistryError(null);
         }
-        await new Promise((resolve) => window.setTimeout(resolve, FIRST_SCREEN_DEFER_MS));
-        if (cancelled) {
-          return;
-        }
-        const [response, registryResult, attemptsResult] = await Promise.all([
-          api.getSnapshotOverview(),
-          captureOptional(api.getSnapshotProviderRegistry?.()),
-          captureOptional(api.getSnapshotProviderAttempts?.({ limit: 80 })),
-        ]);
+        const response = await api.getSnapshotOverview();
         if (!cancelled) {
           setOverview(normalizeSnapshotOverview(response));
-          setProviderRegistry(registryResult.value);
-          setProviderAttempts(attemptsResult.value);
-          setProviderRegistryError(registryResult.error ? `配置源暂不可用：${registryResult.error}` : null);
+          setLoading(false);
+          diagnosticsTimer = window.setTimeout(() => {
+            void loadProviderDiagnostics();
+          }, 0);
         }
       } catch (caught) {
         if (!cancelled) {
@@ -951,6 +956,9 @@ export function SnapshotsPage(): JSX.Element {
     void load();
     return () => {
       cancelled = true;
+      if (diagnosticsTimer !== null) {
+        window.clearTimeout(diagnosticsTimer);
+      }
     };
   }, [api]);
 

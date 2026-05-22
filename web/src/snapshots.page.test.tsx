@@ -142,6 +142,17 @@ function overviewFixture(): ApiSnapshotOverview {
         metadata: {
           covered_symbol_count: 940,
           total_symbol_count: 1482,
+          effective_covered_symbol_count: 1482,
+          effective_total_symbol_count: 1482,
+          effective_coverage_pct: 100.0,
+          fundamental_gap_policy: {
+            raw_covered_symbol_count: 940,
+            raw_total_symbol_count: 1482,
+            logical_covered_symbol_count: 1482,
+            logical_total_symbol_count: 1482,
+            logical_coverage_pct: 100.0,
+            coverage_gate: 'READY',
+          },
         },
         blocker: null,
       },
@@ -200,6 +211,32 @@ function overviewFixture(): ApiSnapshotOverview {
           total_symbol_count: 729,
         },
         blocker: null,
+      },
+    ],
+    data_layer_readiness: [
+      {
+        layer_id: 'l2_fundamental_data',
+        title_cn: 'L2 财务截面',
+        status: 'READY',
+        summary: '财务字段和发布时点门禁已形成可计算基础，可进入质量与稳健性因子研究。',
+        metrics: [
+          { label: '覆盖率', value: '100.0%' },
+          { label: '可用字段', value: 18 },
+          { label: 'PIT 点位', value: 140734 },
+        ],
+        pit_metrics: [
+          { label: '覆盖率', value: '100.0%' },
+          { label: '可用字段', value: 18 },
+          { label: 'PIT 点位', value: 140734 },
+        ],
+        gap_policy: {
+          raw_covered_symbol_count: 940,
+          raw_total_symbol_count: 1482,
+          logical_covered_symbol_count: 1482,
+          logical_total_symbol_count: 1482,
+          logical_coverage_pct: 100.0,
+          coverage_gate: 'READY',
+        },
       },
     ],
     universe_snapshots: [
@@ -429,6 +466,27 @@ function providerRegistryFixture(): ApiSnapshotProviderRegistry {
         readiness_status: 'missing_local_path',
       },
       {
+        provider_id: 'norgate_us_equities',
+        source_name: 'Norgate US Equities',
+        access_tier: 'local',
+        credential_requirements: {
+          required_env_vars: ['NORGATE_DATA_PATH'],
+          configured: true,
+          configured_env_vars: ['NORGATE_DATA_PATH'],
+          missing_env_vars: [],
+        },
+        target_types: ['price', 'corporate_actions'],
+        fallback_order: {},
+        latest_attempt: null,
+        quota_cooldown: {},
+        error_summary: {},
+        pit_permission: {},
+        enabled: false,
+        credential_ready: true,
+        usable: false,
+        readiness_status: 'disabled',
+      },
+      {
         provider_id: 'tiingo',
         source_name: 'Tiingo',
         access_tier: 'paid',
@@ -526,6 +584,18 @@ describe('SnapshotsPage operations console', () => {
     expect(screen.getByText('当前下钻')).toBeTruthy();
   });
 
+  it('renders the first screen without waiting for provider diagnostics', async () => {
+    fakeApi.getSnapshotProviderRegistry.mockImplementation(() => new Promise(() => {}));
+    fakeApi.getSnapshotProviderAttempts.mockImplementation(() => new Promise(() => {}));
+
+    renderSnapshotsPage();
+
+    expect(await screen.findByTestId('snapshots-ops-console')).toBeTruthy();
+    expect(fakeApi.getSnapshotOverview).toHaveBeenCalledTimes(1);
+    expect(fakeApi.getSnapshotProviderRegistry).toHaveBeenCalledTimes(1);
+    expect(fakeApi.getSnapshotProviderAttempts).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps the pending queue before the drilldown row', async () => {
     renderSnapshotsPage();
 
@@ -556,6 +626,8 @@ describe('SnapshotsPage operations console', () => {
     expect(within(l1Card as HTMLElement).getByText(/股票 .* · 债券/)).toBeTruthy();
     expect(within(l1Card as HTMLElement).queryByText(/公司行动 .* ·/)).toBeNull();
     expect(within(l2Card as HTMLElement).getByText('已就绪')).toHaveClass('snapshots-ops-status--ready');
+    expect(within(l2Card as HTMLElement).getByText('100.0%')).toBeTruthy();
+    expect(within(l2Card as HTMLElement).queryByText(/940\s*\/\s*1482/)).toBeNull();
     expect(within(l3Card as HTMLElement).getByText('3 / 3')).toBeTruthy();
     expect(l1Card as HTMLElement).toHaveClass('snapshots-ops-health-card--warning');
     expect(l1Card as HTMLElement).toHaveClass('snapshots-ops-health-card--primary');
@@ -567,6 +639,8 @@ describe('SnapshotsPage operations console', () => {
     const fundamentalLedgerRow = screen.getByText(/ds-fundamentals/).closest('tr');
     expect(fundamentalLedgerRow).toHaveAttribute('data-layer-id', 'l2');
     expect(fundamentalLedgerRow).toHaveClass('snapshots-ops-ledger-row--highlight');
+    expect(within(fundamentalLedgerRow as HTMLElement).getByText(/100.0%/)).toBeTruthy();
+    expect(within(fundamentalLedgerRow as HTMLElement).queryByText(/940\s*\/\s*1482/)).toBeNull();
 
     fireEvent.click(within(l3Card as HTMLElement).getByRole('button', { name: '查看证据' }));
     const sentimentLedgerRow = screen.getByText(/ds-analyst-consensus/).closest('tr');
@@ -651,18 +725,19 @@ describe('SnapshotsPage operations console', () => {
     expect(screen.getByRole('button', { name: '更换 key' })).toBeTruthy();
     expect(screen.getAllByText('CRSP_DATA_PATH').length).toBeGreaterThan(0);
     expect(screen.getAllByRole('button', { name: '配置路径' }).length).toBeGreaterThan(0);
+    const norgateRow = screen.getByTestId('credential-row-norgate');
+    expect(within(norgateRow).getByText('已配置')).toHaveClass('snapshots-ops-status--ready');
+    expect(within(norgateRow).getByText('已配置，导入未接入')).toHaveClass('snapshots-ops-status--warning');
     expect(screen.getByText('TIINGO_API_TOKEN')).toBeTruthy();
     expect(screen.getAllByRole('button', { name: '查看窗口' }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole('button', { name: '查看来源' }).length).toBeGreaterThan(0);
+    expect(screen.queryByText('IEX_TOKEN / IEX_CLOUD_TOKEN')).toBeNull();
+    expect(screen.queryByTestId('credential-row-iex')).toBeNull();
 
     fireEvent.click(screen.getAllByRole('button', { name: '查看窗口' })[0]);
     expect(screen.getByTestId('credential-row-tiingo')).toHaveClass('snapshots-ops-credential-row--active');
     expect(screen.getByTestId('credential-selected-detail')).toHaveTextContent('当前选择');
     expect(screen.getByTestId('credential-selected-detail')).toHaveTextContent('TIINGO_API_TOKEN');
-
-    fireEvent.click(screen.getByRole('button', { name: '暂不处理' }));
-    expect(screen.getByTestId('credential-row-iex')).toHaveClass('snapshots-ops-credential-row--active');
-    expect(screen.getByTestId('credential-selected-detail')).toHaveTextContent('IEX_TOKEN / IEX_CLOUD_TOKEN');
 
     fireEvent.click(screen.getAllByRole('button', { name: '配置路径' })[0]);
 
@@ -670,6 +745,12 @@ describe('SnapshotsPage operations console', () => {
     expect(screen.getByText(/\$env:CRSP_DATA_PATH/)).toBeTruthy();
     expect(screen.getByText(/QuickStart-Grit\.ps1 -ForceRestart/)).toBeTruthy();
     expect(screen.getByText(/snapshot provider credentials updated/)).toBeTruthy();
+
+    fireEvent.click(within(norgateRow).getByRole('button'));
+    expect(screen.getByTestId('credential-row-norgate')).toHaveClass('snapshots-ops-credential-row--active');
+    expect(screen.getByText(/\$env:NORGATE_DATA_PATH="C:\\path\\to\\data"/)).toBeTruthy();
+    expect(screen.getByText(/QuickStart-Grit\.local\.ps1/)).toBeTruthy();
+    expect(screen.getByTestId('credential-selected-detail')).toHaveTextContent('当前刷新链路尚未接入 Norgate 导入器');
 
     fireEvent.click(screen.getByRole('button', { name: '复制命令' }));
     await waitFor(() => expect(screen.getByRole('button', { name: /已复制|请手动复制/ })).toBeTruthy());

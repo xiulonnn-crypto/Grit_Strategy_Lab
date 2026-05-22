@@ -3591,6 +3591,151 @@ export type ApiF1CatalogResponse = {
   summary: Record<string, unknown>;
 };
 
+export type ApiExternalFactorSourceType =
+  | "ACADEMIC_LIBRARY"
+  | "INSTITUTIONAL_LIBRARY"
+  | "REFERENCE_TOOL"
+  | "BACKTEST_TOOL"
+  | "LOCAL_FILE";
+
+export type ApiExternalFactorAccessPolicy =
+  | "PUBLIC_DOWNLOAD"
+  | "MANUAL_UPLOAD"
+  | "REFERENCE_ONLY"
+  | "LICENSE_REQUIRED";
+
+export type ApiExternalFactorFrequency =
+  | "DAILY"
+  | "MONTHLY"
+  | "QUARTERLY"
+  | "ANNUAL"
+  | "MIXED";
+
+export type ApiExternalFactorImportMode =
+  | "AUTO_DOWNLOAD"
+  | "LOCAL_FILE"
+  | "REFERENCE_ONLY";
+
+export type ApiExternalFactorDataset = {
+  key: string;
+  name: string;
+  description?: string;
+  frequency: ApiExternalFactorFrequency | string;
+  status: "READY" | "MANUAL_REQUIRED" | "REFERENCE_ONLY" | string;
+  factor_family?: string;
+  default_usage?: string;
+  recommended_system_family?: string;
+  template_key: string;
+  fields?: string[];
+  update_lag_days?: number;
+  governance_notes?: string[];
+};
+
+export type ApiExternalFactorSource = {
+  id: string;
+  name: string;
+  short_name: string;
+  source_type: ApiExternalFactorSourceType | string;
+  access_policy: ApiExternalFactorAccessPolicy | string;
+  homepage_url?: string | null;
+  license_note?: string;
+  sync_hint?: string;
+  datasets: ApiExternalFactorDataset[];
+  supported_import_modes?: ApiExternalFactorImportMode[];
+  tags?: string[];
+};
+
+export type ApiExternalFactorSourceRegistryResponse = {
+  sources: ApiExternalFactorSource[];
+  recommended_flow: string[];
+  template_version: string;
+  review_boundary: string;
+};
+
+export type ApiExternalFactorManifest = {
+  row_count: number;
+  column_count: number;
+  columns: string[];
+  sample_rows: Array<Record<string, unknown>>;
+  file_sha256: string;
+  template_key: string;
+  parsing_status: string;
+  warnings: string[];
+};
+
+export type ApiExternalFactorMappingRow = {
+  source_field: string;
+  target_field: string;
+  semantic_role: string;
+  transform: string;
+  data_type: string;
+  required: boolean;
+  confidence: number;
+  notes?: string;
+};
+
+export type ApiExternalFactorArtifactPaths = {
+  uploaded_file_id?: string | null;
+  raw_file_ref?: string | null;
+  manifest_ref?: string | null;
+  template_ref?: string | null;
+};
+
+export type ApiExternalFactorLocalFileUploadPayload = {
+  source_id: string;
+  dataset_key: string;
+  filename: string;
+  content_text: string;
+  content_type?: string | null;
+};
+
+export type ApiExternalFactorLocalFileUploadResponse = {
+  file_id: string;
+  source_id: string;
+  dataset_key: string;
+  filename: string;
+  manifest: ApiExternalFactorManifest;
+  mapping_rows: ApiExternalFactorMappingRow[];
+  created_at: string;
+  source_name?: string;
+  dataset_name?: string;
+};
+
+export type ApiExternalFactorImportJobCreatePayload = {
+  source_id: string;
+  dataset_key: string;
+  import_mode?: ApiExternalFactorImportMode;
+  file_id?: string | null;
+  as_of_date?: string | null;
+  frequency?: ApiExternalFactorFrequency | string | null;
+  created_by?: string;
+  precheck_notes?: string | null;
+};
+
+export type ApiExternalFactorImportJob = {
+  id: string;
+  source_id: string;
+  dataset_key: string;
+  source_name: string;
+  dataset_name: string;
+  import_mode: ApiExternalFactorImportMode | string;
+  status: string;
+  review_status: string;
+  frequency: ApiExternalFactorFrequency | string;
+  as_of_date?: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  submitted_at?: string | null;
+  manifest: ApiExternalFactorManifest;
+  mapping_rows: ApiExternalFactorMappingRow[];
+  artifact_paths: ApiExternalFactorArtifactPaths;
+  risk_flags: string[];
+  next_actions: string[];
+  governance_gate: string;
+  job_projection?: Record<string, unknown>;
+};
+
 export type ApiOperatorRegistryItem = {
   operator_id: string;
   operator_group: "TS" | "CS" | "NONLINEAR" | string;
@@ -4199,6 +4344,23 @@ export type DemoApi = {
     status?: string;
     q?: string;
   }) => Promise<ApiF1CatalogResponse>;
+  getExternalFactorSourceRegistry?: () => Promise<ApiExternalFactorSourceRegistryResponse>;
+  uploadExternalFactorLocalFile?: (
+    payload: ApiExternalFactorLocalFileUploadPayload,
+  ) => Promise<ApiExternalFactorLocalFileUploadResponse>;
+  createExternalFactorImportJob?: (
+    payload: ApiExternalFactorImportJobCreatePayload,
+  ) => Promise<ApiExternalFactorImportJob>;
+  getExternalFactorImportJob?: (id: string) => Promise<ApiExternalFactorImportJob>;
+  updateExternalFactorImportMapping?: (
+    id: string,
+    payload: {
+      mapping_rows: ApiExternalFactorMappingRow[];
+      review_status?: string;
+      notes?: string | null;
+    },
+  ) => Promise<ApiExternalFactorImportJob>;
+  submitExternalFactorImportReview?: (id: string) => Promise<ApiExternalFactorImportJob>;
   backfillFactorDisplayNamesV4?: (
     payload?: { dry_run?: boolean },
   ) => Promise<ApiFactorDisplayNameBackfillResponse>;

@@ -152,6 +152,12 @@ from .universe_history import (
     semiannual_anchor_dates,
 )
 from .yahoo_provider import YahooMarketDataProvider
+
+FACTOR_FACTORY_PRUNE_EVIDENCE_SOURCES = {
+    "MEASURED_DIAGNOSTIC_IC_SERIES",
+    "FACTOR_LIBRARY_HEATMAP_PROXY",
+}
+
 DEFAULT_UNIVERSE_SYMBOLS = {
     "SP500": ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "AVGO", "COST"],
     "NASDAQ100": ["QQQ", "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "AVGO"],
@@ -234,6 +240,8 @@ SNAPSHOT_PROVIDER_ENV_SIGNATURE_NAMES = (
     "FRED_API_KEY",
     "GRIT_ENABLE_OPENBB_PROVIDER",
     "GRIT_ENABLE_STOOQ_ONLINE",
+    "CRSP_DATA_PATH",
+    "NORGATE_DATA_PATH",
 )
 
 
@@ -980,6 +988,27 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
     def export_factor_diagnostic_report(self, factor_id: str, run_id: str) -> dict[str, Any]:
         return self._factor_research_service().export_factor_diagnostic_report(factor_id, run_id)
+
+    def get_external_factor_source_registry(self) -> dict[str, Any]:
+        return self._factor_research_service().get_external_factor_source_registry()
+
+    def get_external_factor_template(self, template_key: str, fmt: str = "csv") -> dict[str, Any]:
+        return self._factor_research_service().get_external_factor_template(template_key, fmt)
+
+    def create_external_factor_local_file_upload(self, request: Any) -> dict[str, Any]:
+        return self._factor_research_service().create_external_factor_local_file_upload(request)
+
+    def create_external_factor_import_job(self, request: Any) -> dict[str, Any]:
+        return self._factor_research_service().create_external_factor_import_job(request)
+
+    def get_external_factor_import_job(self, job_id: str) -> dict[str, Any]:
+        return self._factor_research_service().get_external_factor_import_job(job_id)
+
+    def update_external_factor_import_mapping(self, job_id: str, request: Any) -> dict[str, Any]:
+        return self._factor_research_service().update_external_factor_import_mapping(job_id, request)
+
+    def submit_external_factor_import_review(self, job_id: str) -> dict[str, Any]:
+        return self._factor_research_service().submit_external_factor_import_review(job_id)
 
     def factor_quarantine_intake(self, request: Any) -> dict[str, Any]:
         return self._factor_research_service().factor_quarantine_intake(request)
@@ -2279,6 +2308,46 @@ class RealBacktestPlatformService(BacktestPlatformService):
         )
         return keys
 
+    @staticmethod
+    def _factor_factory_correlation_projection(
+        factor_service: Any,
+        *,
+        factor_id: str,
+        expression: str,
+        display_name: Any,
+        target_layer: str,
+    ) -> Mapping[str, Any] | None:
+        if not factor_id or not expression or not hasattr(factor_service, "_factor_correlation_projection"):
+            return None
+        try:
+            return factor_service._factor_correlation_projection(  # noqa: SLF001
+                {
+                    "id": factor_id,
+                    "name": display_name or factor_id,
+                    "source": "AUTO_MINED",
+                    "expression": expression,
+                    "tags_json": dumps(["auto_mined", str(target_layer or "").lower()]),
+                    "data_requirements_json": dumps([]),
+                }
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _factor_factory_correlation_match(
+        factor_service: Any,
+        left: Mapping[str, Any],
+        right: Mapping[str, Any],
+    ) -> bool:
+        if not left or not right:
+            return False
+        try:
+            same_cluster = factor_service._factor_same_prune_cluster(left, right)  # noqa: SLF001
+            correlation = factor_service._factor_pair_correlation(left, right)  # noqa: SLF001
+        except Exception:
+            return False
+        return bool(same_cluster and correlation > FACTOR_PRUNE_CORRELATION_THRESHOLD)
+
     def _factor_factory_library_publish_blockers(self) -> dict[str, dict[str, Any]]:
         blockers: dict[str, dict[str, Any]] = {}
 
@@ -2338,8 +2407,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
             correlation = abs(_coerce_float(criteria.get("correlation"), _coerce_float(offline_detail.get("correlation"), 0.0)))
             threshold = _coerce_float(criteria.get("threshold"), FACTOR_PRUNE_CORRELATION_THRESHOLD)
             evidence_source = str(criteria.get("evidence_source") or offline_detail.get("evidence_source") or "").upper()
-            if correlation <= threshold or evidence_source != "MEASURED_DIAGNOSTIC_IC_SERIES":
+            if correlation <= threshold or evidence_source not in FACTOR_FACTORY_PRUNE_EVIDENCE_SOURCES:
                 continue
+            reason_prefix = "MEASURED_PRUNE" if evidence_source == "MEASURED_DIAGNOSTIC_IC_SERIES" else "LIBRARY_HEATMAP_PRUNE"
             comparison = offline_detail.get("comparison") if isinstance(offline_detail.get("comparison"), Mapping) else {}
             candidate = comparison.get("candidate") if isinstance(comparison.get("candidate"), Mapping) else {}
             mvp = comparison.get("mvp") if isinstance(comparison.get("mvp"), Mapping) else {}
@@ -2352,7 +2422,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             for factor_id in dict.fromkeys(action_factor_ids):
                 add_blockers(
                     self._factor_factory_publishable_block_keys(factor_id=factor_id),
-                    reason="MEASURED_PRUNE_FACTOR",
+                    reason=f"{reason_prefix}_FACTOR",
                     source={"action_id": action.get("id"), "factor_id": factor_id, "correlation": correlation},
                 )
             add_blockers(
@@ -2363,7 +2433,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     display_name_cn=candidate.get("display_name_cn"),
                     factor_name=candidate.get("factor_name") or candidate.get("name"),
                 ),
-                reason="MEASURED_PRUNE_SEMANTIC",
+                reason=f"{reason_prefix}_SEMANTIC",
                 source={"action_id": action.get("id"), "correlation": correlation, "threshold": threshold},
             )
             add_blockers(
@@ -2374,35 +2444,62 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     display_name_cn=mvp.get("display_name_cn"),
                     factor_name=mvp.get("factor_name") or mvp.get("name"),
                 ),
-                reason="MEASURED_PRUNE_MVP",
+                reason=f"{reason_prefix}_MVP",
                 source={"action_id": action.get("id"), "correlation": correlation, "threshold": threshold},
             )
         return blockers
 
-    @staticmethod
     def _append_factor_factory_redundancy_group(
+        self,
         groups: list[dict[str, Any]],
         *,
         keys: set[str],
         item: Any,
+        factor_service: Any | None = None,
+        correlation_projection: Mapping[str, Any] | None = None,
     ) -> None:
-        if not keys:
-            groups.append({"keys": set(), "items": [item]})
-            return
         matches = [
             index
             for index, group in enumerate(groups)
             if keys.intersection(group.get("keys") or set())
         ]
+        if not matches and factor_service is not None and correlation_projection:
+            matches = [
+                index
+                for index, group in enumerate(groups)
+                if any(
+                    self._factor_factory_correlation_match(factor_service, correlation_projection, peer_projection)
+                    for peer_projection in (group.get("correlation_projections") or [])
+                    if isinstance(peer_projection, Mapping)
+                )
+            ]
+        if not keys and not matches:
+            groups.append(
+                {
+                    "keys": set(),
+                    "items": [item],
+                    "correlation_projections": [dict(correlation_projection)] if correlation_projection else [],
+                }
+            )
+            return
         if not matches:
-            groups.append({"keys": set(keys), "items": [item]})
+            groups.append(
+                {
+                    "keys": set(keys),
+                    "items": [item],
+                    "correlation_projections": [dict(correlation_projection)] if correlation_projection else [],
+                }
+            )
             return
         primary = groups[matches[0]]
         primary.setdefault("keys", set()).update(keys)
         primary.setdefault("items", []).append(item)
+        if correlation_projection:
+            primary.setdefault("correlation_projections", []).append(dict(correlation_projection))
         for index in reversed(matches[1:]):
             primary["keys"].update(groups[index].get("keys") or set())
             primary["items"].extend(groups[index].get("items") or [])
+            primary.setdefault("correlation_projections", []).extend(groups[index].get("correlation_projections") or [])
             del groups[index]
 
     def _apply_factor_factory_redundancy_pruning(self, *, source_mining_job_id: str) -> dict[str, Any]:
@@ -2419,6 +2516,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             """,
             (source_mining_job_id,),
         )
+        factor_service = self._factor_research_service()
         library_blockers = self._factor_factory_library_publish_blockers()
         groups: list[dict[str, Any]] = []
         library_pruned = 0
@@ -2512,6 +2610,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 base_display_name_cn=projection.get("base_display_name_cn"),
                 expression=expression,
             )
+            correlation_projection = self._factor_factory_correlation_projection(
+                factor_service,
+                factor_id=target_factor_id,
+                expression=expression,
+                display_name=projection.get("display_name_cn") or projection.get("base_display_name_cn"),
+                target_layer=target_layer,
+            )
             score = _coerce_float(
                 metrics.get("fitness_score") if metrics.get("fitness_score") is not None else metrics.get("score"),
                 0.0,
@@ -2520,6 +2625,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 groups,
                 keys=keys,
                 item=(row, dict(metrics), score),
+                factor_service=factor_service,
+                correlation_projection=correlation_projection,
             )
         kept = 0
         pruned = 0
@@ -2767,6 +2874,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 base_display_name_cn=projection.get("base_display_name_cn") or display_name,
                 expression=expression,
             )
+            correlation_projection = self._factor_factory_correlation_projection(
+                factor_service,
+                factor_id=factor_id,
+                expression=expression,
+                display_name=display_name,
+                target_layer=target_layer,
+            )
             score = _coerce_float(
                 metrics.get("fitness_score") if metrics.get("fitness_score") is not None else metrics.get("score"),
                 0.0,
@@ -2820,6 +2934,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 groups,
                 keys=keys,
                 item=candidate_row,
+                factor_service=factor_service,
+                correlation_projection=correlation_projection,
             )
         winners = [
             max(
@@ -13635,6 +13751,20 @@ class RealBacktestPlatformService(BacktestPlatformService):
             fundamental_effective_total <= 0
             or fundamental_effective_covered >= fundamental_effective_total
         )
+        if fundamental_effective_total > 0:
+            fundamental_logical_pct = _coerce_float(fundamental_gap_policy.get("logical_coverage_pct"), 0.0)
+            fundamental_coverage_metric = (
+                f"{fundamental_logical_pct:.1f}%"
+                if fundamental_coverage_complete
+                else f"{fundamental_effective_covered}/{fundamental_effective_total}"
+            )
+        else:
+            fundamental_coverage_metric = (
+                f"{fundamental_covered}/{fundamental_total}" if fundamental_total > 0 else "待生成"
+            )
+        fundamental_raw_coverage_metric = (
+            f"Raw F2 {fundamental_covered}/{fundamental_total}" if fundamental_total > 0 else None
+        )
         missing_publish_date_count = int(fundamental_time_contract.get("missing_publish_date_count") or 0)
         missing_available_at_count = int(fundamental_time_contract.get("missing_available_at_count") or 0)
         fundamental_ready = (
@@ -13786,12 +13916,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 ),
                 "metrics": [
                     {
-                        "label": "覆盖",
-                        "value": (
-                            f"{fundamental_covered}/{fundamental_total}"
-                            if fundamental_total > 0
-                            else "待生成"
-                        ),
+                        "label": "覆盖率",
+                        "value": fundamental_coverage_metric,
+                        "detail": fundamental_raw_coverage_metric,
+                        "tone": "ready" if fundamental_coverage_complete else "warning",
                     },
                     {"label": "字段数", "value": len(available_fields)},
                     {"label": "发布日期门禁", "value": "已挂点时门禁" if fundamental_points > 0 else "待补"},

@@ -304,6 +304,69 @@ export function installMockApiServer() {
       if (method === 'POST' && url.pathname === '/pit-data/identity-scraper/restart') {
         return json(await demoApi.restartPitIdentityScraper(body as import('./types').ApiPitIdentityScraperRestartPayload));
       }
+      if (method === 'GET' && url.pathname === '/factor-sources/registry') {
+        return json({
+          sources: [
+            {
+              id: 'fama_french',
+              name: 'Fama-French Data Library',
+              short_name: 'Fama-French',
+              source_type: 'ACADEMIC_LIBRARY',
+              access_policy: 'PUBLIC_DOWNLOAD',
+              license_note: 'public_research',
+              sync_hint: 'download_or_manual_upload_review',
+              supported_import_modes: ['AUTO_DOWNLOAD', 'LOCAL_FILE'],
+              tags: ['public_download', 'academic_library'],
+              datasets: [
+                {
+                  key: 'fama_french_us_research_factors_daily',
+                  name: 'US research factors daily',
+                  description: 'Fama-French daily style factors',
+                  frequency: 'DAILY',
+                  status: 'READY',
+                  factor_family: 'style_premia',
+                  default_usage: 'F2 style baseline',
+                  recommended_system_family: 'valuation_quality',
+                  template_key: 'fama_french_us_research_factors_daily',
+                  fields: ['date', 'factor_id', 'value'],
+                  update_lag_days: 1,
+                  governance_notes: ['review required'],
+                },
+              ],
+            },
+            {
+              id: 'aqr',
+              name: 'AQR Data Sets',
+              short_name: 'AQR',
+              source_type: 'INSTITUTIONAL_LIBRARY',
+              access_policy: 'LICENSE_REQUIRED',
+              license_note: 'license/manual_upload',
+              sync_hint: 'operator_attested_manual_upload_only',
+              supported_import_modes: ['LOCAL_FILE'],
+              tags: ['license_required'],
+              datasets: [
+                {
+                  key: 'aqr_public_style_factors',
+                  name: 'AQR style and alternative factors',
+                  description: 'Manual upload only',
+                  frequency: 'MIXED',
+                  status: 'MANUAL_REQUIRED',
+                  factor_family: 'quality_momentum',
+                  default_usage: 'Reference benchmark',
+                  recommended_system_family: 'quality_risk_adjusted',
+                  template_key: 'aqr_public_style_factors',
+                  fields: ['date', 'factor_id', 'value'],
+                  update_lag_days: 30,
+                  governance_notes: ['license attestation required'],
+                },
+              ],
+            },
+          ],
+          recommended_flow: ['import_file', 'create_precheck', 'semantic_mapping', 'submit_review'],
+          template_version: 'public_us_factor_template_v1',
+          review_boundary: 'D2_QUARANTINE_REVIEW',
+        });
+      }
       if (method === 'GET' && url.pathname === '/factors') {
         return json(await demoApi.listFactors({
           source: url.searchParams.get('source') ?? undefined,

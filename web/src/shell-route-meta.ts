@@ -158,6 +158,14 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         description: '用白名单公式编写人工因子，并在正式诊断前预览 IC。',
         showPageHeading: false,
       };
+    case 'public-factor-imports':
+      return {
+        navKey: 'factor',
+        eyebrow: '因子',
+        title: '公开因子入库',
+        description: '把公开成熟因子接入 manifest、语义映射和复核链路。',
+        showPageHeading: false,
+      };
     case 'factor-factory':
       return {
         navKey: 'factor',

@@ -2451,6 +2451,98 @@ def test_factor_governance_prune_requires_measured_rankic_correlation(tmp_path):
     assert action["offline_detail"]["sample_count"] == len(keep_values)
 
 
+def test_factor_governance_prune_uses_library_heatmap_when_publish_ic_series_is_synthetic(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    now = "2026-05-22T09:30:00Z"
+    factor_specs = [
+        (
+            "s_f2_mom_raw_cur_f1_return_21d_base",
+            "Auto mined 21d smoothed return",
+            "ZScore(Neutralize(Winsorize(TS_Rank(TS_Return(f1_return_21d_base, 3), 3), method=\"MAD\"), by=\"industry,market_cap\"))",
+            0.5,
+            99.47,
+        ),
+        (
+            "s_f2_mom_raw_cur_f1_price_close",
+            "Auto mined current smoothed return",
+            "ZScore(Neutralize(Winsorize(TS_Rank(TS_Return(f1_price_close, 3), 5), method=\"MAD\"), by=\"industry,market_cap\"))",
+            0.4472,
+            99.34,
+        ),
+        (
+            "s_f2_mom_raw_cur_f1_return_1d_base",
+            "Auto mined 1d smoothed return",
+            "ZScore(Neutralize(Winsorize(TS_Rank(TS_Return(f1_return_1d_base, 21), 5), method=\"MAD\"), by=\"industry,market_cap\"))",
+            0.2132,
+            97.09,
+        ),
+    ]
+    with client.app.state.service.storage.connection() as conn:
+        for factor_id, name, expression, _ir, _coverage in factor_specs:
+            conn.execute(
+                """
+                INSERT INTO factor_definitions (
+                    id, name, market, universe, source, lifecycle_status, diagnostic_status,
+                    direction, frequency, expression, tags_json, data_requirements_json,
+                    institutional_note, created_by, created_at, updated_at
+                )
+                VALUES (?, ?, 'US', 'SP500', 'AUTO_MINED', 'VERIFIED', 'COMPLETED',
+                        'HIGH_IS_BETTER', 'DAILY', ?, ?, ?, ?, 'unit_test', ?, ?)
+                """,
+                (
+                    factor_id,
+                    name,
+                    expression,
+                    dumps(["auto_mined", "momentum", "Raw"]),
+                    dumps(["adj_close", "price_history", "returns"]),
+                    "Published from factor quarantine without measured RankIC series.",
+                    now,
+                    now,
+                ),
+            )
+    for factor_id, _name, _expression, ir, coverage in factor_specs:
+        seed_factor_diagnostic_summary(
+            client,
+            factor_id,
+            {
+                "status": "COMPLETED",
+                "diagnostic_mode": "VERIFIED",
+                "run_id": f"fdiag_{factor_id}_publish",
+                "factor_id": factor_id,
+                "rank_ic": 0.05,
+                "ic": 0.046,
+                "ir": ir,
+                "coverage": coverage,
+                "quarantine": {"candidate_id": f"fq_{factor_id}"},
+                "data_lineage": {"kind": "QUARANTINE_PUBLISH_SUMMARY"},
+            },
+            run_id=f"fdiag_{factor_id}_publish",
+        )
+
+    overview = assert_ok(client.get("/factor-governance/overview"))
+    published_ids = {factor_id for factor_id, *_rest in factor_specs}
+    prune_actions = [
+        action
+        for action in overview["actions"]
+        if action["kind"] == "PRUNE" and set(action["factor_ids"]).intersection(published_ids)
+    ]
+    prune_factor_ids = {factor_id for action in prune_actions for factor_id in action["factor_ids"]}
+    assert prune_factor_ids == {
+        "s_f2_mom_raw_cur_f1_price_close",
+        "s_f2_mom_raw_cur_f1_return_1d_base",
+    }
+    assert {action["keep_factor_id"] for action in prune_actions} == {"s_f2_mom_raw_cur_f1_return_21d_base"}
+    assert all(action["offline_detail"]["evidence_source"] == "FACTOR_LIBRARY_HEATMAP_PROXY" for action in prune_actions)
+    assert all(action["offline_detail"]["correlation"] > 0.9 for action in prune_actions)
+
+    detail = assert_ok(client.get("/factors/s_f2_mom_raw_cur_f1_return_1d_base"))
+    summary = detail["latest_diagnostic_summary"]
+    assert summary["ic_series"]
+    assert summary["ic_series_evidence_quality"] == "synthetic_projection"
+    assert summary["ic_series_source"] == "auto_mined_rank_ic_projection"
+
+
 def test_factor_governance_optimizes_inverted_downside_factor_and_publishes_reverse(tmp_path):
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)

@@ -102,6 +102,171 @@ CompositionMethodType = Literal[
     'TIME_SERIES_DENOISE',
 ]
 CompositionPublishBoundary = Literal['D2_QUARANTINE_ONLY']
+ExternalFactorSourceType = Literal[
+    'ACADEMIC_LIBRARY',
+    'INSTITUTIONAL_LIBRARY',
+    'REFERENCE_TOOL',
+    'BACKTEST_TOOL',
+    'LOCAL_FILE',
+]
+ExternalFactorAccessPolicy = Literal[
+    'PUBLIC_DOWNLOAD',
+    'MANUAL_UPLOAD',
+    'REFERENCE_ONLY',
+    'LICENSE_REQUIRED',
+]
+ExternalFactorFrequency = Literal['DAILY', 'MONTHLY', 'QUARTERLY', 'ANNUAL', 'MIXED']
+ExternalFactorDatasetStatus = Literal['READY', 'MANUAL_REQUIRED', 'REFERENCE_ONLY']
+ExternalFactorImportMode = Literal['AUTO_DOWNLOAD', 'LOCAL_FILE', 'REFERENCE_ONLY']
+ExternalFactorImportJobStatus = Literal[
+    'DRAFT',
+    'FILE_STAGED',
+    'PRECHECK_CREATED',
+    'MAPPING_REVIEW',
+    'REVIEW_GATED',
+    'REVIEW_SUBMITTED',
+    'FAILED',
+]
+ExternalFactorReviewStatus = Literal[
+    'NOT_STARTED',
+    'PENDING_REVIEW',
+    'NEEDS_MAPPING',
+    'READY_FOR_REVIEW',
+    'SUBMITTED',
+    'BLOCKED',
+]
+
+
+class ExternalFactorDatasetModel(BaseModel):
+    key: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    description: str = ''
+    frequency: ExternalFactorFrequency = 'MONTHLY'
+    status: ExternalFactorDatasetStatus = 'READY'
+    factor_family: str = ''
+    default_usage: str = ''
+    recommended_system_family: str = ''
+    template_key: str = Field(min_length=1)
+    fields: list[str] = Field(default_factory=list)
+    update_lag_days: int = Field(default=0, ge=0)
+    governance_notes: list[str] = Field(default_factory=list)
+
+
+class ExternalFactorSourceModel(BaseModel):
+    id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    short_name: str = Field(min_length=1)
+    source_type: ExternalFactorSourceType
+    access_policy: ExternalFactorAccessPolicy
+    homepage_url: str | None = None
+    license_note: str = ''
+    sync_hint: str = ''
+    datasets: list[ExternalFactorDatasetModel] = Field(default_factory=list)
+    supported_import_modes: list[ExternalFactorImportMode] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+
+
+class ExternalFactorSourceRegistryResponse(BaseModel):
+    sources: list[ExternalFactorSourceModel] = Field(default_factory=list)
+    recommended_flow: list[str] = Field(default_factory=list)
+    template_version: str = 'public_us_factor_template_v1'
+    review_boundary: str = 'D2_QUARANTINE_REVIEW'
+
+
+class ExternalFactorMappingRowModel(BaseModel):
+    source_field: str = Field(min_length=1)
+    target_field: str = ''
+    semantic_role: str = ''
+    transform: str = 'standard_rank'
+    data_type: str = 'float'
+    required: bool = True
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    notes: str = ''
+
+
+class ExternalFactorImportManifestModel(BaseModel):
+    row_count: int = Field(default=0, ge=0)
+    column_count: int = Field(default=0, ge=0)
+    columns: list[str] = Field(default_factory=list)
+    sample_rows: list[dict[str, Any]] = Field(default_factory=list)
+    file_sha256: str = ''
+    template_key: str = ''
+    parsing_status: str = 'READY'
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ExternalFactorArtifactPathsModel(BaseModel):
+    uploaded_file_id: str | None = None
+    raw_file_ref: str | None = None
+    manifest_ref: str | None = None
+    template_ref: str | None = None
+
+
+class ExternalFactorImportJobModel(BaseModel):
+    id: str = Field(min_length=1)
+    source_id: str = Field(min_length=1)
+    dataset_key: str = Field(min_length=1)
+    source_name: str = ''
+    dataset_name: str = ''
+    import_mode: ExternalFactorImportMode = 'LOCAL_FILE'
+    status: ExternalFactorImportJobStatus = 'DRAFT'
+    review_status: ExternalFactorReviewStatus = 'NOT_STARTED'
+    frequency: ExternalFactorFrequency = 'MONTHLY'
+    as_of_date: str | None = None
+    created_by: str = 'researcher'
+    created_at: str
+    updated_at: str
+    submitted_at: str | None = None
+    manifest: ExternalFactorImportManifestModel = Field(default_factory=ExternalFactorImportManifestModel)
+    mapping_rows: list[ExternalFactorMappingRowModel] = Field(default_factory=list)
+    artifact_paths: ExternalFactorArtifactPathsModel = Field(default_factory=ExternalFactorArtifactPathsModel)
+    risk_flags: list[str] = Field(default_factory=list)
+    next_actions: list[str] = Field(default_factory=list)
+    governance_gate: str = 'REVIEW_BEFORE_QUARANTINE'
+
+
+class ExternalFactorLocalFileUploadRequest(BaseModel):
+    source_id: str = Field(min_length=1)
+    dataset_key: str = Field(min_length=1)
+    filename: str = Field(min_length=1)
+    content_text: str = ''
+    content_type: str | None = None
+
+    @field_validator('filename')
+    @classmethod
+    def _clean_filename(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError('filename must not be empty')
+        return cleaned
+
+
+class ExternalFactorLocalFileUploadResponse(BaseModel):
+    file_id: str
+    source_id: str
+    dataset_key: str
+    filename: str
+    manifest: ExternalFactorImportManifestModel
+    mapping_rows: list[ExternalFactorMappingRowModel] = Field(default_factory=list)
+    created_at: str
+
+
+class ExternalFactorImportJobCreateRequest(BaseModel):
+    source_id: str = Field(min_length=1)
+    dataset_key: str = Field(min_length=1)
+    import_mode: ExternalFactorImportMode = 'LOCAL_FILE'
+    file_id: str | None = None
+    as_of_date: str | None = None
+    frequency: ExternalFactorFrequency | None = None
+    created_by: str = 'researcher'
+    precheck_notes: str | None = None
+
+
+class ExternalFactorImportJobMappingRequest(BaseModel):
+    mapping_rows: list[ExternalFactorMappingRowModel] = Field(default_factory=list)
+    review_status: ExternalFactorReviewStatus = 'READY_FOR_REVIEW'
+    notes: str | None = None
+
 
 
 class FactorDescriptorRequest(BaseModel):

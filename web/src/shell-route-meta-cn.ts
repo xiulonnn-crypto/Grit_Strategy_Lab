@@ -11,6 +11,7 @@ export type ShellNavKey =
   | 'runs'
   | 'optimization'
   | 'factor-library'
+  | 'public-factor-imports'
   | 'factor-factory'
   | 'pit-data'
   | 'snapshots';
@@ -188,6 +189,7 @@ export const SHELL_NAV_GROUPS: ShellNavGroup[] = [
     label: TEXT.factor,
     items: [
       { key: 'factor-library', href: '#/factors', label: TEXT.factorLibrary, groupKey: 'factor' },
+      { key: 'public-factor-imports', href: '#/factors/imports', label: '公开因子入库', groupKey: 'factor' },
       { key: 'factor-factory', href: '#/factors/factory', label: '因子工厂', groupKey: 'factor' },
     ],
   },
@@ -365,6 +367,14 @@ export function getRouteMeta(route: AppRoute): AppRouteMeta {
         eyebrow: TEXT.factor,
         title: TEXT.factorEditorTitle,
         description: TEXT.factorEditorDesc,
+        showPageHeading: false,
+      };
+    case 'public-factor-imports':
+      return {
+        navKey: 'public-factor-imports',
+        eyebrow: TEXT.factor,
+        title: '公开因子入库',
+        description: '把 Fama-French、AQR 等公开成熟因子先纳入 manifest、语义映射和 D2 复核链路。',
         showPageHeading: false,
       };
     case 'factor-factory':

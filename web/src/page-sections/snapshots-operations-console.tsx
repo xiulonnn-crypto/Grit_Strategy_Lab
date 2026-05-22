@@ -43,6 +43,8 @@ type LayerCard = {
   refreshTargets: SnapshotRefreshTarget[];
 };
 
+type DataLayerReadiness = NonNullable<ApiSnapshotOverview['data_layer_readiness']>[number];
+
 type LedgerRow = {
   id: string;
   kind: LedgerKind;
@@ -96,6 +98,7 @@ type QueueItem = {
   pills: string[];
   action: string;
   actionKind: 'repair_l1' | 'configure_path' | 'view_ledger';
+  credentialProviderId?: string;
 };
 
 type CredentialDisplayRow = {
@@ -382,6 +385,10 @@ function getDatasetCoverage(dataset?: ApiDatasetSnapshot): string {
   if (!dataset) {
     return '0/0';
   }
+  const fundamentalEffectiveCoverage = getFundamentalEffectiveCoverage(dataset);
+  if (fundamentalEffectiveCoverage) {
+    return fundamentalEffectiveCoverage;
+  }
   const metadata = asRecord(dataset.metadata);
   const benchmark = asRecord(metadata.benchmark_etf_coverage);
   const covered =
@@ -392,6 +399,29 @@ function getDatasetCoverage(dataset?: ApiDatasetSnapshot): string {
     return `${formatCount(covered)}/${formatCount(total)}`;
   }
   return dataset.row_count ? `${formatCount(dataset.row_count)} 行` : '未计量';
+}
+
+function getFundamentalEffectiveCoverage(dataset?: ApiDatasetSnapshot): string | null {
+  if (!dataset || dataset.id !== 'ds-fundamentals') {
+    return null;
+  }
+  const metadata = asRecord(dataset.metadata);
+  const policy = asRecord(metadata.fundamental_gap_policy);
+  const pct = firstNumber(metadata, ['effective_coverage_pct']) ?? firstNumber(policy, ['logical_coverage_pct']);
+  if (pct !== null) {
+    return `${pct.toFixed(1)}%`;
+  }
+  const covered =
+    firstNumber(metadata, ['effective_covered_symbol_count']) ??
+    firstNumber(policy, ['logical_covered_symbol_count']);
+  const total =
+    firstNumber(metadata, ['effective_total_symbol_count']) ??
+    firstNumber(policy, ['logical_total_symbol_count']) ??
+    firstNumber(metadata, ['total_symbol_count']);
+  if (covered !== null && total !== null) {
+    return `${formatCount(covered)}/${formatCount(total)}`;
+  }
+  return null;
 }
 
 function getBondCoverage(overview: ApiSnapshotOverview | null): string {
@@ -605,10 +635,40 @@ function getDataset(overview: ApiSnapshotOverview | null, id: string): ApiDatase
   return overview?.dataset_snapshots.find((item) => item.id === id);
 }
 
+function getLayerReadiness(overview: ApiSnapshotOverview | null, layerId: string): DataLayerReadiness | undefined {
+  return overview?.data_layer_readiness?.find((item) => item.layer_id === layerId);
+}
+
+function getMetricValue(metrics: unknown, labels: string[]): string | null {
+  for (const item of asArray(metrics)) {
+    const metric = asRecord(item);
+    if (!labels.includes(String(metric.label ?? ''))) {
+      continue;
+    }
+    const value = metric.value;
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return formatCount(value);
+    }
+    if (typeof value === 'string' && value.trim()) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function getLayerMetricValue(layer: DataLayerReadiness | undefined, labels: string[]): string | null {
+  if (!layer) {
+    return null;
+  }
+  const directValue = getMetricValue(layer.metrics, labels);
+  return directValue ?? getMetricValue(asRecord(layer).pit_metrics, labels);
+}
+
 function buildLayerCards(overview: ApiSnapshotOverview | null): LayerCard[] {
   const price = getDataset(overview, 'ds-price');
   const corporate = getDataset(overview, 'ds-corporate-actions');
   const fundamentals = getDataset(overview, 'ds-fundamentals');
+  const l2Layer = getLayerReadiness(overview, 'l2_fundamental_data');
   const analyst = getDataset(overview, 'ds-analyst-consensus');
   const shortVolume = getDataset(overview, 'ds-short-volume');
   const macro = getDataset(overview, 'ds-macro-rates');
@@ -618,11 +678,14 @@ function buildLayerCards(overview: ApiSnapshotOverview | null): LayerCard[] {
   const hasL4SourceGap = [macro?.status, option?.status].some(hasKnownNonReadyStatus);
   const hasL3SourceGap = [analyst?.status, shortVolume?.status].some((status) => status && status !== 'READY');
   const l1Status = hasL1DependencyGap ? 'INCOMPLETE' : 'READY';
-  const l2Status = fundamentals?.status ?? 'UNKNOWN';
+  const l2Status = l2Layer?.status ?? fundamentals?.status ?? 'UNKNOWN';
   const l3Status = hasL3SourceGap ? 'INCOMPLETE' : 'READY';
   const l4Status = hasL4SourceGap ? 'INCOMPLETE' : 'READY';
+  const fundamentalCoverageMetric =
+    getLayerMetricValue(l2Layer, ['覆盖率']) ?? getLayerMetricValue(l2Layer, ['覆盖']) ?? getDatasetCoverage(fundamentals);
   const fundamentalFieldCount =
-    firstNumber(asRecord(fundamentals?.metadata), ['field_count', 'field_count_total', 'ready_field_count']) ?? 18;
+    getLayerMetricValue(l2Layer, ['可用字段', '字段数']) ??
+    formatCount(firstNumber(asRecord(fundamentals?.metadata), ['field_count', 'field_count_total', 'ready_field_count']) ?? 18);
 
   return [
     {
@@ -642,12 +705,12 @@ function buildLayerCards(overview: ApiSnapshotOverview | null): LayerCard[] {
     {
       id: 'l2',
       title: 'L2 财务截面',
-      subtitle: '财务字段与发布时点门禁可进入质量、估值和稳健性因子研究。',
+      subtitle: l2Layer?.summary ?? '财务字段与发布时点门禁可进入质量、估值和稳健性因子研究。',
       status: l2Status,
       statusLabel: healthCardStatusLabel(l2Status),
-      metric: getDatasetCoverage(fundamentals),
+      metric: fundamentalCoverageMetric,
       miniRows: [
-        { label: '字段数', value: formatCount(fundamentalFieldCount) },
+        { label: '字段数', value: fundamentalFieldCount },
         { label: '观察项', value: fundamentals?.blocker ? blockerLabel(fundamentals.blocker.code) : '财务平衡校验' },
       ],
       action: fundamentals?.blocker ? '下钻观察项' : '查看观察项',
@@ -694,11 +757,19 @@ function getCoverageNumbers(dataset?: ApiDatasetSnapshot): { covered: number; to
     return null;
   }
   const metadata = asRecord(dataset.metadata);
+  const policy = asRecord(metadata.fundamental_gap_policy);
   const benchmark = asRecord(metadata.benchmark_etf_coverage);
-  const covered =
-    firstNumber(metadata, ['covered_symbol_count', 'raw_covered_symbol_count', 'effective_covered_symbol_count']) ??
-    firstNumber(benchmark, ['ready_count']);
-  const total = firstNumber(metadata, ['total_symbol_count']) ?? firstNumber(benchmark, ['total_count']);
+  const covered = dataset.id === 'ds-fundamentals'
+    ? firstNumber(metadata, ['effective_covered_symbol_count']) ??
+      firstNumber(policy, ['logical_covered_symbol_count']) ??
+      firstNumber(metadata, ['covered_symbol_count', 'raw_covered_symbol_count'])
+    : firstNumber(metadata, ['covered_symbol_count', 'raw_covered_symbol_count', 'effective_covered_symbol_count']) ??
+      firstNumber(benchmark, ['ready_count']);
+  const total = dataset.id === 'ds-fundamentals'
+    ? firstNumber(metadata, ['effective_total_symbol_count']) ??
+      firstNumber(policy, ['logical_total_symbol_count']) ??
+      firstNumber(metadata, ['total_symbol_count'])
+    : firstNumber(metadata, ['total_symbol_count']) ?? firstNumber(benchmark, ['total_count']);
   return covered !== null && total !== null ? { covered, total } : null;
 }
 
@@ -920,6 +991,7 @@ function buildCredentialRows(
     const keyLabel = missing[0] ?? required[0] ?? '无需 key';
     const latest = latestByProvider.get(item.provider_id);
     const hasMissingPath = missing.some((key) => key.toUpperCase().includes('PATH'));
+    const hasPathCredential = required.some((key) => key.toUpperCase().includes('PATH'));
     const invalid = String(item.readiness_status ?? '').toLowerCase().includes('invalid');
     const limited = hasQuotaOrCooldown(item);
     const detailParts = [
@@ -942,6 +1014,10 @@ function buildCredentialRows(
       category = 'missing_path';
       status = '缺失本机路径';
       actionLabel = '配置路径';
+      actionKind = 'configure_path';
+    } else if (item.credential_ready && !item.enabled && hasPathCredential) {
+      status = '已配置，导入未接入';
+      actionLabel = '调整路径';
       actionKind = 'configure_path';
     } else if (invalid) {
       category = 'invalid';
@@ -1072,6 +1148,11 @@ function scrollIntoViewIfAvailable(element: Element | null, options: ScrollIntoV
 function buildQueueItems(overview: ApiSnapshotOverview | null, registry: ApiSnapshotProviderRegistry | null): QueueItem[] {
   const corporate = getDataset(overview, 'ds-corporate-actions');
   const price = getDataset(overview, 'ds-price');
+  const missingLocalPathProvider = registry?.items.find((item) =>
+    (item.credential_requirements.missing_env_vars ?? []).some((key) =>
+      ['CRSP_DATA_PATH', 'NORGATE_DATA_PATH'].includes(key),
+    ),
+  );
   const rows: QueueItem[] = [
     {
       id: 'l1-corporate-actions',
@@ -1088,6 +1169,7 @@ function buildQueueItems(overview: ApiSnapshotOverview | null, registry: ApiSnap
       pills: ['CRSP_DATA_PATH', 'NORGATE_DATA_PATH'],
       action: '配置路径',
       actionKind: 'configure_path',
+      credentialProviderId: missingLocalPathProvider?.provider_id ?? 'crsp_us_stock',
     },
     {
       id: 'fundamental-balance',
@@ -1136,7 +1218,7 @@ function credentialByProvider(rows: CredentialRow[], providerId: string): Creden
 
 function getConfigTone(row?: CredentialRow): string {
   if (!row) return 'warning';
-  if (row.category === 'missing_path' || row.keyLabel.includes('PATH') || row.statusLabel.includes('缺失')) return 'warning';
+  if (row.category === 'missing_path' || row.statusLabel.includes('缺失')) return 'warning';
   if (row.category === 'invalid' || row.category === 'limited' || row.category === 'usable') return 'ready';
   return row.item?.credential_ready ? 'ready' : 'warning';
 }
@@ -1146,13 +1228,21 @@ function getConfigLabel(row?: CredentialRow): string {
   return getConfigTone(row) === 'ready' ? '已配置' : '缺失';
 }
 
+function getCredentialStatusTone(row?: CredentialRow): string {
+  if (!row) return 'neutral';
+  if (row.category === 'usable') return 'ready';
+  if (row.category === 'invalid') return 'danger';
+  if (row.category === 'missing_path' || row.category === 'limited') return 'warning';
+  if (row.item?.credential_ready && !row.item.enabled) return 'warning';
+  return 'neutral';
+}
+
 function getCredentialDisplayRows(rows: CredentialRow[]): CredentialDisplayRow[] {
   const tiingo = credentialByProvider(rows, 'tiingo') ?? credentialByProvider(rows, 'tiingo_symbology');
   const alpha = credentialByProvider(rows, 'alpha_vantage');
   const polygon = credentialByProvider(rows, 'polygon');
   const crsp = credentialByProvider(rows, 'crsp_us_stock');
   const norgate = credentialByProvider(rows, 'norgate_us_equities');
-  const iex = credentialByProvider(rows, 'iex_cloud_legacy');
   const sourceGroup =
     credentialByProvider(rows, 'fmp') ??
     credentialByProvider(rows, 'fmp_historical_constituent') ??
@@ -1204,40 +1294,31 @@ function getCredentialDisplayRows(rows: CredentialRow[]): CredentialDisplayRow[]
       id: 'crsp',
       key: 'CRSP_DATA_PATH',
       source: 'CRSP US Stock',
-      configLabel: '缺失',
-      configTone: 'warning',
-      statusLabel: '未启用',
-      statusTone: 'neutral',
-      impact: '影响长历史、退市收益、身份确权和 30Y Full Ready 归档。',
-      actionLabel: '配置路径',
-      actionKind: 'configure_path',
+      configLabel: getConfigLabel(crsp),
+      configTone: getConfigTone(crsp),
+      statusLabel: crsp?.statusLabel ?? '未启用',
+      statusTone: getCredentialStatusTone(crsp),
+      impact: crsp?.item?.credential_ready && !crsp.item.enabled
+        ? '路径已读取；当前刷新链路尚未接入 CRSP 导入器，需要 manifest 校验后的本机导入流程。'
+        : '影响长历史、退市收益、身份确权和 30Y Full Ready 归档。',
+      actionLabel: crsp?.actionLabel ?? '配置路径',
+      actionKind: crsp?.actionKind ?? 'configure_path',
       credential: crsp,
     },
     {
       id: 'norgate',
       key: 'NORGATE_DATA_PATH',
       source: 'Norgate US Equities',
-      configLabel: '缺失',
-      configTone: 'warning',
-      statusLabel: '未启用',
-      statusTone: 'neutral',
-      impact: '影响长历史补价、退市身份和精修来源。',
-      actionLabel: '配置路径',
-      actionKind: 'configure_path',
+      configLabel: getConfigLabel(norgate),
+      configTone: getConfigTone(norgate),
+      statusLabel: norgate?.statusLabel ?? '未启用',
+      statusTone: getCredentialStatusTone(norgate),
+      impact: norgate?.item?.credential_ready && !norgate.item.enabled
+        ? '路径已读取；当前刷新链路尚未接入 Norgate 导入器，需要 manifest 校验后的本机导入流程。'
+        : '影响长历史补价、退市身份和精修来源。',
+      actionLabel: norgate?.actionLabel ?? '配置路径',
+      actionKind: norgate?.actionKind ?? 'configure_path',
       credential: norgate,
-    },
-    {
-      id: 'iex',
-      key: 'IEX_TOKEN / IEX_CLOUD_TOKEN',
-      source: 'IEX Legacy',
-      configLabel: '缺失',
-      configTone: 'warning',
-      statusLabel: '旧链路',
-      statusTone: 'neutral',
-      impact: '旧版 IEX 沙箱未接入，不影响当前 L1/L4 主链路。',
-      actionLabel: '暂不处理',
-      actionKind: 'noop',
-      credential: iex,
     },
     {
       id: 'source_group',
@@ -1263,7 +1344,18 @@ function buildCredentialRestartCommand(
   const actionKind = credential?.actionKind ?? display?.actionKind;
   if (actionKind === 'configure_path') {
     const keyLabel = credential?.keyLabel ?? display?.key ?? '<PATH>';
-    return `$env:${keyLabel}="C:\\path\\to\\data"; powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1 -ForceRestart -RestartReason "snapshot provider credentials updated"`;
+    return `$env:${keyLabel}="C:\\path\\to\\data"
+$localConfig = ".\\QuickStart-Grit.local.ps1"
+if (-not (Test-Path -LiteralPath $localConfig)) { New-Item -ItemType File -Path $localConfig | Out-Null }
+$localLine = "\`$env:${keyLabel} = '$($env:${keyLabel})'"
+$localText = Get-Content -LiteralPath $localConfig -Raw
+if ($localText -match '(?m)^\\s*\\$env:${keyLabel}\\s*=') {
+  $localText = $localText -replace '(?m)^\\s*\\$env:${keyLabel}\\s*=.*$', $localLine
+  Set-Content -LiteralPath $localConfig -Value $localText -Encoding utf8
+} else {
+  Add-Content -LiteralPath $localConfig -Value $localLine -Encoding utf8
+}
+powershell -ExecutionPolicy Bypass -File .\\QuickStart-Grit.ps1 -ForceRestart -RestartReason "snapshot provider credentials updated"`;
   }
   if (actionKind === 'replace_key') {
     const keyLabel = credential?.keyLabel ?? display?.key ?? '<KEY>';
@@ -1497,7 +1589,7 @@ export function SnapshotOperationsConsole({
                         phase2_max_symbols: 25,
                       });
                     } else if (item.actionKind === 'configure_path') {
-                      selectCredential('crsp_us_stock');
+                      selectCredential(item.credentialProviderId ?? 'crsp_us_stock');
                     } else {
                       document.querySelector('.snapshots-ops-ledger')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
                     }

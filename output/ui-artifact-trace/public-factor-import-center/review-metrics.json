@@ -1,0 +1,50 @@
+{
+  "task_slug": "public-factor-import-center",
+  "route": "http://127.0.0.1:4173/?v=<timestamp>#/factors/imports",
+  "design_sources": [
+    "designs/2026-05-21-public-factor-import-center/spec.html",
+    "designs/2026-05-21-public-factor-import-center/spec.md",
+    "designs/2026-05-21-public-factor-import-center/spec.png",
+    "designs/2026-05-21-public-factor-import-center/.assets/spec-modal-create-precheck.png",
+    "designs/2026-05-21-public-factor-import-center/.assets/spec-modal-local-file.png"
+  ],
+  "contract_evidence": {
+    "vitest": {
+      "command": "node scripts/run-vitest-fixed.cjs public-factor-import-center.test.tsx app.routes.foundation.test.tsx",
+      "status": "passed",
+      "files": 2,
+      "tests": 37
+    },
+    "typescript": {
+      "command": ".\\node_modules\\.bin\\tsc.cmd --noEmit",
+      "status": "passed"
+    },
+    "build": {
+      "command": "npm.cmd run build",
+      "status": "passed"
+    },
+    "layout_contract": {
+      "status": "passed",
+      "checks": [
+        "flow spans columns 2 through 4",
+        "manifest rail starts at row 2 and spans below the flow",
+        "candidate table has seven approved columns",
+        "mapping grid uses four horizontal tiles",
+        "modals expose approved numbered checklist structure"
+      ]
+    }
+  },
+  "visual_evidence": {
+    "desktop_screenshot": "blocked",
+    "mobile_screenshot": "blocked",
+    "modal_screenshots": "blocked",
+    "blocker": "Playwright Chromium launch failed with browserType.launch: spawn EPERM in this Windows sandbox."
+  },
+  "runtime_evidence": {
+    "preflight_before": "output/logs/grit-coder/public-factor-import-center/runtime-preflight-ui-review.json",
+    "preflight_after": "output/logs/grit-coder/public-factor-import-center/runtime-preflight-ui-review-after-restart.json",
+    "status": "blocked",
+    "blocker": "QuickStart-Grit.ps1 -ForceRestart was blocked because port 4173 was held by PID 13156 and command-line inspection was denied; backend 8000 was not reachable after the failed startup."
+  },
+  "parity_status": "contract-fixed-visual-blocked"
+}

@@ -67,6 +67,12 @@ import type {
   ApiFactorQuarantinePublishPayload,
   ApiFactorQuarantinePublishResponse,
   ApiFactorQuarantineRunPayload,
+  ApiExternalFactorImportJob,
+  ApiExternalFactorImportJobCreatePayload,
+  ApiExternalFactorLocalFileUploadPayload,
+  ApiExternalFactorLocalFileUploadResponse,
+  ApiExternalFactorMappingRow,
+  ApiExternalFactorSourceRegistryResponse,
   ApiFactorModelCreatePayload,
   ApiFactorModelPreviewPayload,
   ApiFactorModelPreviewResponse,
@@ -818,6 +824,37 @@ function createHttpApiClient(): DemoApi {
       const suffix = search.toString();
       return requestJson<ApiF1CatalogResponse>(suffix ? `/factors/f1-catalog?${suffix}` : '/factors/f1-catalog/latest');
     },
+    getExternalFactorSourceRegistry: () =>
+      requestJson<ApiExternalFactorSourceRegistryResponse>('/factor-sources/registry'),
+    uploadExternalFactorLocalFile: (payload: ApiExternalFactorLocalFileUploadPayload) =>
+      requestJson<ApiExternalFactorLocalFileUploadResponse>(
+        '/factor-sources/local-files',
+        withJsonBody(payload, { method: 'POST' }),
+      ),
+    createExternalFactorImportJob: (payload: ApiExternalFactorImportJobCreatePayload) =>
+      requestJson<ApiExternalFactorImportJob>(
+        '/factor-sources/import-jobs',
+        withJsonBody(payload, { method: 'POST' }),
+      ),
+    getExternalFactorImportJob: (id: string) =>
+      requestJson<ApiExternalFactorImportJob>(`/factor-sources/import-jobs/${encodeURIComponent(id)}`),
+    updateExternalFactorImportMapping: (
+      id: string,
+      payload: {
+        mapping_rows: ApiExternalFactorMappingRow[];
+        review_status?: string;
+        notes?: string | null;
+      },
+    ) =>
+      requestJson<ApiExternalFactorImportJob>(
+        `/factor-sources/import-jobs/${encodeURIComponent(id)}/mapping`,
+        withJsonBody(payload, { method: 'PUT' }),
+      ),
+    submitExternalFactorImportReview: (id: string) =>
+      requestJson<ApiExternalFactorImportJob>(
+        `/factor-sources/import-jobs/${encodeURIComponent(id)}/submit-review`,
+        { method: 'POST' },
+      ),
     createFactor: (payload: ApiFactorCreatePayload) =>
       requestJson<ApiFactorDetail>('/factors', withJsonBody(payload, { method: 'POST' })),
     backfillFactorDisplayNamesV4: (payload?: { dry_run?: boolean }) =>

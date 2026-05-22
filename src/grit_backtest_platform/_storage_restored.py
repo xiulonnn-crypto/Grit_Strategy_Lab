@@ -347,6 +347,62 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS external_factor_uploaded_files (
+        id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL,
+        dataset_key TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        content_type TEXT,
+        sha256 TEXT NOT NULL,
+        content_text TEXT NOT NULL DEFAULT '',
+        manifest_json TEXT NOT NULL DEFAULT '{}',
+        mapping_rows_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS external_factor_import_jobs (
+        id TEXT PRIMARY KEY,
+        source_id TEXT NOT NULL,
+        dataset_key TEXT NOT NULL,
+        source_name TEXT NOT NULL DEFAULT '',
+        dataset_name TEXT NOT NULL DEFAULT '',
+        import_mode TEXT NOT NULL DEFAULT 'LOCAL_FILE',
+        status TEXT NOT NULL DEFAULT 'REVIEW_GATED',
+        review_status TEXT NOT NULL DEFAULT 'PENDING_REVIEW',
+        frequency TEXT NOT NULL DEFAULT 'MONTHLY',
+        as_of_date TEXT,
+        file_id TEXT,
+        manifest_json TEXT NOT NULL DEFAULT '{}',
+        mapping_rows_json TEXT NOT NULL DEFAULT '[]',
+        artifact_paths_json TEXT NOT NULL DEFAULT '{}',
+        risk_flags_json TEXT NOT NULL DEFAULT '[]',
+        next_actions_json TEXT NOT NULL DEFAULT '[]',
+        created_by TEXT NOT NULL DEFAULT 'researcher',
+        precheck_notes TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        submitted_at TEXT,
+        FOREIGN KEY (file_id) REFERENCES external_factor_uploaded_files(id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS external_factor_import_manifests (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        dataset_key TEXT NOT NULL,
+        file_id TEXT,
+        sha256 TEXT NOT NULL,
+        row_count INTEGER NOT NULL DEFAULT 0,
+        column_count INTEGER NOT NULL DEFAULT 0,
+        manifest_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (job_id) REFERENCES external_factor_import_jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY (file_id) REFERENCES external_factor_uploaded_files(id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS pit_preprocessing_runs (
         id TEXT PRIMARY KEY,
         run_id TEXT NOT NULL UNIQUE,
@@ -993,6 +1049,22 @@ POST_MIGRATION_INDEX_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_factor_factory_run_items_run_stage
     ON factor_factory_run_items(run_id, stage, status, updated_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_external_factor_uploaded_files_source
+    ON external_factor_uploaded_files(source_id, dataset_key, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_external_factor_import_jobs_status
+    ON external_factor_import_jobs(status, review_status, updated_at, id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_external_factor_import_jobs_source
+    ON external_factor_import_jobs(source_id, dataset_key, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_external_factor_import_manifests_job
+    ON external_factor_import_manifests(job_id, created_at)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_pit_preprocessing_runs_recent

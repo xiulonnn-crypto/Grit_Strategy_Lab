@@ -11,6 +11,8 @@ $env:EODHD_API_TOKEN = 'replace-with-eodhd-token'
 # $env:MASSIVE_API_KEY = 'replace-with-massive-api-key'
 $env:NASDAQ_DATA_LINK_API_KEY = 'replace-with-nasdaq-data-link-api-key'
 $env:FINNHUB_API_KEY = 'replace-with-finnhub-api-key'
+$env:CRSP_DATA_PATH = 'replace-with-crsp-export-path'
+$env:NORGATE_DATA_PATH = 'replace-with-norgate-export-path'
 
 $env:SEC_CONTACT_EMAIL = 'replace-with-contact-email@example.com'
 $env:SEC_EDGAR_CONTACT_EMAIL = $env:SEC_CONTACT_EMAIL

@@ -12,6 +12,15 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from uuid import uuid4
 
+from .external_factor_imports import (
+    TEMPLATE_COLUMNS,
+    build_public_factor_csv_template,
+    build_public_factor_import_job_projection,
+    build_public_factor_xlsx_template,
+    get_public_factor_source,
+    list_public_factor_source_registry,
+    analyze_public_factor_upload_text,
+)
 from .factor_mining import factor_ir_from_rank_ic, infer_holding_period_from_expression
 from .market_data_repository import (
     DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID,
@@ -7107,6 +7116,552 @@ class FactorResearchService:
             self._factor_list_pit_overview_cache = (time.time(), deepcopy(overview))
         return overview
 
+    def get_external_factor_source_registry(self) -> dict[str, Any]:
+        return {
+            "sources": [
+                self._external_factor_source_to_api(source)
+                for source in list_public_factor_source_registry()
+            ],
+            "recommended_flow": [
+                "import_file",
+                "create_precheck",
+                "semantic_mapping",
+                "submit_review",
+            ],
+            "template_version": "public_us_factor_template_v1",
+            "review_boundary": "D2_QUARANTINE_REVIEW",
+        }
+
+    def get_external_factor_template(self, template_key: str, fmt: str = "csv") -> dict[str, Any]:
+        normalized_format = str(fmt or "csv").strip().lower()
+        template_key = str(template_key or "").strip()
+        if not template_key:
+            raise ValueError("template_key must not be empty")
+        if normalized_format == "csv":
+            artifact = build_public_factor_csv_template()
+        elif normalized_format == "xlsx":
+            artifact = build_public_factor_xlsx_template()
+        else:
+            raise ValueError("template format must be csv or xlsx")
+        return {
+            "filename": artifact.filename,
+            "media_type": artifact.media_type,
+            "content": artifact.content,
+        }
+
+    def create_external_factor_local_file_upload(self, request: Any) -> dict[str, Any]:
+        payload = dict(_as_mapping(request))
+        source_id = self._normalize_external_source_id(payload.get("source_id"))
+        dataset_key = str(payload.get("dataset_key") or "").strip()
+        filename = str(payload.get("filename") or "").strip()
+        if not source_id or not dataset_key or not filename:
+            raise ValueError("source_id, dataset_key, and filename are required")
+        source, dataset = self._external_factor_source_and_dataset(source_id, dataset_key)
+        if self._external_source_access_policy(source) == "REFERENCE_ONLY":
+            raise ValueError("reference-only sources cannot create uploaded factor files")
+        content_text = str(payload.get("content_text") or "")
+        analysis = analyze_public_factor_upload_text(content_text, filename=filename)
+        manifest = self._external_manifest_from_analysis(analysis, template_key=dataset_key)
+        mapping_rows = self._external_mapping_rows_from_analysis(analysis)
+        file_id = f"extfile_{uuid4().hex[:12]}"
+        created_at = iso_now()
+        with self.storage.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO external_factor_uploaded_files (
+                    id, source_id, dataset_key, filename, content_type, sha256,
+                    content_text, manifest_json, mapping_rows_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    file_id,
+                    source_id,
+                    dataset_key,
+                    filename,
+                    payload.get("content_type"),
+                    manifest.get("file_sha256") or "",
+                    content_text,
+                    dumps(manifest),
+                    dumps(mapping_rows),
+                    created_at,
+                ),
+            )
+        return {
+            "file_id": file_id,
+            "source_id": source_id,
+            "dataset_key": dataset_key,
+            "filename": filename,
+            "manifest": manifest,
+            "mapping_rows": mapping_rows,
+            "created_at": created_at,
+            "source_name": source.get("label") or source_id,
+            "dataset_name": dataset.get("label") or dataset_key,
+        }
+
+    def create_external_factor_import_job(self, request: Any) -> dict[str, Any]:
+        payload = dict(_as_mapping(request))
+        source_id = self._normalize_external_source_id(payload.get("source_id"))
+        dataset_key = str(payload.get("dataset_key") or "").strip()
+        import_mode = str(payload.get("import_mode") or "LOCAL_FILE").strip().upper()
+        if not source_id or not dataset_key:
+            raise ValueError("source_id and dataset_key are required")
+        source, dataset = self._external_factor_source_and_dataset(source_id, dataset_key)
+        if self._external_source_access_policy(source) == "REFERENCE_ONLY":
+            raise ValueError("reference-only sources cannot create import jobs")
+        if import_mode == "REFERENCE_ONLY":
+            raise ValueError("reference-only mode cannot create import jobs")
+        file_id = str(payload.get("file_id") or "").strip()
+        file_row = self._external_uploaded_file_row(file_id) if file_id else None
+        if import_mode == "LOCAL_FILE" and not file_row:
+            raise ValueError("file_id is required for local file import precheck")
+        if file_row:
+            manifest = loads(file_row.get("manifest_json"), {})
+            mapping_rows = loads(file_row.get("mapping_rows_json"), [])
+        else:
+            manifest = self._external_manifest_from_source_dataset(dataset, template_key=dataset_key)
+            mapping_rows = self._external_mapping_rows_from_dataset(dataset)
+        job_id = f"extimp_{uuid4().hex[:12]}"
+        now = iso_now()
+        review_status = self._external_review_status_from_mapping(mapping_rows)
+        frequency = self._external_frequency(dataset.get("frequency"), fallback=payload.get("frequency"))
+        risk_flags = self._external_import_risk_flags(source, manifest, mapping_rows)
+        next_actions = self._external_import_next_actions(review_status)
+        artifact_paths = {
+            "uploaded_file_id": file_id or None,
+            "raw_file_ref": f"external_factor_uploaded_files/{file_id}" if file_id else None,
+            "manifest_ref": f"external_factor_import_manifests/{job_id}" if file_id else None,
+            "template_ref": str(dataset.get("dataset_id") or dataset_key),
+        }
+        with self.storage.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO external_factor_import_jobs (
+                    id, source_id, dataset_key, source_name, dataset_name, import_mode,
+                    status, review_status, frequency, as_of_date, file_id, manifest_json,
+                    mapping_rows_json, artifact_paths_json, risk_flags_json, next_actions_json,
+                    created_by, precheck_notes, created_at, updated_at, submitted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    source_id,
+                    dataset_key,
+                    str(source.get("label") or source_id),
+                    str(dataset.get("label") or dataset_key),
+                    import_mode,
+                    "REVIEW_GATED",
+                    review_status,
+                    frequency,
+                    payload.get("as_of_date"),
+                    file_id or None,
+                    dumps(manifest),
+                    dumps(mapping_rows),
+                    dumps(artifact_paths),
+                    dumps(risk_flags),
+                    dumps(next_actions),
+                    str(payload.get("created_by") or "researcher"),
+                    payload.get("precheck_notes"),
+                    now,
+                    now,
+                    None,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO external_factor_import_manifests (
+                    id, job_id, source_id, dataset_key, file_id, sha256,
+                    row_count, column_count, manifest_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"extmanifest_{uuid4().hex[:12]}",
+                    job_id,
+                    source_id,
+                    dataset_key,
+                    file_id or None,
+                    str(manifest.get("file_sha256") or ""),
+                    int(manifest.get("row_count") or 0),
+                    int(manifest.get("column_count") or 0),
+                    dumps(manifest),
+                    now,
+                ),
+            )
+        return self.get_external_factor_import_job(job_id)
+
+    def get_external_factor_import_job(self, job_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one("SELECT * FROM external_factor_import_jobs WHERE id = ?", (str(job_id),))
+        if not row:
+            raise KeyError(f"External factor import job not found: {job_id}")
+        return self._external_import_job_from_row(row)
+
+    def update_external_factor_import_mapping(self, job_id: str, request: Any) -> dict[str, Any]:
+        payload = dict(_as_mapping(request))
+        row = self.storage.fetch_one("SELECT * FROM external_factor_import_jobs WHERE id = ?", (str(job_id),))
+        if not row:
+            raise KeyError(f"External factor import job not found: {job_id}")
+        mapping_rows = payload.get("mapping_rows")
+        if not isinstance(mapping_rows, list):
+            raise ValueError("mapping_rows must be a list")
+        review_status = str(payload.get("review_status") or self._external_review_status_from_mapping(mapping_rows))
+        risk_flags = self._external_import_risk_flags(
+            {"license_mode": row.get("source_id"), "status": ""},
+            loads(row.get("manifest_json"), {}),
+            mapping_rows,
+        )
+        next_actions = self._external_import_next_actions(review_status)
+        now = iso_now()
+        self.storage.execute(
+            """
+            UPDATE external_factor_import_jobs
+            SET mapping_rows_json = ?, review_status = ?, risk_flags_json = ?,
+                next_actions_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (dumps(mapping_rows), review_status, dumps(risk_flags), dumps(next_actions), now, str(job_id)),
+        )
+        return self.get_external_factor_import_job(job_id)
+
+    def submit_external_factor_import_review(self, job_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one("SELECT * FROM external_factor_import_jobs WHERE id = ?", (str(job_id),))
+        if not row:
+            raise KeyError(f"External factor import job not found: {job_id}")
+        mapping_rows = loads(row.get("mapping_rows_json"), [])
+        if self._external_review_status_from_mapping(mapping_rows) == "NEEDS_MAPPING":
+            raise ValueError("semantic mapping must cover date, factor_id, and value before review submission")
+        now = iso_now()
+        self.storage.execute(
+            """
+            UPDATE external_factor_import_jobs
+            SET status = 'REVIEW_SUBMITTED', review_status = 'SUBMITTED',
+                submitted_at = ?, updated_at = ?,
+                next_actions_json = ?
+            WHERE id = ?
+            """,
+            (
+                now,
+                now,
+                dumps(["await_d2_review", "quarantine_intake_after_approval"]),
+                str(job_id),
+            ),
+        )
+        return self.get_external_factor_import_job(job_id)
+
+    @staticmethod
+    def _normalize_external_source_id(value: Any) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+        aliases = {
+            "fama_french_data_library": "fama_french",
+            "fama_french": "fama_french",
+            "aqr_data_sets": "aqr",
+            "aqr_data_library": "aqr",
+            "msci_facs": "msci_facs",
+            "portfolio_visualizer": "portfolio_visualizer",
+        }
+        return aliases.get(normalized, normalized)
+
+    @staticmethod
+    def _external_frequency(value: Any, *, fallback: Any = None) -> str:
+        raw = str(fallback or value or "monthly").strip().upper()
+        if raw in {"DAILY", "MONTHLY", "QUARTERLY", "ANNUAL"}:
+            return raw
+        return "MIXED"
+
+    @staticmethod
+    def _external_dataset_status(dataset: Mapping[str, Any]) -> str:
+        availability = str(dataset.get("availability") or "").lower()
+        if "reference" in availability:
+            return "REFERENCE_ONLY"
+        if "license" in availability or "manual" in availability:
+            return "MANUAL_REQUIRED"
+        return "READY"
+
+    @staticmethod
+    def _external_source_access_policy(source: Mapping[str, Any]) -> str:
+        license_mode = str(source.get("license_mode") or "").lower()
+        status = str(source.get("status") or "").lower()
+        if "reference" in license_mode or "reference" in status:
+            return "REFERENCE_ONLY"
+        if "license" in license_mode:
+            return "LICENSE_REQUIRED"
+        if "manual" in license_mode or "manual" in status:
+            return "MANUAL_UPLOAD"
+        return "PUBLIC_DOWNLOAD"
+
+    @staticmethod
+    def _external_source_type(source: Mapping[str, Any]) -> str:
+        source_id = str(source.get("source_id") or "")
+        if source_id == "fama_french":
+            return "ACADEMIC_LIBRARY"
+        if source_id == "aqr":
+            return "INSTITUTIONAL_LIBRARY"
+        if source_id == "portfolio_visualizer":
+            return "BACKTEST_TOOL"
+        if source_id == "msci_facs":
+            return "REFERENCE_TOOL"
+        return "LOCAL_FILE"
+
+    def _external_factor_source_and_dataset(
+        self,
+        source_id: str,
+        dataset_key: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        source = get_public_factor_source(source_id)
+        if not source:
+            raise ValueError(f"unknown external factor source: {source_id}")
+        for dataset in source.get("datasets") or []:
+            if str(dataset.get("dataset_id") or "") == dataset_key:
+                return source, dict(dataset)
+        raise ValueError(f"unknown external factor dataset: {dataset_key}")
+
+    def _external_factor_source_to_api(self, source: Mapping[str, Any]) -> dict[str, Any]:
+        access_policy = self._external_source_access_policy(source)
+        supported_import_modes = ["REFERENCE_ONLY"] if access_policy == "REFERENCE_ONLY" else ["LOCAL_FILE"]
+        if access_policy == "PUBLIC_DOWNLOAD":
+            supported_import_modes.insert(0, "AUTO_DOWNLOAD")
+        return {
+            "id": str(source.get("source_id") or ""),
+            "name": str(source.get("label") or ""),
+            "short_name": str(source.get("label") or ""),
+            "source_type": self._external_source_type(source),
+            "access_policy": access_policy,
+            "homepage_url": None,
+            "license_note": str(source.get("license_mode") or ""),
+            "sync_hint": str(source.get("intake_policy") or ""),
+            "datasets": [
+                {
+                    "key": str(dataset.get("dataset_id") or ""),
+                    "name": str(dataset.get("label") or ""),
+                    "description": "Public factor source dataset",
+                    "frequency": self._external_frequency(dataset.get("frequency")),
+                    "status": self._external_dataset_status(dataset),
+                    "factor_family": self._external_dataset_family(dataset),
+                    "default_usage": self._external_dataset_usage(dataset),
+                    "recommended_system_family": self._external_dataset_system_family(dataset),
+                    "template_key": str(dataset.get("dataset_id") or ""),
+                    "fields": ["date", "factor_id", "factor_name", "symbol", "value", "frequency", "source_dataset", "region", "notes"],
+                    "update_lag_days": 1 if str(dataset.get("frequency") or "").lower() == "daily" else 30,
+                    "governance_notes": list(dataset.get("review_notes") or []),
+                }
+                for dataset in source.get("datasets") or []
+            ],
+            "supported_import_modes": supported_import_modes,
+            "tags": [access_policy.lower(), self._external_source_type(source).lower()],
+        }
+
+    @staticmethod
+    def _external_dataset_family(dataset: Mapping[str, Any]) -> str:
+        dataset_id = str(dataset.get("dataset_id") or "").lower()
+        if "fama_french" in dataset_id:
+            return "style_premia"
+        if "aqr" in dataset_id:
+            return "quality_momentum"
+        return "reference"
+
+    @staticmethod
+    def _external_dataset_usage(dataset: Mapping[str, Any]) -> str:
+        dataset_id = str(dataset.get("dataset_id") or "").lower()
+        if "fama_french" in dataset_id:
+            return "F2 style baseline for value, size, profitability, and investment sleeves."
+        if "aqr" in dataset_id:
+            return "Manual benchmark for quality-minus-junk and time-series momentum research."
+        return "Reference-only taxonomy and parameter calibration."
+
+    @staticmethod
+    def _external_dataset_system_family(dataset: Mapping[str, Any]) -> str:
+        dataset_id = str(dataset.get("dataset_id") or "").lower()
+        if "fama_french" in dataset_id:
+            return "valuation_quality"
+        if "aqr" in dataset_id:
+            return "quality_risk_adjusted"
+        if "msci" in dataset_id:
+            return "style_exposure_reference"
+        return "factor_regression_reference"
+
+    def _external_uploaded_file_row(self, file_id: str) -> dict[str, Any] | None:
+        if not file_id:
+            return None
+        return self.storage.fetch_one("SELECT * FROM external_factor_uploaded_files WHERE id = ?", (file_id,))
+
+    @staticmethod
+    def _external_manifest_from_analysis(analysis: Mapping[str, Any], *, template_key: str) -> dict[str, Any]:
+        columns = [str(column) for column in analysis.get("columns") or []]
+        precheck = analysis.get("precheck") if isinstance(analysis.get("precheck"), Mapping) else {}
+        warnings = [
+            f"missing_required_field:{field}"
+            for field in precheck.get("missing_required_fields") or []
+        ]
+        row_count = int(analysis.get("row_count") or 0)
+        if row_count <= 0:
+            warnings.append("empty_or_unparsed_file")
+        return {
+            "row_count": row_count,
+            "column_count": len(columns),
+            "columns": columns,
+            "sample_rows": [dict(row) for row in analysis.get("sample_rows") or [] if isinstance(row, Mapping)],
+            "file_sha256": str(analysis.get("sha256") or ""),
+            "template_key": template_key,
+            "parsing_status": "READY" if row_count > 0 and columns else "NEEDS_DATA",
+            "warnings": warnings,
+        }
+
+    @staticmethod
+    def _external_manifest_from_source_dataset(
+        dataset: Mapping[str, Any],
+        *,
+        template_key: str,
+    ) -> dict[str, Any]:
+        columns = [
+            str(field)
+            for field in (dataset.get("fields") or TEMPLATE_COLUMNS)
+            if str(field).strip()
+        ]
+        return {
+            "row_count": 0,
+            "column_count": len(columns),
+            "columns": columns,
+            "sample_rows": [],
+            "file_sha256": "",
+            "template_key": template_key,
+            "parsing_status": "SOURCE_MANIFEST_READY" if columns else "NEEDS_DATA",
+            "warnings": ["source_file_not_materialized"] if columns else ["source_manifest_missing_fields"],
+        }
+
+    @staticmethod
+    def _external_mapping_rows_from_analysis(analysis: Mapping[str, Any]) -> list[dict[str, Any]]:
+        suggestions = analysis.get("field_mapping_suggestions")
+        if not isinstance(suggestions, Mapping):
+            suggestions = {}
+        roles = {
+            "date": "time_index",
+            "factor_id": "factor_identity",
+            "factor_name": "display_name",
+            "symbol": "security_identifier",
+            "value": "factor_value",
+            "frequency": "periodicity",
+            "source_dataset": "lineage",
+            "region": "market_scope",
+            "notes": "audit_note",
+        }
+        rows: list[dict[str, Any]] = []
+        for target_field in roles:
+            source_field = suggestions.get(target_field)
+            matched = bool(source_field)
+            rows.append(
+                {
+                    "source_field": str(source_field or target_field),
+                    "target_field": target_field,
+                    "semantic_role": roles[target_field],
+                    "transform": "standard_rank" if target_field == "value" else "identity",
+                    "data_type": "float" if target_field == "value" else "string",
+                    "required": target_field in {"date", "factor_id", "value"},
+                    "confidence": 0.9 if matched else 0.2,
+                    "notes": "auto_suggested" if matched else "needs_operator_mapping",
+                }
+            )
+        return rows
+
+    @classmethod
+    def _external_mapping_rows_from_dataset(cls, dataset: Mapping[str, Any]) -> list[dict[str, Any]]:
+        columns = {str(field) for field in (dataset.get("fields") or TEMPLATE_COLUMNS)}
+        suggestions = {field: (field if field in columns else None) for field in (
+            "date",
+            "factor_id",
+            "factor_name",
+            "symbol",
+            "value",
+            "frequency",
+            "source_dataset",
+            "region",
+            "notes",
+        )}
+        return cls._external_mapping_rows_from_analysis({"field_mapping_suggestions": suggestions})
+
+    @staticmethod
+    def _external_review_status_from_mapping(mapping_rows: Sequence[Any]) -> str:
+        required = {"date", "factor_id", "value"}
+        covered: set[str] = set()
+        for row in mapping_rows or []:
+            if not isinstance(row, Mapping):
+                continue
+            target = str(row.get("target_field") or "").strip()
+            source = str(row.get("source_field") or "").strip()
+            try:
+                confidence = float(row.get("confidence") or 0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            if target in required and source and confidence >= 0.5:
+                covered.add(target)
+        return "READY_FOR_REVIEW" if required.issubset(covered) else "NEEDS_MAPPING"
+
+    @staticmethod
+    def _external_import_risk_flags(
+        source: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+        mapping_rows: Sequence[Any],
+    ) -> list[str]:
+        flags: list[str] = []
+        parsing_status = str(manifest.get("parsing_status") or "")
+        if int(manifest.get("row_count") or 0) <= 0 and parsing_status != "SOURCE_MANIFEST_READY":
+            flags.append("EMPTY_OR_UNPARSED_FILE")
+        if manifest.get("warnings"):
+            flags.extend(str(item).upper() for item in manifest.get("warnings") or [])
+        if any(str(row.get("notes") or "") == "needs_operator_mapping" for row in mapping_rows if isinstance(row, Mapping)):
+            flags.append("MAPPING_REVIEW_REQUIRED")
+        if "license" in str(source.get("license_mode") or "").lower():
+            flags.append("LICENSE_ATTESTATION_REQUIRED")
+        return list(dict.fromkeys(flags))
+
+    @staticmethod
+    def _external_import_next_actions(review_status: str) -> list[str]:
+        if review_status == "READY_FOR_REVIEW":
+            return ["inspect_manifest", "submit_review"]
+        if review_status == "SUBMITTED":
+            return ["await_d2_review", "quarantine_intake_after_approval"]
+        return ["complete_semantic_mapping", "inspect_manifest"]
+
+    def _external_import_job_from_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        manifest = loads(row.get("manifest_json"), {})
+        mapping_rows = loads(row.get("mapping_rows_json"), [])
+        artifact_paths = loads(row.get("artifact_paths_json"), {})
+        risk_flags = loads(row.get("risk_flags_json"), [])
+        next_actions = loads(row.get("next_actions_json"), [])
+        return {
+            "id": row.get("id"),
+            "source_id": row.get("source_id"),
+            "dataset_key": row.get("dataset_key"),
+            "source_name": row.get("source_name") or "",
+            "dataset_name": row.get("dataset_name") or "",
+            "import_mode": row.get("import_mode") or "LOCAL_FILE",
+            "status": row.get("status") or "REVIEW_GATED",
+            "review_status": row.get("review_status") or "PENDING_REVIEW",
+            "frequency": row.get("frequency") or "MONTHLY",
+            "as_of_date": row.get("as_of_date"),
+            "created_by": row.get("created_by") or "researcher",
+            "created_at": row.get("created_at") or iso_now(),
+            "updated_at": row.get("updated_at") or iso_now(),
+            "submitted_at": row.get("submitted_at"),
+            "manifest": manifest,
+            "mapping_rows": mapping_rows,
+            "artifact_paths": artifact_paths,
+            "risk_flags": risk_flags,
+            "next_actions": next_actions,
+            "governance_gate": "REVIEW_BEFORE_QUARANTINE",
+            "job_projection": build_public_factor_import_job_projection(
+                job_id=str(row.get("id") or ""),
+                source_id=str(row.get("source_id") or ""),
+                filename=str(artifact_paths.get("raw_file_ref") or row.get("id") or ""),
+                sha256=str(manifest.get("file_sha256") or ""),
+                row_count=int(manifest.get("row_count") or 0),
+                columns=[str(column) for column in manifest.get("columns") or []],
+                field_mapping={
+                    str(item.get("target_field") or ""): str(item.get("source_field") or "")
+                    for item in mapping_rows
+                    if isinstance(item, Mapping) and item.get("target_field")
+                },
+                review_submitted=str(row.get("review_status") or "").upper() == "SUBMITTED",
+            ),
+        }
+
     def create_research_waiver(self, request: Any) -> dict[str, Any]:
         payload = dict(_as_mapping(request))
         overview = self._pit_overview()
@@ -7705,6 +8260,41 @@ class FactorResearchService:
             )
         return series
 
+    @staticmethod
+    def _ic_series_matches_projection(
+        observed: Sequence[Mapping[str, Any]],
+        projected: Sequence[Mapping[str, Any]],
+    ) -> bool:
+        if len(observed) != len(projected) or not observed:
+            return False
+        for left, right in zip(observed, projected):
+            if str(left.get("date") or left.get("as_of") or "") != str(right.get("date") or right.get("as_of") or ""):
+                return False
+            left_value = _coerce_float(left.get("rank_ic") if left.get("rank_ic") is not None else left.get("ic"), math.nan)
+            right_value = _coerce_float(right.get("rank_ic") if right.get("rank_ic") is not None else right.get("ic"), math.nan)
+            if math.isnan(left_value) or math.isnan(right_value):
+                return False
+            if abs(left_value - right_value) > 0.000001:
+                return False
+        return True
+
+    @staticmethod
+    def _auto_mined_summary_uses_publish_projection(summary: Mapping[str, Any]) -> bool:
+        run_id = str(summary.get("run_id") or "").strip()
+        data_lineage = summary.get("data_lineage") if isinstance(summary.get("data_lineage"), Mapping) else {}
+        quarantine = summary.get("quarantine") if isinstance(summary.get("quarantine"), Mapping) else {}
+        return (
+            run_id.endswith("_publish")
+            or str((data_lineage or {}).get("kind") or "").upper() == "QUARANTINE_PUBLISH_SUMMARY"
+            or bool(quarantine.get("candidate_id"))
+        )
+
+    @staticmethod
+    def _mark_synthetic_ic_series(summary: dict[str, Any]) -> None:
+        summary.setdefault("ic_series_source", "auto_mined_rank_ic_projection")
+        summary.setdefault("ic_series_evidence_quality", "synthetic_projection")
+        summary.setdefault("ic_series_generated", True)
+
     def _auto_mined_group_returns(self, summary: Mapping[str, Any]) -> list[dict[str, Any]]:
         existing = summary.get("group_returns")
         if isinstance(existing, list) and existing:
@@ -7769,9 +8359,21 @@ class FactorResearchService:
             return dict(summary)
         hydrated = dict(summary)
         completed_at = factor.get("latest_diagnostic_completed_at") or hydrated.get("completed_at")
+        existing_ic_series = [
+            dict(item)
+            for item in (hydrated.get("ic_series") if isinstance(hydrated.get("ic_series"), list) else [])
+            if isinstance(item, Mapping)
+        ]
         ic_series = self._auto_mined_diagnostic_ic_series(hydrated, completed_at=completed_at)
-        if ic_series and not hydrated.get("ic_series"):
+        if ic_series and not existing_ic_series:
             hydrated["ic_series"] = ic_series
+            self._mark_synthetic_ic_series(hydrated)
+        elif ic_series and self._auto_mined_summary_uses_publish_projection(hydrated):
+            projection_input = dict(hydrated)
+            projection_input.pop("ic_series", None)
+            projected = self._auto_mined_diagnostic_ic_series(projection_input, completed_at=completed_at)
+            if projected and self._ic_series_matches_projection(existing_ic_series, projected):
+                self._mark_synthetic_ic_series(hydrated)
         rank_values = [
             _coerce_float(item.get("rank_ic"))
             for item in ic_series
@@ -8529,6 +9131,16 @@ class FactorResearchService:
         left_series = self._rank_ic_series_by_date(left_summary)
         right_series = self._rank_ic_series_by_date(right_summary)
         shared_dates = sorted(set(left_series).intersection(right_series))
+        left_quality = self._ic_series_evidence_quality(left_summary)
+        right_quality = self._ic_series_evidence_quality(right_summary)
+        if left_quality != "measured" or right_quality != "measured":
+            return {
+                "eligible": False,
+                "reason": "synthetic_rank_ic_series_not_prune_evidence",
+                "sample_count": len(shared_dates),
+                "left_evidence_quality": left_quality,
+                "right_evidence_quality": right_quality,
+            }
         if len(shared_dates) < FACTOR_PRUNE_MIN_SERIES_OVERLAP:
             return {
                 "eligible": False,
@@ -8553,6 +9165,43 @@ class FactorResearchService:
             "sample_count": len(shared_dates),
             "as_of": shared_dates[-1],
         }
+
+    def _factor_pair_prune_correlation_evidence(
+        self,
+        left: Mapping[str, Any],
+        right: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        measured = self._factor_measured_pair_correlation(left, right)
+        if _coerce_float(measured.get("correlation")) > FACTOR_PRUNE_CORRELATION_THRESHOLD:
+            return measured
+        left_source = str(left.get("source") or "").upper()
+        right_source = str(right.get("source") or "").upper()
+        if left_source == "AUTO_MINED" and right_source == "AUTO_MINED" and self._factor_same_prune_cluster(left, right):
+            correlation = self._factor_pair_correlation(left, right)
+            if correlation > FACTOR_PRUNE_CORRELATION_THRESHOLD:
+                return {
+                    "eligible": True,
+                    "correlation": _safe_round(correlation, 4) or 0.0,
+                    "evidence_source": "FACTOR_LIBRARY_HEATMAP_PROXY",
+                    "evidence_quality": "library_projection",
+                    "method": "factor_library_cluster_projection",
+                    "sample_count": measured.get("sample_count"),
+                    "as_of": measured.get("as_of"),
+                    "measured_pair": dict(measured),
+                }
+        return measured
+
+    @staticmethod
+    def _ic_series_evidence_quality(summary: Mapping[str, Any]) -> str:
+        quality = str(summary.get("ic_series_evidence_quality") or "").strip().lower()
+        source = str(summary.get("ic_series_source") or "").strip().lower()
+        if (
+            quality in {"synthetic", "synthetic_projection", "projected", "projection"}
+            or source in {"auto_mined_rank_ic_projection", "synthetic_projection"}
+            or bool(summary.get("ic_series_generated"))
+        ):
+            return "synthetic_projection"
+        return "measured"
 
     @staticmethod
     def _rank_ic_series_by_date(summary: Mapping[str, Any]) -> dict[str, float]:
@@ -8643,7 +9292,7 @@ class FactorResearchService:
                     continue
                 if not self._factor_same_prune_cluster(factor, peer):
                     continue
-                evidence = self._factor_measured_pair_correlation(factor, peer)
+                evidence = self._factor_pair_prune_correlation_evidence(factor, peer)
                 correlation = _coerce_float(evidence.get("correlation"))
                 if correlation > FACTOR_PRUNE_CORRELATION_THRESHOLD:
                     nodes.append(
@@ -8700,7 +9349,7 @@ class FactorResearchService:
                         contender_is_better = contender_score > peer_score or (
                             contender_score == peer_score and contender_factor_id < peer_id
                         )
-                        contender_evidence = self._factor_measured_pair_correlation(peer, contender)
+                        contender_evidence = self._factor_pair_prune_correlation_evidence(peer, contender)
                         if (
                             contender_is_better
                             and _coerce_float(contender_evidence.get("correlation"))

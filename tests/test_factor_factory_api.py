@@ -637,10 +637,9 @@ def test_factor_factory_publishable_applies_online_prune_evidence_to_semantic_du
                     "command": "PRUNE",
                     "factor_ids": ["s_f2_mom_ret_21d_px"],
                     "criteria": {
-                        "correlation": 1.0,
+                        "correlation": 0.94,
                         "threshold": 0.9,
-                        "evidence_source": "MEASURED_DIAGNOSTIC_IC_SERIES",
-                        "sample_count": 12,
+                        "evidence_source": "FACTOR_LIBRARY_HEATMAP_PROXY",
                     },
                     "offline_detail": {
                         "comparison": {
@@ -708,6 +707,98 @@ def test_factor_factory_publishable_applies_online_prune_evidence_to_semantic_du
     assert by_status["fq_semantic_current"]["publish_status"] == "BLOCKED"
     assert by_status["fq_threshold_survivor"]["status"] == "PASSED"
     assert by_status["fq_threshold_survivor"]["publish_status"] == "ELIGIBLE"
+
+
+def test_factor_factory_publishable_prunes_same_cluster_heatmap_group() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-factory-publishable-heatmap-group"))
+    service = client.app.state.service
+    storage = service.storage
+    source_job_id = "mine_publishable_heatmap_group"
+    now = "2026-05-22T09:30:00Z"
+
+    def insert_candidate(candidate_id: str, expression: str, source_factor_id: str, score: float) -> None:
+        metrics = {
+            "rank_ic": 0.05,
+            "ir": score * 10,
+            "score": score,
+            "fitness_score": score,
+            "target_layer": "L2",
+            "source_factor_ids": [source_factor_id],
+            "raw_f2": True,
+            "refined_f2": True,
+            "wnzt_complete": True,
+            "pipeline_version": "raw_refined_f2_v2",
+            "raw_expression": expression,
+            "refined_expression": expression,
+        }
+        storage.insert_json_row(
+            "factor_quarantine_candidates",
+            {
+                "id": candidate_id,
+                "mining_candidate_id": candidate_id.replace("fq_", "rawf2_"),
+                "source_mining_job_id": source_job_id,
+                "expression": expression,
+                "status": "PASSED",
+                "publish_status": "ELIGIBLE",
+                "gate_summary_json": dumps({"redundancy_pruning": "PASSED"}),
+                "cluster_id": f"cluster_{candidate_id}",
+                "candidate_metrics_json": dumps(metrics),
+                "failure_samples_json": dumps([]),
+                "pit_evidence_json": dumps({"status": "READY"}),
+                "publish_eligibility_json": dumps({"status": "ELIGIBLE"}),
+                "target_factor_id": None,
+                "created_at": now,
+                "updated_at": now,
+                "published_at": None,
+                "rejected_reason": None,
+            },
+        )
+
+    insert_candidate(
+        "fq_smooth_return_21d",
+        'ZScore(Neutralize(Winsorize(TS_Rank(TS_Return(f1_return_21d_base, 3), 3), method="MAD"), by="industry,market_cap"))',
+        "f1_return_21d_base",
+        0.061,
+    )
+    insert_candidate(
+        "fq_smooth_return_current",
+        'ZScore(Neutralize(Winsorize(TS_Rank(TS_Return(f1_price_close, 3), 5), method="MAD"), by="industry,market_cap"))',
+        "f1_price_close",
+        0.060,
+    )
+    insert_candidate(
+        "fq_smooth_return_1d",
+        'ZScore(Neutralize(Winsorize(TS_Rank(TS_Return(f1_return_1d_base, 21), 5), method="MAD"), by="industry,market_cap"))',
+        "f1_return_1d_base",
+        0.059,
+    )
+
+    publishable = service._factor_factory_publishable_factors(  # noqa: SLF001
+        source_mining_job_id=source_job_id,
+        fallback_items=[],
+    )
+
+    assert [row["candidate_id"] for row in publishable] == ["fq_smooth_return_21d"]
+
+    pruning = service._apply_factor_factory_redundancy_pruning(source_mining_job_id=source_job_id)  # noqa: SLF001
+    assert pruning["kept"] == 1
+    assert pruning["pruned"] == 2
+
+    rows = storage.fetch_all(
+        """
+        SELECT id, status, publish_status, candidate_metrics_json, gate_summary_json
+        FROM factor_quarantine_candidates
+        WHERE source_mining_job_id = ?
+        """,
+        (source_job_id,),
+    )
+    by_status = {row["id"]: row for row in rows}
+    assert by_status["fq_smooth_return_21d"]["status"] == "PASSED"
+    assert by_status["fq_smooth_return_current"]["status"] == "REJECTED"
+    assert by_status["fq_smooth_return_1d"]["publish_status"] == "BLOCKED"
+    current_gate = json.loads(by_status["fq_smooth_return_current"]["gate_summary_json"])
+    assert current_gate["redundancy_pruning"] == "FAILED"
+    assert current_gate["redundancy_kept_candidate_id"] == "fq_smooth_return_21d"
 
 
 def test_factor_factory_run_now_does_not_enable_daily_automation() -> None:

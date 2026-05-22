@@ -940,6 +940,9 @@ def test_fundamental_gap_policy_downgrades_non_raw_f2_symbols(tmp_path):
     assert policy["logical_coverage_pct"] == 100.0
     assert fundamental_snapshot["metadata"]["effective_covered_symbol_count"] == 3
     assert layers["l2_fundamental_data"]["status"] == "READY"
+    l2_metrics = {item["label"]: item["value"] for item in layers["l2_fundamental_data"]["metrics"]}
+    assert l2_metrics["覆盖率"] == "100.0%"
+    assert layers["l2_fundamental_data"]["metrics"][0]["detail"] == "Raw F2 1/3"
 
 
 def test_phase2_fundamental_batches_merge_without_replacing_prior_symbols(tmp_path, monkeypatch):
@@ -1489,6 +1492,43 @@ def test_snapshot_overview_cache_signature_tracks_provider_env_status(tmp_path, 
     )
 
     assert "TIINGO_API_TOKEN" not in configured_price_layer["missing_env_vars"]
+
+
+def test_snapshot_provider_env_signature_tracks_local_path_sources(monkeypatch):
+    monkeypatch.delenv("CRSP_DATA_PATH", raising=False)
+    monkeypatch.delenv("NORGATE_DATA_PATH", raising=False)
+    missing_signature = real_service_module._snapshot_provider_env_signature()
+
+    monkeypatch.setenv("CRSP_DATA_PATH", "C:\\licensed\\crsp")
+    monkeypatch.setenv("NORGATE_DATA_PATH", "C:\\licensed\\norgate")
+    configured_signature = real_service_module._snapshot_provider_env_signature()
+
+    assert missing_signature != configured_signature
+    assert "CRSP_DATA_PATH:1" in configured_signature
+    assert "NORGATE_DATA_PATH:1" in configured_signature
+
+
+def test_snapshot_provider_registry_reports_configured_local_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("CRSP_DATA_PATH", str(tmp_path / "crsp-export"))
+    monkeypatch.setenv("NORGATE_DATA_PATH", str(tmp_path / "norgate-export"))
+    client, _ = create_test_client(tmp_path)
+
+    registry = assert_ok(client.get("/data-snapshots/provider-registry"))
+
+    crsp = next(item for item in registry["items"] if item["provider_id"] == "crsp_us_stock")
+    norgate = next(item for item in registry["items"] if item["provider_id"] == "norgate_us_equities")
+    assert crsp["credential_requirements"]["configured"] is True
+    assert crsp["credential_requirements"]["configured_env_vars"] == ["CRSP_DATA_PATH"]
+    assert crsp["credential_requirements"]["missing_env_vars"] == []
+    assert crsp["credential_ready"] is True
+    assert crsp["readiness_status"] == "disabled"
+    assert crsp["trust_profile"]["credential_status"] == "configured"
+    assert norgate["credential_requirements"]["configured"] is True
+    assert norgate["credential_requirements"]["configured_env_vars"] == ["NORGATE_DATA_PATH"]
+    assert norgate["credential_requirements"]["missing_env_vars"] == []
+    assert norgate["credential_ready"] is True
+    assert norgate["readiness_status"] == "disabled"
+    assert norgate["trust_profile"]["credential_status"] == "configured"
 
 
 def test_snapshot_trust_summary_prefers_live_provider_state_over_static_key_prompts():

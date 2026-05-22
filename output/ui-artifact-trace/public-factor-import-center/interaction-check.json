@@ -1,0 +1,225 @@
+{
+  "url": "http://127.0.0.1:4173/?v=public-factor-import-interactions#/factors/imports",
+  "before": {
+    "entryCards": [
+      {
+        "text": "入口 A · 公开源预检选择 French 或 AQR 等来源，直接发起预检，自动获取文件并生成 manifest。",
+        "pressed": "true",
+        "tag": "BUTTON",
+        "classes": [
+          "pfic-entry-card",
+          "pfic-entry-card-active"
+        ]
+      },
+      {
+        "text": "入口 B · 本地文件导入先下载模板并上传文件，再创建预检，随后进入同一套映射与复核链路。",
+        "pressed": "false",
+        "tag": "BUTTON",
+        "classes": [
+          "pfic-entry-card"
+        ]
+      }
+    ],
+    "sourceCards": [
+      {
+        "text": "French-Data Library学术基准可自动导入日频 / 月频FF3、FF5、Momentum，默认进入估值、质量与基准模板。",
+        "pressed": "true",
+        "tag": "BUTTON",
+        "classes": [
+          "pfic-source-card",
+          "pfic-source-card-ready",
+          "pfic-source-card-selected"
+        ]
+      },
+      {
+        "text": "AQR Data Library许可待确认手动上传日频 / 月频QMJ 与 TSMOM 先作为风险调整与动量参数模板。",
+        "pressed": "false",
+        "tag": "BUTTON",
+        "classes": [
+          "pfic-source-card",
+          "pfic-source-card-warning"
+        ]
+      },
+      {
+        "text": "MSCI FaCS参考源人工参考行业暴露用于 max_cap 与行业暴露上限，不生成自动下载作业。",
+        "pressed": "false",
+        "tag": "BUTTON",
+        "classes": [
+          "pfic-source-card",
+          "pfic-source-card-reference"
+        ]
+      },
+      {
+        "text": "Portfolio Visualizer参考源参数参考Factor Regression用于风格表现观察，模板生成需人工填写来源证据。",
+        "pressed": "false",
+        "tag": "BUTTON",
+        "classes": [
+          "pfic-source-card",
+          "pfic-source-card-reference"
+        ]
+      }
+    ],
+    "segmented": [
+      {
+        "text": "全部",
+        "pressed": "true",
+        "tag": "BUTTON",
+        "classes": []
+      },
+      {
+        "text": "可导入",
+        "pressed": "false",
+        "tag": "BUTTON",
+        "classes": []
+      },
+      {
+        "text": "待复核",
+        "pressed": "false",
+        "tag": "BUTTON",
+        "classes": []
+      },
+      {
+        "text": "参考",
+        "pressed": "false",
+        "tag": "BUTTON",
+        "classes": []
+      }
+    ],
+    "visibleDatasets": [
+      "Fama-French 5 Factors Daily",
+      "Fama-French Momentum",
+      "AQR QMJ Daily",
+      "AQR TSMOM Monthly"
+    ],
+    "mappingCards": [
+      "SMB",
+      "HML",
+      "RMW",
+      "CMA",
+      "MKT-RF"
+    ]
+  },
+  "after": {
+    "entryBClick": [
+      {
+        "text": "入口 A · 公开源预检选择 French 或 AQR 等来源，直接发起预检，自动获取文件并生成 manifest。",
+        "pressed": "false",
+        "tag": "BUTTON",
+        "classes": [
+          "pfic-entry-card"
+        ]
+      },
+      {
+        "text": "入口 B · 本地文件导入先下载模板并上传文件，再创建预检，随后进入同一套映射与复核链路。",
+        "pressed": "true",
+        "tag": "BUTTON",
+        "classes": [
+          "pfic-entry-card",
+          "pfic-entry-card-active"
+        ]
+      }
+    ],
+    "sourceAqrClick": {
+      "cards": [
+        {
+          "text": "French-Data Library学术基准可自动导入日频 / 月频FF3、FF5、Momentum，默认进入估值、质量与基准模板。",
+          "pressed": "false",
+          "tag": "BUTTON",
+          "classes": [
+            "pfic-source-card",
+            "pfic-source-card-ready"
+          ]
+        },
+        {
+          "text": "AQR Data Library许可待确认手动上传日频 / 月频QMJ 与 TSMOM 先作为风险调整与动量参数模板。",
+          "pressed": "true",
+          "tag": "BUTTON",
+          "classes": [
+            "pfic-source-card",
+            "pfic-source-card-warning",
+            "pfic-source-card-selected"
+          ]
+        },
+        {
+          "text": "MSCI FaCS参考源人工参考行业暴露用于 max_cap 与行业暴露上限，不生成自动下载作业。",
+          "pressed": "false",
+          "tag": "BUTTON",
+          "classes": [
+            "pfic-source-card",
+            "pfic-source-card-reference"
+          ]
+        },
+        {
+          "text": "Portfolio Visualizer参考源参数参考Factor Regression用于风格表现观察，模板生成需人工填写来源证据。",
+          "pressed": "false",
+          "tag": "BUTTON",
+          "classes": [
+            "pfic-source-card",
+            "pfic-source-card-reference"
+          ]
+        }
+      ],
+      "classes0": [
+        "pfic-source-card",
+        "pfic-source-card-ready"
+      ],
+      "classes1": [
+        "pfic-source-card",
+        "pfic-source-card-warning",
+        "pfic-source-card-selected"
+      ],
+      "activeDataset": "当前数据集：AQR QMJ Daily",
+      "mappingCards": [
+        "QMJ",
+        "PROF",
+        "GROWTH",
+        "SAFETY"
+      ]
+    },
+    "filterReviewClick": {
+      "segmented": [
+        {
+          "text": "全部",
+          "pressed": "false",
+          "tag": "BUTTON",
+          "classes": []
+        },
+        {
+          "text": "可导入",
+          "pressed": "false",
+          "tag": "BUTTON",
+          "classes": []
+        },
+        {
+          "text": "待复核",
+          "pressed": "true",
+          "tag": "BUTTON",
+          "classes": []
+        },
+        {
+          "text": "参考",
+          "pressed": "false",
+          "tag": "BUTTON",
+          "classes": []
+        }
+      ],
+      "visibleDatasets": [
+        "AQR QMJ Daily"
+      ]
+    },
+    "precheckDraftClick": {
+      "modalStillOpen": false,
+      "statusText": "预检草稿已保存，后续可继续补充 manifest 与边界说明。"
+    },
+    "localFileCancelClick": {
+      "modalStillOpen": false
+    },
+    "downloadManifestClick": {
+      "statusText": "manifest 下载已准备：imp_20260521_ff5_001"
+    },
+    "openArtifactClick": {
+      "statusText": "artifact 路径已确认：artifacts/factor-import/french/imp_20260521_ff5_001"
+    }
+  },
+  "events": []
+}

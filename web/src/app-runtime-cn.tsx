@@ -23,12 +23,19 @@ import type {
 import { ShellFrameCn } from './shell-frame-cn';
 import { formatFactorDisplayName } from './lib/factor-display';
 import type {
+  ApiExternalFactorImportJob,
+  ApiExternalFactorFrequency,
+  ApiExternalFactorSourceRegistryResponse,
   ApiFactorDiagnosticPreview,
   ApiFactorDirection,
   ApiFactorListItem,
   ApiFactorMiningCandidate as RuntimeMiningCandidate,
   ApiFactorMiningJob as RuntimeMiningJob,
 } from './types';
+import type {
+  PublicFactorImportApi,
+  PublicFactorImportViewModel,
+} from './pages/public-factor-import-center-page';
 import { CreationTemplatePage } from './pages/creation-template-page';
 
 type ApiClient = ReturnType<typeof useApiClient>;
@@ -49,6 +56,248 @@ const FACTOR_CATEGORY_LABELS: Record<string, string> = {
   sentiment: '情绪',
   style: '风格',
 };
+
+function normalizePublicFactorSourceId(value: string): string {
+  const normalized = String(value || '').trim();
+  const aliases: Record<string, string> = {
+    french: 'fama_french',
+    'fama-french': 'fama_french',
+    msci: 'msci_facs',
+    pv: 'portfolio_visualizer',
+  };
+  return aliases[normalized] ?? normalized;
+}
+
+function normalizePublicFactorDatasetKey(value: string): string {
+  const normalized = String(value || '').trim();
+  const aliases: Record<string, string> = {
+    'ff5-daily': 'fama_french_us_research_factors_daily',
+    'mom-daily': 'fama_french_us_research_factors_daily',
+    'aqr-qmj': 'aqr_public_style_factors',
+    'aqr-tsmom': 'aqr_public_style_factors',
+  };
+  return aliases[normalized] ?? normalized;
+}
+
+function normalizePublicFactorFrequency(value: string): ApiExternalFactorFrequency {
+  const normalized = String(value || '').trim().toUpperCase();
+  if (normalized.includes('DAILY') || normalized.includes('日')) return 'DAILY';
+  if (normalized.includes('MONTH') || normalized.includes('月')) return 'MONTHLY';
+  if (normalized.includes('QUARTER') || normalized.includes('季')) return 'QUARTERLY';
+  if (normalized.includes('ANNUAL') || normalized.includes('年')) return 'ANNUAL';
+  return 'MIXED';
+}
+
+function publicFactorFrequencyLabel(value: string | null | undefined): string {
+  switch (normalizePublicFactorFrequency(String(value || ''))) {
+    case 'DAILY':
+      return '日频';
+    case 'MONTHLY':
+      return '月频';
+    case 'QUARTERLY':
+      return '季频';
+    case 'ANNUAL':
+      return '年频';
+    default:
+      return '混合频率';
+  }
+}
+
+function publicFactorSourceKind(accessPolicy: string): PublicFactorImportViewModel['sources'][number]['kind'] {
+  const policy = String(accessPolicy || '').toUpperCase();
+  if (policy === 'REFERENCE_ONLY') return 'reference';
+  if (policy === 'LICENSE_REQUIRED' || policy === 'MANUAL_UPLOAD') return 'manual';
+  return 'auto';
+}
+
+function publicFactorSourceTone(accessPolicy: string): PublicFactorImportViewModel['sources'][number]['tone'] {
+  const policy = String(accessPolicy || '').toUpperCase();
+  if (policy === 'REFERENCE_ONLY') return 'reference';
+  if (policy === 'LICENSE_REQUIRED' || policy === 'MANUAL_UPLOAD') return 'warning';
+  return 'ready';
+}
+
+function publicFactorDatasetStatus(status: string): PublicFactorImportViewModel['datasets'][number]['status'] {
+  const normalized = String(status || '').toUpperCase();
+  if (normalized === 'REFERENCE_ONLY') return 'reference';
+  if (normalized === 'MANUAL_REQUIRED') return 'review';
+  return 'importable';
+}
+
+function findPublicFactorSource(
+  registry: ApiExternalFactorSourceRegistryResponse,
+  ...needles: string[]
+): ApiExternalFactorSourceRegistryResponse['sources'][number] | undefined {
+  return registry.sources.find((source) => {
+    const haystack = `${source.id} ${source.name} ${source.short_name}`.toLowerCase();
+    return needles.some((needle) => haystack.includes(needle.toLowerCase()));
+  });
+}
+
+function publicFactorDatasetId(
+  source: ApiExternalFactorSourceRegistryResponse['sources'][number] | undefined,
+  index: number,
+  fallback: string,
+): string {
+  return source?.datasets[index]?.key || fallback;
+}
+
+function mapExternalFactorRegistry(
+  registry: ApiExternalFactorSourceRegistryResponse,
+): Partial<PublicFactorImportViewModel> {
+  const frenchSource = findPublicFactorSource(registry, 'fama', 'french');
+  const aqrSource = findPublicFactorSource(registry, 'aqr');
+  const msciSource = findPublicFactorSource(registry, 'msci');
+  const portfolioSource = findPublicFactorSource(registry, 'portfolio', 'visualizer');
+  const sources: PublicFactorImportViewModel['sources'] = [
+    {
+      id: frenchSource?.id || 'french',
+      name: 'French-Data Library',
+      category: '学术基准',
+      kind: publicFactorSourceKind(frenchSource?.access_policy || 'PUBLIC_DOWNLOAD'),
+      tone: publicFactorSourceTone(frenchSource?.access_policy || 'PUBLIC_DOWNLOAD'),
+      frequency: '日频 / 月频',
+      badges: ['可自动导入'],
+      description: 'FF3、FF5、Momentum，默认进入估值、质量与基准模板。',
+    },
+    {
+      id: aqrSource?.id || 'aqr',
+      name: 'AQR Data Library',
+      category: '许可待确认',
+      kind: publicFactorSourceKind(aqrSource?.access_policy || 'LICENSE_REQUIRED'),
+      tone: publicFactorSourceTone(aqrSource?.access_policy || 'LICENSE_REQUIRED'),
+      frequency: '日频 / 月频',
+      badges: ['手动上传'],
+      description: 'QMJ 与 TSMOM 先作为风险调整与动量参数模板。',
+    },
+    {
+      id: msciSource?.id || 'msci',
+      name: 'MSCI FaCS',
+      category: '参考源',
+      kind: 'reference',
+      tone: 'reference',
+      frequency: '行业暴露',
+      badges: ['人工参考'],
+      description: '用于 max_cap 与行业暴露上限，不生成自动下载作业。',
+    },
+    {
+      id: portfolioSource?.id || 'portfolio_visualizer',
+      name: 'Portfolio Visualizer',
+      category: '参考源',
+      kind: 'reference',
+      tone: 'reference',
+      frequency: 'Factor Regression',
+      badges: ['参数参考'],
+      description: '用于风格表现观察，模板生成需人工填写来源证据。',
+    },
+  ];
+  const datasets: PublicFactorImportViewModel['datasets'] = [
+    {
+      id: publicFactorDatasetId(frenchSource, 0, 'ff5-daily'),
+      name: 'Fama-French 5 Factors Daily',
+      key: 'ff_us_5f_daily',
+      sourceName: 'French',
+      frequency: '日频',
+      coverage: '1963-07 至今',
+      status: 'importable',
+      fieldCount: 6,
+      statusLabel: '候选模板',
+      actionLabel: '查看 manifest',
+    },
+    {
+      id: publicFactorDatasetId(frenchSource, 1, 'mom-daily'),
+      name: 'Fama-French Momentum',
+      key: 'ff_us_mom_daily',
+      sourceName: 'French',
+      frequency: '日频',
+      coverage: '1926-11 至今',
+      status: 'importable',
+      fieldCount: 2,
+      statusLabel: '可生成模板',
+      actionLabel: '生成模板',
+    },
+    {
+      id: publicFactorDatasetId(aqrSource, 0, 'aqr-qmj'),
+      name: 'AQR QMJ Daily',
+      key: 'aqr_us_qmj_daily',
+      sourceName: 'AQR',
+      frequency: '日频',
+      coverage: '人工确认',
+      status: 'review',
+      fieldCount: 4,
+      statusLabel: '需许可确认',
+      actionLabel: '送入复核',
+    },
+    {
+      id: publicFactorDatasetId(aqrSource, 1, 'aqr-tsmom'),
+      name: 'AQR TSMOM Monthly',
+      key: 'aqr_tsmom_monthly',
+      sourceName: 'AQR',
+      frequency: '月频',
+      coverage: '人工确认',
+      status: 'reference',
+      fieldCount: 3,
+      statusLabel: '手动上传',
+      actionLabel: '重新解析',
+    },
+  ];
+  return {
+    sources,
+    datasets,
+    activeSourceId: sources[0]?.id,
+    activeDatasetId: datasets[0]?.id,
+    updatedAtLabel: `${registry.template_version} · ${registry.review_boundary}`,
+    manifest: {
+      jobId: '',
+      sourceName: '待选择公开源',
+      datasetKey: '待创建预检',
+      asOfDate: '',
+      parserVersion: registry.template_version,
+      rawFileHash: '等待文件 hash',
+      rowCount: 0,
+      artifactPath: '请先新建预检或导入本地文件',
+      reviewNote: '先生成真实导入作业，再进入语义映射、manifest 确认与复核提交。',
+      reviewStatus: 'NOT_STARTED',
+      nextActions: ['create_precheck', 'semantic_mapping', 'inspect_manifest'],
+      submitReady: false,
+    },
+  };
+}
+
+function mapExternalFactorJob(job: ApiExternalFactorImportJob): Partial<PublicFactorImportViewModel> {
+  const hash = job.manifest?.file_sha256 ? `sha256:${job.manifest.file_sha256.slice(0, 12)}` : '等待文件 hash';
+  const mappingRows = Array.isArray(job.mapping_rows) ? job.mapping_rows : [];
+  const nextActions = Array.isArray(job.next_actions) ? job.next_actions : [];
+  const reviewStatus = String(job.review_status || '');
+  return {
+    activeSourceId: job.source_id,
+    activeDatasetId: job.dataset_key,
+    mappings: mappingRows.map((row) => ({
+      externalColumn: row.source_field || row.target_field,
+      fullName: row.target_field || row.source_field,
+      family: row.semantic_role || '语义字段',
+      usage: `${row.transform || 'identity'} · ${row.data_type || 'string'}`,
+      tags: [
+        row.required ? '必填' : '可选',
+        row.confidence >= 0.8 ? '高置信' : '需复核',
+      ],
+    })),
+    manifest: {
+      jobId: job.id,
+      sourceName: job.source_name || job.source_id,
+      datasetKey: job.dataset_key,
+      asOfDate: job.as_of_date || job.updated_at || job.created_at,
+      parserVersion: job.manifest?.template_key || 'public_us_factor_template_v1',
+      rawFileHash: hash,
+      rowCount: Number(job.manifest?.row_count ?? 0),
+      artifactPath: job.artifact_paths?.manifest_ref || job.artifact_paths?.raw_file_ref || '等待 manifest',
+      reviewNote: `${reviewStatus} · ${job.governance_gate} · ${nextActions.join(' / ')}`,
+      reviewStatus,
+      nextActions,
+      submitReady: reviewStatus === 'READY_FOR_REVIEW' && nextActions.includes('submit_review'),
+    },
+  };
+}
 
 export function isRouteChunkLoadError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? '');
@@ -130,6 +379,7 @@ const FactorFactoryPage = lazy(() => import('./pages/factor-factory-page'));
 const FactorSandboxPage = lazy(() => import('./pages/factor-sandbox-page'));
 const FactorQuarantinePage = lazy(() => import('./pages/factor-quarantine-page'));
 const FactorModelBuilderPage = lazy(() => import('./pages/factor-model-builder-page'));
+const PublicFactorImportCenterPage = lazy(() => import('./pages/public-factor-import-center-page'));
 const LegInventoryPage = lazy(() =>
   import('./pages/leg-inventory-page').then((module) => ({ default: module.LegInventoryPage })),
 );
@@ -606,6 +856,64 @@ function FactorModelBuilderRoutePage({ route }: { route: FactorModelBuilderRoute
   );
 }
 
+function PublicFactorImportRoutePage(): JSX.Element {
+  const api = useApiClient();
+  const importApi: PublicFactorImportApi = {
+    loadViewModel: async () => {
+      if (!api.getExternalFactorSourceRegistry) {
+        return null;
+      }
+      return mapExternalFactorRegistry(await api.getExternalFactorSourceRegistry());
+    },
+    createPrecheck: async (payload) => {
+      if (!api.createExternalFactorImportJob) {
+        return null;
+      }
+      const job = await api.createExternalFactorImportJob({
+        source_id: normalizePublicFactorSourceId(payload.sourceId),
+        dataset_key: normalizePublicFactorDatasetKey(payload.datasetId),
+        import_mode: 'AUTO_DOWNLOAD',
+        frequency: normalizePublicFactorFrequency(payload.frequency),
+        created_by: 'researcher',
+        precheck_notes: payload.note,
+      });
+      return mapExternalFactorJob(job);
+    },
+    importLocalFile: async (payload) => {
+      if (!api.uploadExternalFactorLocalFile || !api.createExternalFactorImportJob) {
+        return null;
+      }
+      const sourceId = normalizePublicFactorSourceId(payload.sourceId);
+      const datasetKey = normalizePublicFactorDatasetKey(payload.datasetId);
+      const file = payload.file;
+      const upload = await api.uploadExternalFactorLocalFile({
+        source_id: sourceId,
+        dataset_key: datasetKey,
+        filename: file?.name || 'manual_public_factor_upload.csv',
+        content_text: file ? await file.text() : '',
+        content_type: file?.type || 'text/csv',
+      });
+      const job = await api.createExternalFactorImportJob({
+        source_id: sourceId,
+        dataset_key: datasetKey,
+        import_mode: 'LOCAL_FILE',
+        file_id: upload.file_id,
+        frequency: normalizePublicFactorFrequency(payload.frequency),
+        created_by: 'researcher',
+        precheck_notes: 'Created from local file import modal.',
+      });
+      return mapExternalFactorJob(job);
+    },
+    submitReview: async ({ jobId }) => {
+      if (!api.submitExternalFactorImportReview) {
+        return null;
+      }
+      return mapExternalFactorJob(await api.submitExternalFactorImportReview(jobId));
+    },
+  };
+  return <PublicFactorImportCenterPage api={importApi} />;
+}
+
 function RouteLoadingFallback(): JSX.Element {
   return (
     <div className="route-loading-fallback" role="status">
@@ -751,6 +1059,7 @@ function AppShell(): JSX.Element {
             ) : null}
             {route.kind === 'factor-detail' ? <FactorDetailPage factorId={route.factorId} /> : null}
             {route.kind === 'factor-editor' ? <FactorEditorPage factorId={route.factorId} /> : null}
+            {route.kind === 'public-factor-imports' ? <PublicFactorImportRoutePage /> : null}
             {route.kind === 'factor-factory' ? <FactorFactoryPage initialSection={route.section} /> : null}
             {route.kind === 'factor-model-builder' ? <FactorModelBuilderRoutePage route={route} /> : null}
             {route.kind === 'optimization-index' ? <OptimizationJobsIndexPage /> : null}
