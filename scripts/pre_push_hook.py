@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import os
 import re
@@ -123,6 +124,27 @@ def _is_false(value: str | None) -> bool:
     return (value or "").strip().lower() == "false"
 
 
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _content_fingerprint_for_commit_range(
+    repo_root: Path,
+    *,
+    base_sha: str,
+    head_sha: str,
+) -> str | None:
+    changed_files = _git_lines(repo_root, ["diff", "--name-only", f"{base_sha}...{head_sha}"])
+    if not changed_files:
+        return _sha256_text("")
+
+    entries: list[str] = []
+    for path in sorted(set(changed_files)):
+        blob_sha = _git_stdout(repo_root, ["rev-parse", "--verify", f"{head_sha}:{path}"])
+        entries.append(f"{path}\t{blob_sha or '<missing>'}")
+    return _sha256_text("\n".join(entries))
+
+
 def _current_head_is_metadata_only_child(
     repo_root: Path,
     *,
@@ -189,11 +211,13 @@ def _impact_gate_matches_push(
     expected_head_sha: str | None,
     expected_base_sha: str | None,
     metadata_child_reason: str | None = None,
+    worktree_reuse_reason: str | None = None,
 ) -> tuple[bool, str]:
     if fields.get("status") != "ok":
         return False, f"latest impact status is {fields.get('status', '<missing>')}, not ok"
-    if fields.get("scope") != "Committed":
-        return False, f"latest impact scope is {fields.get('scope', '<missing>')}, not Committed"
+    scope = fields.get("scope")
+    if scope not in {"Committed", "WorkingTree"}:
+        return False, f"latest impact scope is {fields.get('scope', '<missing>')}, not Committed or reusable WorkingTree"
     if not _is_false(fields.get("plan_only")):
         return False, "latest impact was PlanOnly; full impacted tests did not run"
     if not _is_false(fields.get("skip_tests")):
@@ -202,11 +226,50 @@ def _impact_gate_matches_push(
         return False, "latest impact base_sha does not match the remote push base"
     if "duration=" not in report_text or "elapsed_seconds" not in fields:
         return False, "latest impact summary is missing step duration evidence"
+    if scope == "WorkingTree":
+        if worktree_reuse_reason:
+            return True, f"latest WorkingTree impact evidence matches current push; {worktree_reuse_reason}"
+        return False, "latest WorkingTree impact evidence lacks content-fingerprint reuse proof"
     if expected_head_sha and fields.get("head_sha") != expected_head_sha:
         if metadata_child_reason:
             return True, f"latest impact evidence matches validated parent; {metadata_child_reason}"
         return False, "latest impact head_sha does not match current HEAD"
     return True, "latest impact evidence matches current push"
+
+
+def _working_tree_impact_reuse_checks(
+    repo_root: Path,
+    *,
+    fields: dict[str, str],
+    expected_base_sha: str | None,
+    current_head_sha: str | None,
+) -> tuple[bool, str]:
+    if fields.get("scope") != "WorkingTree":
+        return False, "latest impact was not a WorkingTree report"
+    if not expected_base_sha:
+        return False, "WorkingTree impact reuse requires a known remote push base"
+    if not current_head_sha:
+        return False, "WorkingTree impact reuse cannot resolve current HEAD"
+    if fields.get("validation_content_basis") != "git-blob-map-v1":
+        return False, "WorkingTree impact summary is missing git-blob-map-v1 content basis"
+    expected_fingerprint = fields.get("validation_content_fingerprint")
+    if not expected_fingerprint:
+        return False, "WorkingTree impact summary is missing validation_content_fingerprint"
+    if fields.get("head_sha") != expected_base_sha:
+        return (
+            False,
+            "WorkingTree impact reuse requires the validated HEAD to equal the remote push base",
+        )
+
+    current_fingerprint = _content_fingerprint_for_commit_range(
+        repo_root,
+        base_sha=expected_base_sha,
+        head_sha=current_head_sha,
+    )
+    if current_fingerprint != expected_fingerprint:
+        return False, "WorkingTree impact content fingerprint does not match current committed push"
+
+    return True, "content fingerprint matches the committed diff from remote base"
 
 
 def _impact_gate_allows_push(
@@ -222,28 +285,44 @@ def _impact_gate_allows_push(
     report_text = summary_path.read_text(encoding="utf-8")
     fields = _parse_gate_summary_text(report_text)
     head_sha = _git_stdout(repo_root, ["rev-parse", "HEAD"])
-    metadata_child_ok, metadata_child_reason = _current_head_is_metadata_only_child(
-        repo_root,
-        validated_head_sha=fields.get("head_sha"),
-        current_head_sha=head_sha,
-    )
-    if metadata_child_ok:
-        extra_ok, extra_reason = _metadata_child_reuse_checks(
+    metadata_child_reason: str | None = None
+    worktree_reuse_reason: str | None = None
+
+    if fields.get("scope") == "WorkingTree":
+        worktree_reuse_ok, reuse_reason = _working_tree_impact_reuse_checks(
+            repo_root,
+            fields=fields,
+            expected_base_sha=expected_base_sha,
+            current_head_sha=head_sha,
+        )
+        if worktree_reuse_ok:
+            worktree_reuse_reason = reuse_reason
+        else:
+            return False, reuse_reason
+    else:
+        metadata_child_ok, metadata_child_reason_candidate = _current_head_is_metadata_only_child(
             repo_root,
             validated_head_sha=fields.get("head_sha"),
             current_head_sha=head_sha,
-            changelog_prepared=changelog_prepared,
         )
-        if extra_ok:
-            metadata_child_reason = f"{metadata_child_reason}; {extra_reason}"
-        else:
-            return False, extra_reason
+        if metadata_child_ok:
+            extra_ok, extra_reason = _metadata_child_reuse_checks(
+                repo_root,
+                validated_head_sha=fields.get("head_sha"),
+                current_head_sha=head_sha,
+                changelog_prepared=changelog_prepared,
+            )
+            if extra_ok:
+                metadata_child_reason = f"{metadata_child_reason_candidate}; {extra_reason}"
+            else:
+                return False, extra_reason
     return _impact_gate_matches_push(
         fields,
         report_text=report_text,
         expected_head_sha=head_sha,
         expected_base_sha=expected_base_sha,
-        metadata_child_reason=metadata_child_reason if metadata_child_ok else None,
+        metadata_child_reason=metadata_child_reason,
+        worktree_reuse_reason=worktree_reuse_reason,
     )
 
 

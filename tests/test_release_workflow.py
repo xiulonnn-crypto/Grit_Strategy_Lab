@@ -59,29 +59,43 @@ def _write_repo_files(repo_root: Path, changelog: str, version: str = "0.1.1") -
     )
 
 
-def _write_impact_summary(repo_root: Path, *, head_sha: str, base_sha: str = "") -> None:
+def _write_impact_summary(
+    repo_root: Path,
+    *,
+    head_sha: str,
+    base_sha: str = "",
+    scope: str = "Committed",
+    validation_content_fingerprint: str | None = None,
+) -> None:
     summary_dir = repo_root / "harness" / "reports" / "smoke"
     summary_dir.mkdir(parents=True)
-    (summary_dir / "latest-impact-gate.md").write_text(
-        "\n".join(
+    lines = [
+        "# Codex Impact Gate",
+        "",
+        "- status: ok",
+        f"- scope: {scope}",
+        "- plan_only: False",
+        "- skip_tests: False",
+        f"- head_sha: {head_sha}",
+        f"- base_sha: {base_sha}",
+    ]
+    if validation_content_fingerprint is not None:
+        lines.extend(
             [
-                "# Codex Impact Gate",
-                "",
-                "- status: ok",
-                "- scope: Committed",
-                "- plan_only: False",
-                "- skip_tests: False",
-                f"- head_sha: {head_sha}",
-                f"- base_sha: {base_sha}",
-                "- elapsed_seconds: 12.3",
-                "",
-                "## Steps",
-                "- [ok] backend targeted tests (duration=10.0s)",
-                "",
+                "- validation_content_basis: git-blob-map-v1",
+                f"- validation_content_fingerprint: {validation_content_fingerprint}",
             ]
-        ),
-        encoding="utf-8",
+        )
+    lines.extend(
+        [
+            "- elapsed_seconds: 12.3",
+            "",
+            "## Steps",
+            "- [ok] backend targeted tests (duration=10.0s)",
+            "",
+        ]
     )
+    (summary_dir / "latest-impact-gate.md").write_text("\n".join(lines), encoding="utf-8")
 
 
 def test_pre_push_hook_uses_single_remote_sha_as_fast_gate_base() -> None:
@@ -158,6 +172,76 @@ def test_pre_push_accepts_metadata_only_child_of_validated_impact_head() -> None
     assert "validated parent" in reason
 
 
+def test_pre_push_accepts_reusable_working_tree_impact_after_commit(tmp_path: Path) -> None:
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "config", "user.name", "Test User")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "gate.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "base")
+    base_sha = _git(tmp_path, "rev-parse", "HEAD")
+
+    (tmp_path / "src" / "gate.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (tmp_path / "src" / "new_gate.py").write_text("ENABLED = True\n", encoding="utf-8")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "feat: gate optimization")
+    head_sha = _git(tmp_path, "rev-parse", "HEAD")
+    fingerprint = pre_push_hook._content_fingerprint_for_commit_range(
+        tmp_path,
+        base_sha=base_sha,
+        head_sha=head_sha,
+    )
+    _write_impact_summary(
+        tmp_path,
+        head_sha=base_sha,
+        base_sha=base_sha,
+        scope="WorkingTree",
+        validation_content_fingerprint=fingerprint,
+    )
+
+    ok, reason = pre_push_hook._impact_gate_allows_push(
+        tmp_path,
+        expected_base_sha=base_sha,
+        changelog_prepared=True,
+    )
+
+    assert ok is True
+    assert "WorkingTree impact evidence" in reason
+    assert "content fingerprint" in reason
+
+
+def test_pre_push_rejects_working_tree_impact_when_content_changed(tmp_path: Path) -> None:
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "config", "user.name", "Test User")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "gate.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "base")
+    base_sha = _git(tmp_path, "rev-parse", "HEAD")
+
+    (tmp_path / "src" / "gate.py").write_text("VALUE = 2\n", encoding="utf-8")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "feat: different gate change")
+    _write_impact_summary(
+        tmp_path,
+        head_sha=base_sha,
+        base_sha=base_sha,
+        scope="WorkingTree",
+        validation_content_fingerprint="0" * 64,
+    )
+
+    ok, reason = pre_push_hook._impact_gate_allows_push(
+        tmp_path,
+        expected_base_sha=base_sha,
+        changelog_prepared=True,
+    )
+
+    assert ok is False
+    assert "content fingerprint" in reason
+
+
 def test_pre_push_rejects_stale_or_plan_only_impact_evidence() -> None:
     fields = {
         "status": "ok",
@@ -191,6 +275,8 @@ def test_gate_self_test_plan_only_writes_non_latest_summary() -> None:
     assert "$selfTestDir = Join-Path $reportDir 'self-test'" in fast_script
     assert "$selfTestSummaryPath = Join-Path $selfTestDir" in fast_script
     assert "'-SummaryPath', $selfTestSummaryPath" in fast_script
+    assert "validation_content_fingerprint" in fast_script
+    assert "Get-ValidationContentFingerprint" in fast_script
     assert "$parameters.SummaryPath = $SummaryPath" in impact_script
 
 

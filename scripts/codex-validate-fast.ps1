@@ -58,6 +58,7 @@ $script:ResolvedBaseSha = ''
 $script:ResolvedHeadSha = ''
 $script:ResolvedSinceLastValidatedSha = ''
 $script:ValidationFingerprint = ''
+$script:ValidationContentFingerprint = ''
 $script:GateCancelled = $false
 $script:TrackedProcessIds = [System.Collections.Generic.List[int]]::new()
 $script:Plan = $null
@@ -138,6 +139,45 @@ function Get-Sha256Text {
     }
 }
 
+function Get-ValidationContentFingerprint {
+    param(
+        [string[]]$Paths,
+        [switch]$UseHeadTree
+    )
+
+    $entries = [System.Collections.Generic.List[string]]::new()
+    $normalizedPaths = @(
+        $Paths |
+            ForEach-Object { ([string]$_).Trim() -replace '\\', '/' } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            Sort-Object -Unique
+    )
+
+    foreach ($path in $normalizedPaths) {
+        $blobSha = '<missing>'
+        if ($UseHeadTree) {
+            $blobLines = @(Get-GitLines -Arguments @('rev-parse', '--verify', "HEAD:$path"))
+            if ($blobLines.Count -gt 0) {
+                $blobSha = $blobLines[0]
+            }
+        } else {
+            $fullPath = Join-Path $repoRoot ($path -replace '/', '\')
+            if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
+                $blobLines = @(Get-GitLines -Arguments @('hash-object', "--path=$path", '--', $path))
+                if ($blobLines.Count -eq 0) {
+                    throw "Unable to hash validation content for $path"
+                }
+                $blobSha = $blobLines[0]
+            } elseif (Test-Path -LiteralPath $fullPath -PathType Container) {
+                $blobSha = '<directory>'
+            }
+        }
+        [void]$entries.Add("$path`t$blobSha")
+    }
+
+    return Get-Sha256Text -Text ($entries -join "`n")
+}
+
 function Write-Summary {
     param(
         [string]$Status,
@@ -180,6 +220,9 @@ function Write-Summary {
         "files=$($rawChanged -join '|')"
     ) -join "`n"
     $script:ValidationFingerprint = Get-Sha256Text -Text $fingerprintInput
+    $script:ValidationContentFingerprint = Get-ValidationContentFingerprint `
+        -Paths $rawChanged `
+        -UseHeadTree:($Scope -eq 'Committed')
 
     $lines = [System.Collections.Generic.List[string]]::new()
     foreach ($line in @(
@@ -203,6 +246,8 @@ function Write-Summary {
         ('- base_sha: ' + $baseShaValue),
         ('- since_last_validated: ' + $sinceShaValue),
         ('- validation_fingerprint: ' + $script:ValidationFingerprint),
+        ('- validation_content_basis: git-blob-map-v1'),
+        ('- validation_content_fingerprint: ' + $script:ValidationContentFingerprint),
         ('- raw_changed_count: ' + $rawChanged.Count),
         ('- evidence_asset_count: ' + $evidenceFiles.Count),
         ('- documentation_count: ' + $docFiles.Count),
