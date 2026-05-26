@@ -1511,6 +1511,13 @@
   margin-top: 12px;
 }
 
+.factor-detail-note {
+  margin: 10px 0 0;
+  color: var(--factory-text-body);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
 .factor-factory-expression-stack {
   display: grid;
   gap: 10px;

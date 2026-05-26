@@ -38,6 +38,7 @@ type LayerCard = {
   status: string;
   statusLabel: string;
   metric: string;
+  metricLines?: string[];
   miniRows: Array<{ label: string; value: string }>;
   action: string;
   refreshTargets: SnapshotRefreshTarget[];
@@ -664,6 +665,36 @@ function getLayerMetricValue(layer: DataLayerReadiness | undefined, labels: stri
   return directValue ?? getMetricValue(asRecord(layer).pit_metrics, labels);
 }
 
+function getLayerPitMetricValue(layer: DataLayerReadiness | undefined, labels: string[]): string | null {
+  if (!layer) {
+    return null;
+  }
+  return getMetricValue(asRecord(layer).pit_metrics, labels);
+}
+
+function getL1CoverageMetric(
+  overview: ApiSnapshotOverview | null,
+  price: ApiDatasetSnapshot | undefined,
+  bondCoverage: string,
+): { metric: string; lines?: string[] } {
+  const l1Layer = getLayerReadiness(overview, 'l1_market_data');
+  const pitTarget = getLayerPitMetricValue(l1Layer, ['PIT目标', '覆盖标的']);
+  const benchmarkOverlay = getLayerPitMetricValue(l1Layer, ['基准ETF']);
+  if (pitTarget && benchmarkOverlay) {
+    return {
+      metric: `股票 PIT ${pitTarget} + ETF ${benchmarkOverlay} · 债券 ${bondCoverage}`,
+      lines: [`股票 PIT ${pitTarget}`, `ETF ${benchmarkOverlay} · 债券 ${bondCoverage}`],
+    };
+  }
+  if (pitTarget) {
+    return {
+      metric: `股票 PIT ${pitTarget} · 债券 ${bondCoverage}`,
+      lines: [`股票 PIT ${pitTarget}`, `债券 ${bondCoverage}`],
+    };
+  }
+  return { metric: `股票 快照 ${getDatasetCoverage(price)} · 债券 ${bondCoverage}` };
+}
+
 function buildLayerCards(overview: ApiSnapshotOverview | null): LayerCard[] {
   const price = getDataset(overview, 'ds-price');
   const corporate = getDataset(overview, 'ds-corporate-actions');
@@ -686,6 +717,7 @@ function buildLayerCards(overview: ApiSnapshotOverview | null): LayerCard[] {
   const fundamentalFieldCount =
     getLayerMetricValue(l2Layer, ['可用字段', '字段数']) ??
     formatCount(firstNumber(asRecord(fundamentals?.metadata), ['field_count', 'field_count_total', 'ready_field_count']) ?? 18);
+  const l1CoverageMetric = getL1CoverageMetric(overview, price, getBondCoverage(overview));
 
   return [
     {
@@ -694,7 +726,8 @@ function buildLayerCards(overview: ApiSnapshotOverview | null): LayerCard[] {
       subtitle: '10Y PIT 价格回放可用；固定收益运行态来源已就绪；30Y Full Ready 与公司行为补链仍在修复队列。',
       status: l1Status,
       statusLabel: healthCardStatusLabel(l1Status),
-      metric: `股票 ${getDatasetCoverage(price)} · 债券 ${getBondCoverage(overview)}`,
+      metric: l1CoverageMetric.metric,
+      metricLines: l1CoverageMetric.lines,
       miniRows: [
         { label: '可用于', value: '动量 / 波动 / 债券资产腿' },
         { label: '待修复', value: '公司行为、长历史补价' },
@@ -1171,14 +1204,6 @@ function buildQueueItems(overview: ApiSnapshotOverview | null, registry: ApiSnap
       actionKind: 'configure_path',
       credentialProviderId: missingLocalPathProvider?.provider_id ?? 'crsp_us_stock',
     },
-    {
-      id: 'fundamental-balance',
-      title: '财务平衡校验部分可用',
-      body: 'publish_date 与 available_at 已完整；会计恒等式作为观察项保留，不再占用主告警位。',
-      pills: ['观察项', '2463 / 3332 通过'],
-      action: '查看台账',
-      actionKind: 'view_ledger',
-    },
   ];
   const hasCorporateIssue = Boolean(corporate?.blocker) || String(corporate?.status ?? '').toUpperCase() !== 'READY';
   const hasPriceIssue = Boolean(price?.blocker) || String(price?.status ?? '').toUpperCase() !== 'READY';
@@ -1526,8 +1551,14 @@ export function SnapshotOperationsConsole({
                   </span>
                 </div>
                 <div className="snapshots-ops-metric-line">
-                  <strong>{plainMetric(card.metric)}</strong>
-                  <span>{card.subtitle}</span>
+                  <strong className="snapshots-ops-metric-value">
+                    {(card.metricLines?.length ? card.metricLines : [card.metric]).map((line) => (
+                      <span className="snapshots-ops-metric-value-line" key={line}>
+                        {plainMetric(line)}
+                      </span>
+                    ))}
+                  </strong>
+                  <span className="snapshots-ops-metric-subtitle">{card.subtitle}</span>
                 </div>
                 <div className="snapshots-ops-mini-list">
                   {card.miniRows.map((row) => (

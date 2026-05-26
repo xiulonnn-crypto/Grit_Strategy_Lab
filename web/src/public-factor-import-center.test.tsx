@@ -19,7 +19,7 @@ describe('PublicFactorImportCenterPage', () => {
     expect(screen.queryByText(/2026-05-21 16:20/)).not.toBeInTheDocument();
 
     const bodyText = document.body.textContent || '';
-    ['来源准备', '获取 / 上传', '新建预检', '语义映射', '送入复核'].forEach((label) => {
+    ['来源准备', '获取 / 上传', '新建预检', '语义映射', '进入 B3 检疫'].forEach((label) => {
       expect(bodyText).toContain(label);
     });
     ['undefined', 'NaN', 'raw enum'].forEach((blocked) => {
@@ -135,7 +135,7 @@ describe('PublicFactorImportCenterPage', () => {
               key: 'aqr_us_qmj_daily',
               sourceName: 'AQR',
               frequency: '日频',
-              coverage: '人工确认',
+              coverage: '许可待核',
               status: 'review',
               fieldCount: 4,
             },
@@ -171,7 +171,21 @@ describe('PublicFactorImportCenterPage', () => {
   });
 
   it('gates submit review until a real import job is ready', async () => {
-    const submitReview = vi.fn().mockResolvedValue({});
+    const submittedManifest: PublicFactorImportViewModel['manifest'] = {
+      jobId: 'extimp_ready',
+      sourceName: 'Fama-French Data Library',
+      datasetKey: 'fama_french_us_research_factors_daily',
+      asOfDate: '2026-05-22',
+      parserVersion: 'public_us_factor_template_v1',
+      rawFileHash: 'sha256:ready',
+      rowCount: 18,
+      artifactPath: 'external_factor_import_manifests/extimp_ready',
+      reviewNote: 'SUBMITTED · REVIEW_BEFORE_QUARANTINE · b3_quarantine_completed',
+      reviewStatus: 'SUBMITTED',
+      nextActions: ['b3_quarantine_completed'],
+      submitReady: false,
+    };
+    const submitReview = vi.fn().mockResolvedValue({ manifest: submittedManifest });
     const { container, rerender } = render(<PublicFactorImportCenterPage api={{ submitReview }} />);
 
     const blockedButton = container.querySelector('.pfic-manifest-rail .pfic-button-primary') as HTMLButtonElement;
@@ -207,6 +221,11 @@ describe('PublicFactorImportCenterPage', () => {
       fireEvent.click(readyButton);
     });
     expect(submitReview).toHaveBeenCalledWith({ jobId: 'extimp_ready' });
+    expect(screen.getAllByText(/已进入 B3 检疫/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('B3 检疫完成')).toBeInTheDocument();
+    expect(screen.getByText(/SUBMITTED · REVIEW_BEFORE_QUARANTINE · b3_quarantine_completed/)).toBeInTheDocument();
+    expect(readyButton).toHaveTextContent('已送检');
+    expect(readyButton).toBeDisabled();
   });
 
   it('opens precheck modal and calls injected API client with selected source and dataset', async () => {

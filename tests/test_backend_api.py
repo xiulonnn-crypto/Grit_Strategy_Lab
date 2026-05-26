@@ -343,6 +343,50 @@ def test_snapshot_overview_contract_is_exact_on_fresh_database(tmp_path):
     assert factor_dimensions["macro_derivatives"]["status"] in {"CALIBRATING", "BLOCKED"}
 
 
+def test_snapshot_overview_accepts_provider_specific_access_tiers(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    repository = service.market_data_repository
+    provider_tiers = {
+        "bnsf_bni_pdf_hlc": "public_company_pdf",
+        "github_willhjw_big_movers": "public_github_repo_mit_license",
+        "github_acelogic_wayback_scraper": "public_github_tool_plus_wayback",
+    }
+    repository.replace_dataset_snapshot(
+        {
+            "id": "ds-corporate-actions",
+            "name": "Corporate actions and events",
+            "status": "INCOMPLETE",
+            "as_of": "2026-05-26",
+            "freshness_label": "unit-test",
+            "row_count": 0,
+            "source": "unit_test",
+            "fallback_source": None,
+            "metadata": {
+                "provider_summary": {
+                    "attempted_providers": list(provider_tiers),
+                    "providers": {
+                        provider_id: {
+                            "kinds": ["corporate_actions"],
+                            "access_tier": access_tier,
+                        }
+                        for provider_id, access_tier in provider_tiers.items()
+                    },
+                },
+            },
+        }
+    )
+    if hasattr(service, "_invalidate_snapshot_overview_cache"):
+        service._invalidate_snapshot_overview_cache()
+
+    overview = assert_ok(client.get("/data-snapshots/overview"))
+
+    corporate_snapshot = next(item for item in overview["dataset_snapshots"] if item["id"] == "ds-corporate-actions")
+    providers = corporate_snapshot["metadata"]["provider_summary"]["providers"]
+    for provider_id, access_tier in provider_tiers.items():
+        assert providers[provider_id]["access_tier"] == access_tier
+
+
 def test_snapshot_provider_registry_and_attempts_are_available_on_fresh_database(tmp_path, monkeypatch):
     for env_name in (
         "TIINGO_API_TOKEN",

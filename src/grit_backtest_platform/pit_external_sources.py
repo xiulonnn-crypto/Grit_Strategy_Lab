@@ -82,6 +82,15 @@ PAID_DATASET_RECOMMENDATIONS = [
         "coverage_note": "API candidate for delisted symbols, EOD prices, splits/dividends, and fundamentals. Requires plan entitlement and old-symbol mapping.",
         "pit_mode": "paid_delisted_bundle",
     },
+    {
+        "provider_id": "xfinlink_pro",
+        "label": "Xfinlink Pro",
+        "source_url": "https://xfinlink.com/docs",
+        "target": "delisted_price_history",
+        "required_env_vars": ["XFINLINK_API_KEY"],
+        "coverage_note": "Pro entitlement is required for 1996+ daily prices. Free keys are limited to 1 year of prices, 1 ticker per call, 40 requests/hour, and 100 requests/day.",
+        "pit_mode": "paid_delisted_price_history",
+    },
 ]
 
 FREE_REPAIR_ROUTE_RECOMMENDATIONS = [
@@ -147,6 +156,42 @@ FREE_REPAIR_ROUTE_RECOMMENDATIONS = [
         "required_env_vars": ["IEX_TOKEN or IEX_CLOUD_TOKEN"],
         "coverage_note": "Observation-only because IEX Cloud API products were retired in 2024; do not rely on it for L1/L2 readiness.",
         "pit_mode": "sandbox_observation",
+    },
+    {
+        "provider_id": "xfinlink_free_probe",
+        "label": "Xfinlink Free",
+        "source_url": "https://xfinlink.com/pricing",
+        "target": "entity_resolution_and_recent_price_probe",
+        "required_env_vars": ["XFINLINK_API_KEY"],
+        "coverage_note": "Free tier can resolve/search old tickers, but daily prices are limited to the latest 1 year; do not spend quota on old L1 price gaps unless probing a symbol from the active repair queue.",
+        "pit_mode": "limited_observation",
+    },
+    {
+        "provider_id": "company_ir_historical_price_pdfs",
+        "label": "Company IR Historical Price PDFs",
+        "source_url": "https://www.bnsf.com/about-bnsf/financial-information/",
+        "target": "single_symbol_official_price_repair",
+        "required_env_vars": [],
+        "coverage_note": "Use only for active PIT price-gap symbols when an official company/acquirer PDF exposes enough fields and corporate-action context. Do not infer missing Open or Volume; store source-quality metadata and treat HLC-only imports as price coverage, not full OHLCV.",
+        "pit_mode": "manual_single_symbol_repair",
+    },
+    {
+        "provider_id": "public_github_ohlcv_repos",
+        "label": "Public GitHub OHLCV Repositories",
+        "source_url": "https://github.com/willhjw/big_movers",
+        "target": "targeted_l1_price_gap_symbol_csv",
+        "required_env_vars": [],
+        "coverage_note": "Use GitHub public repos only by matching active PIT price-gap ticker filenames/paths first, then dry-run OHLCV/date/license checks before import. Do not treat public repos as institutional truth; preserve repo path, license, and adjusted-close limitations in metadata.",
+        "pit_mode": "targeted_public_repo_repair",
+    },
+    {
+        "provider_id": "public_wayback_yahoo_scrapers",
+        "label": "Public Wayback Yahoo Scrapers",
+        "source_url": "https://github.com/Acelogic/WayBackMachineStockScraper",
+        "target": "delisted_yahoo_archive_gap_repair",
+        "required_env_vars": [],
+        "coverage_note": "Use only on a small active PIT gap subset because HTML stitching can be slow and partial. Import only dry-run clean symbols, stop long runs, and mark coverage as partial when recovered from archived Yahoo snapshots.",
+        "pit_mode": "partial_archive_repair",
     },
 ]
 

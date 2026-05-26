@@ -738,6 +738,61 @@ def test_factor_quarantine_empty_intake_uses_sandbox_top_candidates_and_dedupes_
     assert [item["expression"] for item in listed["items"]].count("Return(Close, 5)") == 1
 
 
+def test_factor_quarantine_explicit_job_intake_preserves_source_batch_when_expression_published() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-quarantine-source-batch-published"))
+    expression = "ZScore(Return(Close, 5))"
+    storage = client.app.state.service.storage
+    storage.insert_json_row(
+        "factor_quarantine_candidates",
+        {
+            "id": "fq_published_return_5",
+            "mining_candidate_id": "cand_old_return_5",
+            "source_mining_job_id": "mine_old_return_5",
+            "expression": expression,
+            "status": "PUBLISHED",
+            "publish_status": "PUBLISHED",
+            "gate_summary_json": dumps({"pit": "Full Ready"}),
+            "cluster_id": "cluster_published_return_5",
+            "candidate_metrics_json": dumps({"rank_ic": 0.05, "coverage": 100.0}),
+            "failure_samples_json": dumps([]),
+            "pit_evidence_json": dumps({"status": "READY"}),
+            "publish_eligibility_json": dumps({"status": "PUBLISHED"}),
+            "target_factor_id": "s_f2_mom_ret_5d_px",
+            "created_at": "2026-05-05T09:00:00Z",
+            "updated_at": "2026-05-05T09:00:00Z",
+            "published_at": "2026-05-05T09:00:00Z",
+            "rejected_reason": None,
+        },
+    )
+    _seed_mining_candidate(
+        client,
+        job_id="mine_current_return_5",
+        candidate_id="cand_current_return_5",
+        expression=expression,
+        rank_ic=0.061,
+        coverage=100.0,
+    )
+
+    intake = assert_ok(client.post("/factor-quarantine/intake", json={"mining_job_id": "mine_current_return_5"}))
+
+    assert intake["summary"]["intake_count"] == 1
+    candidate = intake["items"][0]
+    assert candidate["id"] != "fq_published_return_5"
+    assert candidate["source_mining_job_id"] == "mine_current_return_5"
+    assert candidate["mining_candidate_id"] == "cand_current_return_5"
+    assert candidate["status"] == "PENDING"
+    source_queue = assert_ok(client.get("/factor-quarantine/candidates?source_job_id=mine_current_return_5"))
+    assert source_queue["summary"]["total"] == 1
+    published = storage.fetch_one("SELECT * FROM factor_quarantine_candidates WHERE id = ?", ("fq_published_return_5",))
+    assert published["source_mining_job_id"] == "mine_old_return_5"
+    assert published["status"] == "PUBLISHED"
+
+    second_intake = assert_ok(client.post("/factor-quarantine/intake", json={"mining_job_id": "mine_current_return_5"}))
+    assert second_intake["summary"]["intake_count"] == 1
+    second_queue = assert_ok(client.get("/factor-quarantine/candidates?source_job_id=mine_current_return_5"))
+    assert second_queue["summary"]["total"] == 1
+
+
 def _legacy_factor_quarantine_pit_not_full_ready_enters_review_queue_not_rejected() -> None:
     return
     client, _db_path = create_test_client(_runtime_dir("factor-quarantine-pit-review"))

@@ -429,6 +429,13 @@ describe('App runtime routes', () => {
     expect(screen.getByRole('button', { name: '导入本地文件' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '新建预检' })).toBeInTheDocument();
     expect((await screen.findAllByText('French-Data Library')).length).toBeGreaterThanOrEqual(1);
+    await waitFor(() => {
+      const requestedPaths = (mockServer?.fetchSpy.mock.calls ?? []).map(([input]) => {
+        const url = new URL(input instanceof Request ? input.url : String(input), 'http://localhost');
+        return `${url.pathname}${url.search}`;
+      });
+      expect(requestedPaths).toContain('/factor-factory/overview');
+    });
     expect(screen.getByText('AQR Data Library')).toBeInTheDocument();
     expect(screen.getByText('Fama-French 5 Factors Daily')).toBeInTheDocument();
     expect(screen.queryByText('Fama-French Data Library')).not.toBeInTheDocument();

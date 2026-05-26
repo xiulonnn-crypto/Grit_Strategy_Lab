@@ -66,6 +66,7 @@ from .factor_mining import (
     run_factor_mining_job,
 )
 from .factor_research import (
+    FACTOR_QUARANTINE_RULE_VERSION,
     FACTOR_PRUNE_CORRELATION_THRESHOLD,
     FactorResearchService,
     build_fundamental_gap_policy,
@@ -73,6 +74,7 @@ from .factor_research import (
     ensure_default_fundamental_snapshot,
     factor_ir_from_rank_ic,
     factor_display_name_projection_v4,
+    external_factor_import_display_projection_v1,
     _descriptor_from_factor_id,
     _published_factor_identity,
 )
@@ -157,6 +159,7 @@ FACTOR_FACTORY_PRUNE_EVIDENCE_SOURCES = {
     "MEASURED_DIAGNOSTIC_IC_SERIES",
     "FACTOR_LIBRARY_HEATMAP_PROXY",
 }
+FACTOR_FACTORY_SYNC_QUARANTINE_LIMIT = 50
 
 DEFAULT_UNIVERSE_SYMBOLS = {
     "SP500": ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "AVGO", "COST"],
@@ -2069,10 +2072,69 @@ class RealBacktestPlatformService(BacktestPlatformService):
         summary: Mapping[str, Any],
     ) -> dict[str, Any]:
         current_summary = dict(summary)
-        if current_summary.get("auto_quarantine_status") == "COMPLETED":
+        def quarantine_counts() -> dict[str, int]:
+            row = self.storage.fetch_one(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) AS pending,
+                    SUM(CASE WHEN status = 'PASSED' THEN 1 ELSE 0 END) AS passed,
+                    SUM(CASE WHEN status = 'NEEDS_REVIEW' THEN 1 ELSE 0 END) AS needs_review,
+                    SUM(CASE WHEN status = 'REJECTED' THEN 1 ELSE 0 END) AS rejected,
+                    SUM(CASE WHEN publish_status = 'ELIGIBLE' THEN 1 ELSE 0 END) AS eligible,
+                    SUM(CASE WHEN status <> 'PENDING' THEN 1 ELSE 0 END) AS processed
+                FROM factor_quarantine_candidates
+                WHERE source_mining_job_id = ?
+                """,
+                (mining_job_id,),
+            ) or {}
+            return {
+                "total": int(row.get("total") or 0),
+                "pending": int(row.get("pending") or 0),
+                "passed": int(row.get("passed") or 0),
+                "needs_review": int(row.get("needs_review") or 0),
+                "rejected": int(row.get("rejected") or 0),
+                "eligible": int(row.get("eligible") or 0),
+                "processed": int(row.get("processed") or 0),
+            }
+
+        def apply_quarantine_counts(counts: Mapping[str, int], *, status: str) -> None:
+            current_summary.update({
+                "auto_intake_count": int(counts.get("total") or 0),
+                "auto_quarantine_count": int(counts.get("processed") or 0),
+                "auto_quarantine_pending_count": int(counts.get("pending") or 0),
+                "auto_quarantine_sync_limit": FACTOR_FACTORY_SYNC_QUARANTINE_LIMIT,
+                "auto_quarantine_status": status,
+                "quarantine_status_counts": {
+                    "passed": int(counts.get("passed") or 0),
+                    "needs_review": int(counts.get("needs_review") or 0),
+                    "rejected": int(counts.get("rejected") or 0),
+                    "pending": int(counts.get("pending") or 0),
+                    "eligible": int(counts.get("eligible") or 0),
+                },
+            })
+
+        auto_status = str(current_summary.get("auto_quarantine_status") or "").upper()
+        if auto_status in {"COMPLETED", "PARTIAL", "DEFERRED"}:
             return current_summary
         if not mining_job_id:
             return current_summary
+        if auto_status == "FAILED":
+            existing_counts = quarantine_counts()
+            if existing_counts["total"] > 0:
+                apply_quarantine_counts(
+                    existing_counts,
+                    status="COMPLETED" if existing_counts["pending"] <= 0 else "PARTIAL",
+                )
+                if current_summary.get("auto_quarantine_error"):
+                    current_summary["auto_quarantine_last_error"] = current_summary.get("auto_quarantine_error")
+                    current_summary.pop("auto_quarantine_error", None)
+                current_summary.setdefault("redundancy_pruning", {
+                    "status": "DEFERRED",
+                    "reason": "partial_quarantine_recovery",
+                })
+                return current_summary
+
         intake = self.factor_quarantine_intake({
             "mining_job_id": mining_job_id,
             "source": "factor_factory",
@@ -2080,6 +2142,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
         })
         intake_items = intake.get("items") if isinstance(intake.get("items"), list) else []
         intake_summary = intake.get("summary") if isinstance(intake.get("summary"), Mapping) else {}
+        counts_before = quarantine_counts()
+        sync_limit = max(1, int(current_summary.get("auto_quarantine_sync_limit") or FACTOR_FACTORY_SYNC_QUARANTINE_LIMIT))
+        remaining_sync_budget = max(0, sync_limit - counts_before["processed"])
         self._record_factor_factory_run_item(
             run_id=run_id,
             stage="QUARANTINE_INTAKE",
@@ -2096,12 +2161,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
         )
         quarantine_results: list[dict[str, Any]] = []
         for item in intake_items:
+            if remaining_sync_budget <= 0:
+                break
             if not isinstance(item, Mapping):
                 continue
             candidate_id = str(item.get("id") or "").strip()
             if not candidate_id:
                 continue
-            if str(item.get("status") or "").upper() == "PUBLISHED":
+            item_status = str(item.get("status") or "").upper()
+            if item_status in {"PUBLISHED", "PASSED", "REJECTED"}:
                 continue
             result = self.run_factor_quarantine_candidate(candidate_id, {
                 "reason": "factor_factory_auto_quarantine",
@@ -2117,6 +2185,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 (mining_job_id, iso_now(), candidate_id),
             )
             quarantine_results.append(result)
+            remaining_sync_budget -= 1
             self._record_factor_factory_run_item(
                 run_id=run_id,
                 stage="QUARANTINE_RUN",
@@ -2129,28 +2198,24 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "gate_summary": result.get("gate_summary"),
                 },
             )
+        counts_after = quarantine_counts()
         redundancy_pruning = self._apply_factor_factory_redundancy_pruning(
             source_mining_job_id=mining_job_id,
         )
+        auto_quarantine_status = "COMPLETED" if counts_after["pending"] <= 0 else "PARTIAL"
+        apply_quarantine_counts(counts_after, status=auto_quarantine_status)
         current_summary.update({
-            "auto_intake_count": len(intake_items),
+            "auto_intake_count": counts_after["total"] or len(intake_items),
             "auto_intake_skipped_raw_f2_needs_refinement_count": int(
                 _coerce_float(intake_summary.get("skipped_raw_f2_needs_refinement_count"), 0.0)
             ),
-            "auto_quarantine_count": len(quarantine_results),
-            "auto_quarantine_status": "COMPLETED",
+            "auto_quarantine_sync_limit": sync_limit,
             "redundancy_pruning": redundancy_pruning,
             "quarantine_candidate_ids": [
                 str(item.get("id"))
                 for item in quarantine_results
                 if isinstance(item, Mapping) and item.get("id")
             ],
-            "quarantine_status_counts": {
-                "passed": sum(1 for item in quarantine_results if item.get("status") == "PASSED"),
-                "needs_review": sum(1 for item in quarantine_results if item.get("status") == "NEEDS_REVIEW"),
-                "rejected": sum(1 for item in quarantine_results if item.get("status") == "REJECTED"),
-                "eligible": sum(1 for item in quarantine_results if item.get("publish_status") == "ELIGIBLE"),
-            },
             "funnel": self._factor_factory_funnel(),
         })
         return current_summary
@@ -2185,7 +2250,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "composition_policy": mining_summary.get("composition_policy", {}),
                 "operator_engine": mining_summary.get("operator_engine", updated_summary.get("operator_engine", {})),
             })
-        if next_status == "COMPLETED":
+        auto_quarantine_status = str(summary.get("auto_quarantine_status") or "").upper()
+        if next_status == "COMPLETED" and auto_quarantine_status not in {"COMPLETED", "PARTIAL", "FAILED"}:
             try:
                 updated_summary = self._run_factor_factory_quarantine_pipeline(
                     run_id=str(row.get("id") or ""),
@@ -2368,29 +2434,67 @@ class RealBacktestPlatformService(BacktestPlatformService):
             )
             if str(row.get("factor_id") or "").strip()
         }
-        if published_factor_ids:
-            try:
-                online_factors = factor_service.list_factors(
-                    lifecycle="online",
-                    include_governance_queue=False,
-                ).get("items", [])
-            except Exception:
-                online_factors = []
-            for factor in online_factors:
-                factor_id = str(factor.get("id") or "").strip()
-                if factor_id not in published_factor_ids:
-                    continue
-                add_blockers(
-                    self._factor_factory_publishable_block_keys(
+        try:
+            online_factors = factor_service.list_factors(
+                lifecycle="online",
+                include_governance_queue=False,
+            ).get("items", [])
+        except Exception:
+            online_factors = []
+        seen_factor_ids: set[str] = set()
+        for factor in online_factors:
+            factor_id = str(factor.get("id") or "").strip()
+            if not factor_id:
+                continue
+            seen_factor_ids.add(factor_id)
+            add_blockers(
+                self._factor_factory_publishable_block_keys(
+                    factor_id=factor_id,
+                    name_collision_key=factor.get("name_collision_key"),
+                    base_display_name_cn=factor.get("base_display_name_cn"),
+                    display_name_cn=factor.get("display_name_cn"),
+                    factor_name=factor.get("name"),
+                ),
+                reason="ONLINE_PUBLISHED_FACTOR" if factor_id in published_factor_ids else "ONLINE_FACTOR_DEFINITION",
+                source={"factor_id": factor_id},
+            )
+        direct_online_rows = self.storage.fetch_all(
+            """
+            SELECT id, name, source, expression, lifecycle_status
+            FROM factor_definitions
+            WHERE deleted_at IS NULL
+              AND UPPER(COALESCE(lifecycle_status, '')) IN ('VERIFIED', 'ACTIVE', 'APPROVED', 'PUBLISHED')
+            """
+        )
+        for row in direct_online_rows:
+            factor_id = str(row.get("id") or "").strip()
+            if not factor_id or factor_id in seen_factor_ids:
+                continue
+            expression = str(row.get("expression") or "").strip()
+            source = str(row.get("source") or "").strip() or "AUTO_MINED"
+            target_layer = "F2" if "_f2_" in factor_id.lower() or "F2" in source.upper() else "F3"
+            projection: Mapping[str, Any] = {}
+            if expression:
+                try:
+                    projection = factor_display_name_projection_v4(
                         factor_id=factor_id,
-                        name_collision_key=factor.get("name_collision_key"),
-                        base_display_name_cn=factor.get("base_display_name_cn"),
-                        display_name_cn=factor.get("display_name_cn"),
-                        factor_name=factor.get("name"),
-                    ),
-                    reason="ONLINE_PUBLISHED_FACTOR",
-                    source={"factor_id": factor_id},
-                )
+                        source=source,
+                        expression=expression,
+                        tier_level=target_layer,
+                    )
+                except Exception:
+                    projection = {}
+            add_blockers(
+                self._factor_factory_publishable_block_keys(
+                    factor_id=factor_id,
+                    name_collision_key=projection.get("name_collision_key"),
+                    base_display_name_cn=projection.get("base_display_name_cn") or row.get("name"),
+                    display_name_cn=projection.get("display_name_cn") or row.get("name"),
+                    factor_name=row.get("name"),
+                ),
+                reason="ONLINE_PUBLISHED_FACTOR" if factor_id in published_factor_ids else "ONLINE_FACTOR_DEFINITION",
+                source={"factor_id": factor_id},
+            )
 
         try:
             governance_overview = factor_service.get_factor_governance_overview()
@@ -2798,6 +2902,17 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 """,
                 (source_mining_job_id,),
             )
+            rows = [
+                *rows,
+                *self.storage.fetch_all(
+                    """
+                    SELECT *
+                    FROM factor_quarantine_candidates
+                    WHERE source_mining_job_id LIKE 'extimp_%'
+                      AND status = 'PASSED'
+                    """
+                ),
+            ]
         else:
             rows = list(fallback_items)
         existing_factor_ids: set[str] = set()
@@ -2823,17 +2938,57 @@ class RealBacktestPlatformService(BacktestPlatformService):
             )
             if not isinstance(metrics, Mapping):
                 metrics = {}
-            if str(metrics.get("pipeline_version") or "") != "raw_refined_f2_v2":
+            pipeline_version = str(metrics.get("pipeline_version") or "")
+            is_external_import = (
+                pipeline_version == "external_factor_import_v1"
+                or str(metrics.get("source") or "").upper() == "PUBLIC_FACTOR_IMPORT"
+                or str(candidate.get("source_mining_job_id") or "").startswith("extimp_")
+            )
+            if is_external_import:
+                manifest = metrics.get("manifest") if isinstance(metrics.get("manifest"), Mapping) else {}
+                diagnostics = (
+                    metrics.get("external_diagnostics")
+                    if isinstance(metrics.get("external_diagnostics"), Mapping)
+                    else {}
+                )
+                source_ready = (
+                    int(_coerce_float(manifest.get("row_count"), 0.0)) > 0
+                    and int(_coerce_float(diagnostics.get("date_count"), 0.0)) > 0
+                    and int(_coerce_float(diagnostics.get("factor_count"), 0.0)) > 0
+                )
+                if not source_ready:
+                    continue
+                publish_eligibility = dict(candidate.get("publish_eligibility") or {})
+                publish_eligibility.update({
+                    "status": "ELIGIBLE",
+                    "reason": (
+                        str(candidate.get("reason_summary") or "").strip()
+                        or "外部公开因子源文件已物化并完成 B3 源数据检疫；已进入可上线发布候选。"
+                    ),
+                    "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
+                })
+                candidate["publish_status"] = "ELIGIBLE"
+                candidate["publish_eligibility"] = publish_eligibility
+            elif pipeline_version != "raw_refined_f2_v2":
                 continue
-            if bool(metrics.get("raw_f2")) and not (bool(metrics.get("refined_f2")) and bool(metrics.get("wnzt_complete"))):
+            if (
+                not is_external_import
+                and bool(metrics.get("raw_f2"))
+                and not (bool(metrics.get("refined_f2")) and bool(metrics.get("wnzt_complete")))
+            ):
                 continue
             expression = str(candidate.get("expression") or "").strip()
             target_layer = str(candidate.get("target_layer") or metrics.get("target_layer") or "L2").upper()
-            factor_id = _published_factor_identity(
+            published_identity = _published_factor_identity(
                 expression,
                 target_layer=target_layer,
                 metrics=metrics,
-            ).factor_id
+            )
+            factor_id = (
+                str(candidate.get("target_factor_id") or published_identity.factor_id)
+                if is_external_import
+                else published_identity.factor_id
+            )
             if factor_id not in existing_factor_ids:
                 existing = self.storage.fetch_one(
                     "SELECT id FROM factor_definitions WHERE id = ? AND deleted_at IS NULL",
@@ -2843,22 +2998,53 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     existing_factor_ids.add(factor_id)
             if factor_id in existing_factor_ids:
                 continue
-            projection = factor_display_name_projection_v4(
-                factor_id=factor_id,
-                source="AUTO_MINED",
-                expression=expression,
-                tier_level=target_layer.replace("L", "F"),
-                neutralization_scope=metrics.get("neutralization_scope") or metrics.get("orthogonality_intent"),
-                residual_control=metrics.get("residual_control") or ("market_beta" if "beta" in expression.lower() else None),
-            )
-            display_name = str(
-                projection.get("base_display_name_cn")
-                or candidate.get("display_name_cn")
-                or candidate.get("factor_name")
-                or candidate.get("name")
-                or projection.get("display_name_cn")
-                or expression
-            )
+            if is_external_import:
+                projection = external_factor_import_display_projection_v1(
+                    source_id=metrics.get("external_source_id"),
+                    dataset_key=metrics.get("external_dataset_key"),
+                    frequency=metrics.get("external_frequency"),
+                    factor_id=metrics.get("external_factor_id"),
+                    factor_name=metrics.get("external_factor_name"),
+                    metrics=metrics,
+                    previous_display_name=metrics.get("external_import_display_name")
+                    or candidate.get("display_name_cn")
+                    or candidate.get("factor_name")
+                    or candidate.get("name"),
+                )
+                display_name = str(projection["display_name_cn"])
+                metrics = dict(metrics)
+                metrics["external_import_display_name"] = display_name
+                metrics["external_import_name_audit"] = projection.get("name_audit")
+                candidate["candidate_metrics"] = metrics
+                projection = {
+                    "base_display_name_cn": display_name,
+                    "display_name_cn": display_name,
+                    "compact_display_name_cn": display_name,
+                    "name_collision_key": projection.get("name_collision_key"),
+                    "name_dedupe_suffix": "",
+                    "name_collision_group": [],
+                    "governance_badges": projection.get("governance_badges") or candidate.get("governance_badges") or ["外部", "B3 检疫", "Raw"],
+                    "name_schema_version": projection.get("name_schema_version") or candidate.get("name_schema_version"),
+                    "naming_protocol_version": projection.get("naming_protocol_version") or candidate.get("naming_protocol_version"),
+                    "name_audit": dict(projection.get("name_audit") or candidate.get("name_audit") or {}),
+                }
+            else:
+                projection = factor_display_name_projection_v4(
+                    factor_id=factor_id,
+                    source="AUTO_MINED",
+                    expression=expression,
+                    tier_level=target_layer.replace("L", "F"),
+                    neutralization_scope=metrics.get("neutralization_scope") or metrics.get("orthogonality_intent"),
+                    residual_control=metrics.get("residual_control") or ("market_beta" if "beta" in expression.lower() else None),
+                )
+                display_name = str(
+                    projection.get("base_display_name_cn")
+                    or candidate.get("display_name_cn")
+                    or candidate.get("factor_name")
+                    or candidate.get("name")
+                    or projection.get("display_name_cn")
+                    or expression
+                )
             block_keys = self._factor_factory_publishable_block_keys(
                 factor_id=factor_id,
                 name_collision_key=projection.get("name_collision_key"),
@@ -3062,7 +3248,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
         ]
         ranked_quarantine_items = sorted(
             [item for item in quarantine_items if isinstance(item, Mapping)],
-            key=lambda item: str(self._factor_factory_candidate_event_time(item) or ""),
+            key=lambda item: (
+                str(item.get("source_mining_job_id") or "").startswith("extimp_"),
+                str(self._factor_factory_candidate_event_time(item) or ""),
+            ),
             reverse=True,
         )
         factor_service = self._factor_research_service()
@@ -3471,6 +3660,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
         return snapshot
 
     def get_factor_factory_overview(self) -> dict[str, Any]:
+        factor_research_service = self._factor_research_service()
+        factor_research_service.materialize_external_factor_import_review_submissions(limit=50)
         profile_row = self.storage.fetch_one("SELECT * FROM factor_factory_profiles WHERE id = 'default'")
         profile = self._decode_factor_factory_profile_row(profile_row)
         run_rows = self.storage.fetch_all(
@@ -3491,6 +3682,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
             page=1,
             page_size=50,
         )
+        external_quarantine = factor_research_service.list_external_factor_import_quarantine_candidates(limit=12)
+        quarantine = self._merge_factor_factory_quarantine_projection(quarantine, external_quarantine)
         overview = {
             "profile": profile,
             "active_run": latest_run if latest_run and latest_run.get("status") in {"QUEUED", "RUNNING"} else None,
@@ -3499,6 +3692,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "funnel": self._factor_factory_funnel(),
             "mining": mining,
             "quarantine": quarantine,
+            "external_import_review_queue": factor_research_service.list_external_factor_import_review_queue(limit=8),
+            "external_import_quarantine": external_quarantine,
             "gate_policy": profile.get("gate_policy") or self._factor_factory_default_gate_policy(),
             "operator_config": self.get_factor_factory_operator_config(),
         }
@@ -3552,6 +3747,38 @@ class RealBacktestPlatformService(BacktestPlatformService):
             quarantine=quarantine,
         ))
         return overview
+
+    @staticmethod
+    def _merge_factor_factory_quarantine_projection(
+        quarantine: Mapping[str, Any],
+        external_quarantine: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        merged = deepcopy(dict(quarantine or {}))
+        external_items = list((external_quarantine or {}).get("items") or [])
+        if not external_items:
+            return merged
+        base_items = list(merged.get("items") or [])
+        seen: set[str] = set()
+        items: list[Any] = []
+        for item in [*external_items, *base_items]:
+            item_id = str(item.get("id") if isinstance(item, Mapping) else "")
+            if item_id and item_id in seen:
+                continue
+            if item_id:
+                seen.add(item_id)
+            items.append(item)
+        summary = dict(merged.get("summary") or {})
+        external_summary = dict((external_quarantine or {}).get("summary") or {})
+        page_size = int(summary.get("page_size") or 50)
+        merged["items"] = items[:page_size]
+        for key in ("total", "passed_count", "needs_review_count", "published_count", "rejected_count"):
+            summary[key] = int(summary.get(key) or 0) + int(external_summary.get(key) or 0)
+        summary["page"] = int(summary.get("page") or 1)
+        summary["page_size"] = page_size
+        total = int(summary.get("total") or 0)
+        summary["total_pages"] = max(1, math.ceil(total / page_size)) if total else 1
+        merged["summary"] = summary
+        return merged
 
     def _upsert_factor_factory_profile(
         self,
@@ -3970,8 +4197,16 @@ class RealBacktestPlatformService(BacktestPlatformService):
         engine_config = OperatorEngineConfig.from_mapping(config_snapshot)
         fields = self._factor_factory_operator_engine_fields(config_snapshot, request_payload)
         engine = PandasBottleneckOperatorEngine()
+        job_id = f"mine_op_{hashlib.sha1(run_id.encode('utf-8')).hexdigest()[:16]}"
         result = engine.generate_candidates(f1_fields=fields, config=engine_config)
-        materialized = materialize_operator_engine_result(result, run_id=run_id)
+        materialized = materialize_operator_engine_result(
+            result,
+            run_id=run_id,
+            job_id=job_id,
+            source_job_id=job_id,
+            created_at=created_at,
+            refined_count=result.deduped_formula_count,
+        )
         candidate_artifact_refs = materialized.get("candidate_artifact_refs") if isinstance(materialized.get("candidate_artifact_refs"), Mapping) else {}
         preview_limit = max(1, min(50, int(request_payload.get("candidate_count") or 10)))
         full_candidates = []
@@ -3998,7 +4233,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
         for offset, candidate in enumerate(f3_candidates, start=raw_f2_candidate_count + 1):
             candidate["rank"] = offset
         full_candidates.extend(f3_candidates)
-        job_id = f"mine_op_{hashlib.sha1(run_id.encode('utf-8')).hexdigest()[:16]}"
+        refined_f2_candidate_count = sum(
+            1
+            for candidate in full_candidates
+            if candidate.get("target_layer") == "L2" and candidate.get("refined_f2") and candidate.get("wnzt_complete")
+        )
         top_candidates = [
             candidate
             for candidate in full_candidates[:preview_limit]
@@ -4008,12 +4247,33 @@ class RealBacktestPlatformService(BacktestPlatformService):
         )
         refined_candidate_ledger_path = Path(refined_candidate_ledger_rel)
         refined_candidate_ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        ledger_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "job_id": job_id,
+                    "raw_f2_candidate_count": raw_f2_candidate_count,
+                    "refined_f2_candidate_count": refined_f2_candidate_count,
+                    "candidate_ids": [str(candidate.get("id") or "") for candidate in full_candidates],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
         refined_candidate_ledger_path.write_text(
             json.dumps(
                 {
                     "run_id": run_id,
+                    "job_id": job_id,
+                    "source_job_id": job_id,
                     "mining_job_id": job_id,
-                    "candidate_count": len(full_candidates),
+                    "formula_count": result.deduped_formula_count,
+                    "refined_count": refined_f2_candidate_count,
+                    "candidate_count": refined_f2_candidate_count,
+                    "total_candidate_count": len(full_candidates),
+                    "f3_composition_candidate_count": len(f3_candidates),
+                    "hash": ledger_hash,
+                    "created_at": created_at,
                     "candidates": full_candidates,
                 },
                 ensure_ascii=False,
@@ -4046,11 +4306,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "generated_formula_count": result.generated_formula_count,
                 "deduped_formula_count": result.deduped_formula_count,
                 "raw_f2_batch_delivered_count": raw_f2_candidate_count,
-                "refined_f2_batch_delivered_count": sum(
-                    1
-                    for candidate in full_candidates
-                    if candidate.get("target_layer") == "L2" and candidate.get("refined_f2") and candidate.get("wnzt_complete")
-                ),
+                "refined_f2_batch_delivered_count": refined_f2_candidate_count,
                 "f3_composition_candidate_count": len(f3_candidates),
                 "composition_skip_evidence": composition_skip_evidence,
                 "composition_methods": list(request_payload.get("composition_policy", {}).get("composition_methods") or []),

@@ -92,6 +92,19 @@ function Wait-HttpReady {
     return $false
 }
 
+function Open-WorkspaceBrowserIfRequested {
+    param([string]$Reason = 'workspace ready')
+    if ($NoBrowser) {
+        return
+    }
+    try {
+        Start-Process -FilePath $workspaceUrl | Out-Null
+        Write-Host "Opened workspace in browser: $workspaceUrl" -ForegroundColor Green
+    } catch {
+        Write-Warning "Workspace is ready at $workspaceUrl, but QuickStart could not open the browser automatically ($Reason): $($_.Exception.Message)"
+    }
+}
+
 function Test-PythonCandidate {
     param([string]$PythonExe)
     if ([string]::IsNullOrWhiteSpace($PythonExe) -or -not (Test-Path -LiteralPath $PythonExe)) {
@@ -812,6 +825,9 @@ function Invoke-QuickStartSupervisorGuard {
         Write-Host $message -ForegroundColor Green
         Write-Host "Workspace URL: $workspaceUrl" -ForegroundColor Green
         Write-Host "Status: powershell -ExecutionPolicy Bypass -File .\scripts\runtime-supervisor.ps1 status quickstart" -ForegroundColor Yellow
+        if ([string]($guard.status) -eq 'already_running') {
+            Open-WorkspaceBrowserIfRequested -Reason 'QuickStart reused an existing supervisor-owned runtime'
+        }
         return $false
     }
     return $true
@@ -985,4 +1001,5 @@ if (-not $skipFrontendStart) {
     & $nodeExe @previewArgs
 } else {
     Write-Host "Workspace URL: $workspaceUrl" -ForegroundColor Green
+    Open-WorkspaceBrowserIfRequested -Reason 'frontend preview was already healthy'
 }

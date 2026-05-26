@@ -1,0 +1,24 @@
+[
+  {
+    "viewport": "desktop",
+    "url": "http://127.0.0.1:4173/?v=1779777848895-desktop#/factors/factory",
+    "screenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factor-imports-direct-b3-and-publish-dedupe\\factory-desktop.png",
+    "hasExternalReviewQueue": false,
+    "hasPendingD2Copy": false,
+    "b3ReasonCount": 0,
+    "hasSmoothRawPublishable": false,
+    "publishSectionCount": 0,
+    "hasPageRoot": true
+  },
+  {
+    "viewport": "mobile",
+    "url": "http://127.0.0.1:4173/?v=1779777911042-mobile#/factors/factory",
+    "screenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factor-imports-direct-b3-and-publish-dedupe\\factory-mobile.png",
+    "hasExternalReviewQueue": false,
+    "hasPendingD2Copy": false,
+    "b3ReasonCount": 0,
+    "hasSmoothRawPublishable": false,
+    "publishSectionCount": 0,
+    "hasPageRoot": true
+  }
+]

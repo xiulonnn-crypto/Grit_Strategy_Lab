@@ -1,0 +1,15 @@
+{
+  "url": "http://127.0.0.1:4173/?v=1779786713588#/factors/factory",
+  "title": "Grit Backtest Platform V1",
+  "publishSectionHasExpectedName": true,
+  "publishSectionHasOldEnglishName": false,
+  "modalHasNamingAudit": true,
+  "modalHasExpertReview": true,
+  "mobilePublishSectionHasExpectedName": true,
+  "apiExternalPublishableCount": 1,
+  "apiDisplayName": "[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]",
+  "apiCoreSemantic": "Fama-French 美股研究日频因子",
+  "apiGovernanceTag": "Raw",
+  "apiExpertRecommendation": "尝试 TS_Mean(..., 5) 等时序平滑，再观察 RankICIR 与换手率是否改善。",
+  "consoleErrors": []
+}

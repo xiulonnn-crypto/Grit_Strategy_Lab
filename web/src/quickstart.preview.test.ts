@@ -49,6 +49,14 @@ describe("QuickStart frontend preview bootstrap", () => {
     expect(quickStartSource).toContain("Frontend preview already healthy on port 4173; reusing the existing listener.");
   });
 
+  it("opens the workspace when normal startup reuses an existing healthy runtime", () => {
+    expect(quickStartSource).toContain("function Open-WorkspaceBrowserIfRequested");
+    expect(quickStartSource).toContain("if ($NoBrowser)");
+    expect(quickStartSource).toMatch(/Start-Process\s+-FilePath\s+\$workspaceUrl/);
+    expect(quickStartSource).toContain("QuickStart reused an existing supervisor-owned runtime");
+    expect(quickStartSource).toContain("frontend preview was already healthy");
+  });
+
   it("can recognize a healthy repo preview even when Windows hides the command line", () => {
     expect(quickStartSource).toContain("function Test-RepoFrontendPreviewHttpFingerprint");
     expect(quickStartSource).toContain("Grit Backtest Platform");

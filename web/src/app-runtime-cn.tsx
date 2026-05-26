@@ -26,6 +26,7 @@ import type {
   ApiExternalFactorImportJob,
   ApiExternalFactorFrequency,
   ApiExternalFactorSourceRegistryResponse,
+  ApiFactorFactoryOverview,
   ApiFactorDiagnosticPreview,
   ApiFactorDirection,
   ApiFactorListItem,
@@ -142,6 +143,48 @@ function publicFactorDatasetId(
   return source?.datasets[index]?.key || fallback;
 }
 
+function runtimeRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function runtimeString(value: unknown): string {
+  return typeof value === 'string' && value.trim() ? value.trim() : '';
+}
+
+function runtimeTime(...values: unknown[]): number {
+  return values.reduce<number>((latest, value) => {
+    const parsed = Date.parse(runtimeString(value));
+    return Number.isFinite(parsed) ? Math.max(latest, parsed) : latest;
+  }, 0);
+}
+
+function latestExternalImportJobIdFromOverview(
+  overview: ApiFactorFactoryOverview | null | undefined,
+): string | undefined {
+  const snapshots: Array<{ jobId: string; updatedAt: number }> = [];
+  for (const item of overview?.external_import_review_queue?.items || []) {
+    const jobId = runtimeString(item.id);
+    if (jobId) {
+      snapshots.push({
+        jobId,
+        updatedAt: runtimeTime(item.updated_at, item.submitted_at),
+      });
+    }
+  }
+  for (const item of overview?.external_import_quarantine?.items || []) {
+    const metrics = runtimeRecord(item.candidate_metrics);
+    const jobId = runtimeString(item.source_mining_job_id) || runtimeString(metrics.external_import_job_id);
+    if (jobId) {
+      snapshots.push({
+        jobId,
+        updatedAt: runtimeTime(item.updated_at, item.published_at, item.created_at),
+      });
+    }
+  }
+  snapshots.sort((left, right) => right.updatedAt - left.updatedAt);
+  return snapshots[0]?.jobId;
+}
+
 function mapExternalFactorRegistry(
   registry: ApiExternalFactorSourceRegistryResponse,
 ): Partial<PublicFactorImportViewModel> {
@@ -222,7 +265,7 @@ function mapExternalFactorRegistry(
       key: 'aqr_us_qmj_daily',
       sourceName: 'AQR',
       frequency: '日频',
-      coverage: '人工确认',
+      coverage: '许可待核',
       status: 'review',
       fieldCount: 4,
       statusLabel: '需许可确认',
@@ -234,7 +277,7 @@ function mapExternalFactorRegistry(
       key: 'aqr_tsmom_monthly',
       sourceName: 'AQR',
       frequency: '月频',
-      coverage: '人工确认',
+      coverage: '许可待核',
       status: 'reference',
       fieldCount: 3,
       statusLabel: '手动上传',
@@ -863,7 +906,28 @@ function PublicFactorImportRoutePage(): JSX.Element {
       if (!api.getExternalFactorSourceRegistry) {
         return null;
       }
-      return mapExternalFactorRegistry(await api.getExternalFactorSourceRegistry());
+      const registryPatch = mapExternalFactorRegistry(await api.getExternalFactorSourceRegistry());
+      if (!api.getFactorFactoryOverview || !api.getExternalFactorImportJob) {
+        return registryPatch;
+      }
+      try {
+        const overview = await api.getFactorFactoryOverview();
+        const latestJobId = latestExternalImportJobIdFromOverview(overview);
+        if (!latestJobId) {
+          return registryPatch;
+        }
+        const jobPatch = mapExternalFactorJob(await api.getExternalFactorImportJob(latestJobId));
+        return {
+          ...registryPatch,
+          ...jobPatch,
+          sources: registryPatch.sources,
+          datasets: registryPatch.datasets,
+          mappingsByDataset: registryPatch.mappingsByDataset,
+          updatedAtLabel: registryPatch.updatedAtLabel,
+        };
+      } catch {
+        return registryPatch;
+      }
     },
     createPrecheck: async (payload) => {
       if (!api.createExternalFactorImportJob) {

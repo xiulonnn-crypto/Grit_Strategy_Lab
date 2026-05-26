@@ -1,0 +1,26 @@
+{
+  "url": "http://127.0.0.1:4173/?v=1779783956282#/factors/factory",
+  "title": "Grit Backtest Platform V1",
+  "hasSourceNotMaterializedText": false,
+  "publishSectionHasFamaFrench": true,
+  "publishSectionHasPass": true,
+  "mobilePublishSectionHasFamaFrench": true,
+  "publishableTotal": 1,
+  "externalPublishableCount": 1,
+  "externalQuarantineTotal": 4,
+  "externalPassedCount": 4,
+  "externalEligibleCount": 4,
+  "externalBlockedCount": 0,
+  "firstExternalPublishable": [
+    {
+      "candidate_id": "fq_ext_c2becac9b51e",
+      "factor_id": "s_f2_mom_raw_cur_external_fama_french_us_research_factors_daily",
+      "display_name_cn": "Fama-French Data Library / US research factors daily",
+      "quarantine_status": "PASS",
+      "quarantine_result": "PASS",
+      "publish_eligibility": "ELIGIBLE",
+      "score": 77.48
+    }
+  ],
+  "consoleErrors": []
+}

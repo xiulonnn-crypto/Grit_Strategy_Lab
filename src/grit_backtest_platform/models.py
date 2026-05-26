@@ -876,7 +876,7 @@ class SnapshotProviderSummaryItem(BaseModel):
     landed_row_count: int = 0
     landed_symbol_count: int = 0
     actions_supported: bool = False
-    access_tier: SnapshotProviderAccessTier = 'public'
+    access_tier: SnapshotProviderAccessTier | str = 'public'
     quota_limited: bool = False
     probe_complete: bool = False
     next_retry_at: str | None = None

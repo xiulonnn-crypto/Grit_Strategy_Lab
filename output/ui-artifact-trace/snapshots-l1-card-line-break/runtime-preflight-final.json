@@ -1,0 +1,124 @@
+﻿{
+    "schema":  "grit.runtime.preflight.v1",
+    "timestamp":  "2026-05-26T10:49:36.4045311Z",
+    "repoRoot":  "C:\\Fin\\Grit_Strategy_Lab",
+    "quickstartOverall":  "ready",
+    "decision":  "reuse",
+    "restartReason":  "Current supervisor-owned runtime appears ready for live acceptance.",
+    "nextAction":  "Use a cache-busting live URL and proceed with browser/API verification.",
+    "backendUrl":  "http://127.0.0.1:8000/healthz",
+    "frontendUrl":  "http://127.0.0.1:4173/",
+    "backendHealthy":  true,
+    "backendPid":  16112,
+    "backendRepoOwned":  true,
+    "backendCommandLine":  "\"C:\\Fin\\Grit_Strategy_Lab\\.python-runtime\\python.exe\" -m uvicorn --app-dir src grit_backtest_platform.main:app --host 127.0.0.1 --port 8000 ",
+    "backendProcessPath":  "C:\\Fin\\Grit_Strategy_Lab\\.python-runtime\\python.exe",
+    "backendCommandLineError":  null,
+    "backendHealthz":  {
+                           "ok":  true,
+                           "statusCode":  200,
+                           "contentHash":  "a29ee2b15c494311c52521766e44af56a3ad2248e7a8ab465e5206463c13d288",
+                           "fingerprintOk":  true,
+                           "contentLength":  15,
+                           "error":  null
+                       },
+    "backendDbEnvPath":  "C:\\Fin\\Grit_Strategy_Lab\\.grit_backtest_platform.sqlite3",
+    "backendStartedAt":  "2026-05-26T10:38:09.8830790Z",
+    "newestBackendSourceMtime":  "2026-05-26T10:24:07.6605740Z",
+    "newestBackendSourcePath":  "src\\grit_backtest_platform\\factor_research.py",
+    "backendStaleBySourceMtime":  false,
+    "frontendHealthy":  true,
+    "frontendPid":  19720,
+    "frontendRepoOwned":  true,
+    "frontendCommandLine":  "\"C:\\Program Files\\nodejs\\node.exe\" C:\\Fin\\Grit_Strategy_Lab\\web\\preview-server.mjs --host 127.0.0.1 --port 4173 --watch ",
+    "frontendProcessPath":  "C:\\Program Files\\nodejs\\node.exe",
+    "frontendCommandLineError":  null,
+    "frontendDistHash":  "0fb62db078ae0ddaf6e18913a150324e0938b13cb8989a48f4f6fd9c0e3934da",
+    "frontendDistMtime":  "2026-05-26T10:49:22.2408860Z",
+    "frontendServedHash":  "0fb62db078ae0ddaf6e18913a150324e0938b13cb8989a48f4f6fd9c0e3934da",
+    "newestFrontendSourceMtime":  "2026-05-26T10:49:13.9254163Z",
+    "newestFrontendSourcePath":  "web\\src\\pages\\snapshots-page.css",
+    "frontendDistStaleBySourceMtime":  false,
+    "portProbeMethod":  [
+                            "Get-NetTCPConnection"
+                        ],
+    "portProbeStatus":  "ok",
+    "ports":  {
+                  "backend":  {
+                                  "port":  8000,
+                                  "pids":  [
+                                               16112
+                                           ],
+                                  "method":  "Get-NetTCPConnection",
+                                  "status":  "ok",
+                                  "errors":  [
+
+                                             ]
+                              },
+                  "frontend":  {
+                                   "port":  4173,
+                                   "pids":  [
+                                                19720
+                                            ],
+                                   "method":  "Get-NetTCPConnection",
+                                   "status":  "ok",
+                                   "errors":  [
+
+                                              ]
+                               }
+              },
+    "browserProbeStatus":  "ready",
+    "browserProbe":  {
+                         "status":  "ready",
+                         "detail":  "Playwright module and browser cache are present",
+                         "playwrightPackage":  "C:\\Fin\\Grit_Strategy_Lab\\web\\node_modules\\playwright\\package.json",
+                         "browserPath":  "C:\\Users\\TradeAdmin\\AppData\\Local\\ms-playwright"
+                     },
+    "supervisorStatus":  {
+                             "components":  [
+                                                {
+                                                    "cooldown_until":  "2026-05-26T10:27:40.414141Z",
+                                                    "health":  "healthy",
+                                                    "heartbeat_at":  "2026-05-26T10:49:34.626552Z",
+                                                    "last_command":  "restart",
+                                                    "owner":  "supervisor",
+                                                    "pending_intent_count":  0,
+                                                    "pid":  16112,
+                                                    "pids":  [
+                                                                 16112
+                                                             ],
+                                                    "service":  "backend-api",
+                                                    "state":  "running",
+                                                    "tier":  "singleton"
+                                                },
+                                                {
+                                                    "cooldown_until":  "2026-05-26T10:27:40.984725Z",
+                                                    "health":  "healthy",
+                                                    "heartbeat_at":  "2026-05-26T10:49:34.840974Z",
+                                                    "last_command":  "restart",
+                                                    "owner":  "supervisor",
+                                                    "pending_intent_count":  0,
+                                                    "pid":  19720,
+                                                    "pids":  [
+                                                                 19720
+                                                             ],
+                                                    "service":  "frontend-preview",
+                                                    "state":  "running",
+                                                    "tier":  "singleton"
+                                                }
+                                            ],
+                             "cooldown_until":  "2026-05-26T10:28:48.395756Z",
+                             "health":  "healthy",
+                             "heartbeat_at":  "2026-05-26T10:49:34.840974Z",
+                             "last_command":  "restart",
+                             "owner":  "supervisor",
+                             "pending_intent_count":  0,
+                             "pid":  null,
+                             "pids":  [
+
+                                      ],
+                             "service":  "quickstart",
+                             "state":  "running",
+                             "tier":  "exclusive"
+                         }
+}

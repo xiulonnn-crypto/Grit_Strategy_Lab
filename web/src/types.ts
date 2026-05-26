@@ -946,7 +946,7 @@ export type ApiSnapshotProviderSummaryItem = {
   landed_row_count?: number;
   landed_symbol_count?: number;
   actions_supported?: boolean;
-  access_tier?: ApiSnapshotProviderAccessTier;
+  access_tier?: ApiSnapshotProviderAccessTier | string;
   quota_limited?: boolean;
   probe_complete?: boolean;
   next_retry_at?: string | null;
@@ -3736,6 +3736,40 @@ export type ApiExternalFactorImportJob = {
   job_projection?: Record<string, unknown>;
 };
 
+export type ApiExternalFactorImportReviewQueueItem = {
+  id: string;
+  source_id: string;
+  dataset_key: string;
+  source_name: string;
+  dataset_name: string;
+  import_mode: ApiExternalFactorImportMode | string;
+  status: string;
+  review_status: string;
+  frequency: ApiExternalFactorFrequency | string;
+  submitted_at?: string | null;
+  updated_at?: string | null;
+  manifest: Pick<ApiExternalFactorManifest, "row_count" | "column_count" | "parsing_status" | "template_key" | "warnings">;
+  artifact_paths?: ApiExternalFactorArtifactPaths | Record<string, unknown>;
+  risk_flags: string[];
+  next_actions: string[];
+  governance_gate: string;
+  queue_state: string;
+  direct_publish_allowed: false;
+  [key: string]: unknown;
+};
+
+export type ApiExternalFactorImportReviewQueue = {
+  items: ApiExternalFactorImportReviewQueueItem[];
+  summary: {
+    total: number;
+    items_returned?: number;
+    review_boundary?: string;
+    queue_state?: string;
+    direct_publish_allowed?: false;
+    [key: string]: unknown;
+  };
+};
+
 export type ApiOperatorRegistryItem = {
   operator_id: string;
   operator_group: "TS" | "CS" | "NONLINEAR" | string;
@@ -3998,6 +4032,8 @@ export type ApiFactorFactoryOverview = {
   funnel: ApiFactorFactoryFunnel;
   mining: ApiFactorMiningJobListResponse;
   quarantine: ApiFactorQuarantineCandidateListResponse;
+  external_import_review_queue?: ApiExternalFactorImportReviewQueue;
+  external_import_quarantine?: ApiFactorQuarantineCandidateListResponse;
   gate_policy: ApiFactorFactoryGatePolicy;
   daily_run?: ApiFactorFactoryRun;
   manual_run?: ApiFactorFactoryRun;

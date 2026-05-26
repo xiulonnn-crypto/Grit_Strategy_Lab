@@ -537,6 +537,10 @@ def test_pit_data_overview_requires_dataset_and_universe_snapshots(tmp_path):
         "l3_sentiment_data",
         "l4_macro_derivatives",
     ]
+    l1_layer = next(item for item in ready_payload["pit_layer_readiness"] if item["layer_id"] == "l1_market_data")
+    l1_metrics = {item["label"]: item["value"] for item in l1_layer["metrics"]}
+    assert l1_metrics["PIT目标"] == "4/4"
+    assert l1_metrics["基准ETF"] == "0/3"
     by_group = {item["group_id"]: item for item in ready_payload["factor_diagnostic_readiness"]}
     assert by_group["price"]["status"] == "VERIFIED"
     assert by_group["quality_valuation"]["status"] == "VERIFIED"
@@ -1514,6 +1518,27 @@ def test_factor_display_name_raw_suffix_requires_wnzt_evidence_before_refined_su
     )
     assert refined_projection["display_name_cn"] == "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined]"
     assert refined_projection["name_audit"]["structured_components"]["governance_tag"] == "Refined"
+
+
+def test_factor_display_name_financial_release_timing_uses_timing_semantic_and_window():
+    expression = (
+        'TS_Rank(ZScore(Neutralize(Winsorize(Abs(TS_Min(f1_financial_release_timing, 3)), '
+        'method="MAD"), by="industry,market_cap")), 3)'
+    )
+    projection = factor_display_name_projection_v4(
+        factor_id="s_f2_mom_raw_cur_f1_financial_release_timing",
+        source="AUTO_MINED",
+        expression=expression,
+        tier_level="F2",
+    )
+    components = projection["name_audit"]["structured_components"]
+
+    assert projection["display_name_cn"] == "[情绪] - 财报发布时效滞后得分 (3d) [Raw]"
+    assert projection["base_display_name_cn"] == "[情绪] - 财报发布时效滞后得分 (3d) [Raw]"
+    assert components["style_family"] == "情绪"
+    assert components["core_semantic"] == "财报发布时效滞后得分"
+    assert components["time_window"] == "3d"
+    assert components["governance_tag"] == "Raw"
 
 
 def test_factor_display_name_v4_backfill_dedupes_online_f2_f3_names(tmp_path):

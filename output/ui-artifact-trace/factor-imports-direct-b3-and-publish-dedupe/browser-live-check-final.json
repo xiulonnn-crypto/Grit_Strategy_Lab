@@ -1,0 +1,30 @@
+[
+  {
+    "viewport": "desktop",
+    "responseStatus": 200,
+    "apiExternalTotal": 4,
+    "apiQueueTotal": 0,
+    "apiQueueState": "MATERIALIZED_TO_B3",
+    "apiPublishableCount": 1,
+    "screenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factor-imports-direct-b3-and-publish-dedupe\\factory-desktop-final.png",
+    "hasExternalReviewQueue": false,
+    "hasPendingD2Copy": false,
+    "b3ReasonCount": 4,
+    "hasSmoothRawPublishable": true,
+    "publishSectionCount": 1
+  },
+  {
+    "viewport": "mobile",
+    "responseStatus": 200,
+    "apiExternalTotal": 4,
+    "apiQueueTotal": 0,
+    "apiQueueState": "MATERIALIZED_TO_B3",
+    "apiPublishableCount": 1,
+    "screenshot": "C:\\Fin\\Grit_Strategy_Lab\\output\\ui-artifact-trace\\factor-imports-direct-b3-and-publish-dedupe\\factory-mobile-final.png",
+    "hasExternalReviewQueue": false,
+    "hasPendingD2Copy": false,
+    "b3ReasonCount": 4,
+    "hasSmoothRawPublishable": true,
+    "publishSectionCount": 1
+  }
+]

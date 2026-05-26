@@ -1,0 +1,21 @@
+{
+  "url": "http://127.0.0.1:4173/?v=1779787823815#/factors/s_f2_mom_raw_cur_external_fama_french_us_research_factors_daily",
+  "h1": "[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]诊断报告",
+  "bodyPreview": "GSL\nGrit Strategy Lab\n策略研究与回测平台\n\n组合\n\n组合仪表板\n组合列表\n组合回测\n组合实验室\n资产库\n\n策略\n\n策略工作台\n策略库\n回测列表\n优化实验室\n\n因子\n\n因子库\n公开因子入库\n因子工厂\n\n数据\n\nPIT 清洗中心\n数据快照\n\n因子诊断\n\n[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]诊断报告\n\n因子描述逻辑：[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]基于历史收盘价变化衡量中期趋势延续或价格路径强度，要求价格样本满足 PIT 回放口径。作用：用于识别趋势更清晰的相对强势标的，数值越高越优先，后续仍需结合 Rank IC、回撤和拥挤度校准。\n\n已完成\n公式\nds-price\nun-sp500\n重新诊断\n生成投委会 PDF\n排序 IC\n0.139\n\n滚动窗口稳定性\n\n信息比率\n0.50\n\n最近诊断运行\n\n预估年换手\n待生成\n\nTRS 成本敏感\n\n覆盖率\n100.0%\n\n可诊断样本\n\n十格证据热力图\n\n10年 / 20年 / 30年稳定性与漂移风险同屏呈现，橙色格表示漂移预警，红色缺口进入极端场景补测。\n\n0 格漂移\n窗口\n2008\n2010\n2012\n2014\n2016\n2018\n2020\n2022\n2024\n2026\n10年夏普\n待生成\n待生成\n待生成\n待生成\n待生成\n待生成\n待生成\n待生成\n待生成\n待生成\n20年夏普\n待生成\n待生成\n待生成\n待生成\n待生成\n待生成\n待生成\n待生成\n待生成\n待生成\n30年夏普\n待生成\n待生成\n待生成\n待生成\n待生成\n待生成\n待生成\n待生成\n待生成\n待生成\n换手率与衰减\n?\n\ncur 因子必须说明信号有效期、换手压力和单笔交易摩擦成本，供 TRS 业务核算。\n\n成本敏感\n信号半衰期\n待生成 交易日\n第 63 日后 IC 边际贡献明显下降\nTRS 成本拆解\n换手\n待生成\n冲击\n待生成\n融资\n待生成\n滑点\n待生成\n分层收益与 IC 走势\n?\n\n强因子组到弱因子组使用滑动平均口径检查单调性，极端分组的换手与覆盖率同时展示。\n\n排序 IC 滚动窗口\n分层回测\n暂无分层收益数据。\n极端场景回测\n\n对红色缺口使用代理数据或合成数据补充压力逻辑，不把缺口直接当成通过。\n\n恢复期\n0.14\nIC 转正\n风险提示\n未来函数风险\n外部公开来源\n覆盖缺口\n覆盖缺口：当前覆盖率 100.0%，报告保留样本边界。\n漂移预警\n成本敏感：换手、冲击、融资和滑点需要在正式交易前复核。\n审计足迹\n挖掘任务完成\n5月26日 下午02:41\n\n来源任务 extimp_9b82171fac93 产出候选表达式。\n\n检疫通过\n5月26日 下午03:40\n\nD2 完成 IS/OOS、正交化和去重门禁。\n\n自动发布落版\n5月26日 下午05:17\n\n发布为 s_f2_mom_raw_cur_external_fama_french_us_research_factors_daily，来源标记为自动挖掘。\n\n公式\n公式标签已绑定\n数据\nds-price / un-sp500\n清洗规则\nquarantine-rule-v2\n诊断时间\n5月26日 下午05:17\n执行人\n系统规则\n投委会 PDF 附件\n自动带入诊断摘要、PIT 版本、极端场景和审计足迹。\n生成标准 PDF",
+  "responses": [
+    {
+      "url": "http://127.0.0.1:4173/assets/factors-page-mZNXKImY.css",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:4173/assets/factors-page-CvIkKvYq.js",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:8000/factors/s_f2_mom_raw_cur_external_fama_french_us_research_factors_daily",
+      "status": 200
+    }
+  ],
+  "consoleErrors": [],
+  "failedRequests": []
+}

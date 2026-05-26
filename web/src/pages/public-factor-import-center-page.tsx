@@ -171,7 +171,7 @@ const FALLBACK_VIEW_MODEL: PublicFactorImportViewModel = {
       key: 'aqr_us_qmj_daily',
       sourceName: 'AQR',
       frequency: '日频',
-      coverage: '人工确认',
+      coverage: '许可待核',
       status: 'review',
       fieldCount: 4,
       statusLabel: '需许可确认',
@@ -183,7 +183,7 @@ const FALLBACK_VIEW_MODEL: PublicFactorImportViewModel = {
       key: 'aqr_tsmom_monthly',
       sourceName: 'AQR',
       frequency: '月频',
-      coverage: '人工确认',
+      coverage: '许可待核',
       status: 'reference',
       fieldCount: 3,
       statusLabel: '手动上传',
@@ -308,7 +308,7 @@ const FALLBACK_VIEW_MODEL: PublicFactorImportViewModel = {
     rowCount: 15842,
     artifactPath: 'artifacts/factor-import/french/imp_20260521_ff5_001',
     reviewNote:
-      '公开因子模板只进入 D2 检疫或人工复核。正式发布必须拥有 PIT 覆盖、RankIC/IR 证据和治理审批。',
+      '公开因子模板完成语义映射后直接进入 B3 检疫。正式发布必须拥有 PIT 覆盖、RankIC/IR 证据和治理审批。',
   },
 };
 
@@ -324,7 +324,7 @@ const FLOW_STEPS = [
   { title: '获取 / 上传', body: '自动下载公开文件，或上传 CSV / XLSX。' },
   { title: '新建预检', body: '记录字段、日期范围、hash 与 parser 版本。' },
   { title: '语义映射', body: '对齐 GSL 因子族、层级和治理用途。' },
-  { title: '送入复核', body: '进入 D2 检疫或人工复核队列。' },
+  { title: '进入 B3 检疫', body: '语义映射确认后直接运行检疫并回写结果。' },
 ];
 
 const ENTRY_OPTIONS: Array<{
@@ -425,6 +425,42 @@ function isViewModelPatch(value: unknown): value is Partial<PublicFactorImportVi
     patch.activeSourceId ||
     patch.activeDatasetId
   );
+}
+
+function manifestReviewStatus(manifest: PublicFactorImportManifest): string {
+  return safeText(manifest.reviewStatus, '').toUpperCase();
+}
+
+function manifestIsSubmitted(manifest: PublicFactorImportManifest): boolean {
+  const status = manifestReviewStatus(manifest);
+  return status === 'SUBMITTED' || (manifest.nextActions || []).some((action) => action.includes('b3_quarantine'));
+}
+
+function manifestRailStatusLabel(manifest: PublicFactorImportManifest): string {
+  if (manifestIsSubmitted(manifest)) {
+    return (manifest.nextActions || []).includes('b3_quarantine_completed') ? 'B3 检疫完成' : '已送检';
+  }
+  if (manifestReviewStatus(manifest) === 'READY_FOR_REVIEW') {
+    return '待送检';
+  }
+  return manifest.jobId.trim() ? '已生成' : '待预检';
+}
+
+function manifestFlowStatusLabel(manifest: PublicFactorImportManifest): string {
+  if (manifestIsSubmitted(manifest)) {
+    return (manifest.nextActions || []).includes('b3_quarantine_completed') ? '已进入 B3 检疫' : 'B3 检疫处理中';
+  }
+  if (manifestReviewStatus(manifest) === 'READY_FOR_REVIEW') {
+    return '当前可送检';
+  }
+  return '当前在语义映射';
+}
+
+function submitReviewButtonLabel(manifest: PublicFactorImportManifest): string {
+  if (manifestIsSubmitted(manifest)) {
+    return '已送检';
+  }
+  return '送入复核';
 }
 
 function sourceToneLabel(source: PublicFactorImportSource): string {
@@ -546,7 +582,7 @@ export function PublicFactorImportCenterPage({
   }, [api]);
 
   const model = useMemo(
-    () => mergeViewModel(mergeViewModel(FALLBACK_VIEW_MODEL, remoteViewModel), viewModel),
+    () => mergeViewModel(mergeViewModel(FALLBACK_VIEW_MODEL, viewModel), remoteViewModel),
     [remoteViewModel, viewModel],
   );
 
@@ -558,7 +594,8 @@ export function PublicFactorImportCenterPage({
     model.datasets.find((dataset) => dataset.id === selectedDatasetId) || model.datasets[0];
   const activeMappings = mappingsForDataset(model, activeDataset);
   const visibleDatasets = model.datasets.filter((dataset) => datasetMatchesFilter(dataset, datasetFilter));
-  const canSubmitReview = Boolean(model.manifest.submitReady && model.manifest.jobId.trim());
+  const submittedManifest = manifestIsSubmitted(model.manifest);
+  const canSubmitReview = Boolean(model.manifest.submitReady && model.manifest.jobId.trim() && !submittedManifest);
 
   const metrics = [
     model.sources.filter((source) => source.kind === 'auto').length + 1,
@@ -658,6 +695,10 @@ export function PublicFactorImportCenterPage({
   }
 
   async function submitReview(): Promise<void> {
+    if (submittedManifest) {
+      setActionMessage('该导入作业已送检并进入 B3 检疫结果链路，无需重复提交。');
+      return;
+    }
     if (!canSubmitReview) {
       setActionMessage('请先新建预检，并确认语义映射与 manifest 状态为 READY_FOR_REVIEW。');
       return;
@@ -665,7 +706,7 @@ export function PublicFactorImportCenterPage({
     try {
       const result = await api?.submitReview?.({ jobId: model.manifest.jobId });
       applyApiResult(result);
-      setActionMessage('已送入复核队列，后续仍需 D2 检疫与人工确认，不能直接发布。');
+      setActionMessage('已进入 B3 检疫，系统会直接给出检疫结果；通过后仍需发布准入控制。');
     } catch {
       setActionMessage('送入复核失败，请先完成语义映射并确认 manifest。');
     }
@@ -686,7 +727,7 @@ export function PublicFactorImportCenterPage({
           <p className="pfic-kicker">PUBLIC FACTOR INGESTION</p>
           <h1 id="pfic-title">公开因子入库中心</h1>
           <p className="pfic-lede">
-            先准备来源，再发起预检；通过语义映射后送入复核。
+            先准备来源，再发起预检；通过语义映射后进入 B3 检疫。
           </p>
           <div className="pfic-entry-grid" aria-label="入库入口">
             {ENTRY_OPTIONS.map((entry) => (
@@ -788,7 +829,7 @@ export function PublicFactorImportCenterPage({
               <h2>入库流程</h2>
               <p>公开源和本地文件汇入同一套预检、映射与复核链路</p>
             </div>
-            <span>当前在语义映射</span>
+            <span>{manifestFlowStatusLabel(model.manifest)}</span>
           </div>
           <div className="pfic-flow-grid flow-steps">
             {FLOW_STEPS.map((step, index) => (
@@ -918,7 +959,7 @@ export function PublicFactorImportCenterPage({
               <h2>Manifest 审计</h2>
               <p>作业、hash 与 artifact 证据</p>
             </div>
-            <span>已生成</span>
+            <span>{manifestRailStatusLabel(model.manifest)}</span>
           </div>
           <section className="pfic-manifest-card">
             <h3>导入作业</h3>
@@ -969,7 +1010,7 @@ export function PublicFactorImportCenterPage({
             disabled={!canSubmitReview}
             onClick={() => void submitReview()}
           >
-            送入复核
+            {submitReviewButtonLabel(model.manifest)}
           </button>
           <button type="button" className="pfic-button pfic-button-secondary" onClick={handleDownloadManifest}>下载 manifest</button>
           <button type="button" className="pfic-button pfic-button-secondary" onClick={handleOpenArtifact}>打开 artifact</button>
@@ -1083,8 +1124,8 @@ function PrecheckModal({
                 <p>完成来源、字段、hash 与 parser 记录，不写入正式因子库。</p>
               </article>
               <article>
-                <strong>送入人工复核</strong>
-                <p>许可或字段缺口需要治理负责人确认。</p>
+                <strong>直接进入 B3 检疫</strong>
+                <p>语义映射和 manifest 就绪后运行检疫，结果回写因子工厂。</p>
               </article>
               <article>
                 <strong>暂存观察</strong>

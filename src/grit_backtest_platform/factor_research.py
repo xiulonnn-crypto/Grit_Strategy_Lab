@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import math
 import re
+import csv
 import hashlib
+import io
 import threading
 import time
+import urllib.request
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -17,9 +20,11 @@ from .external_factor_imports import (
     build_public_factor_csv_template,
     build_public_factor_import_job_projection,
     build_public_factor_xlsx_template,
+    fama_french_dataset_download_url,
     get_public_factor_source,
     list_public_factor_source_registry,
     analyze_public_factor_upload_text,
+    normalize_fama_french_dataset_zip,
 )
 from .factor_mining import factor_ir_from_rank_ic, infer_holding_period_from_expression
 from .market_data_repository import (
@@ -37,6 +42,7 @@ from .universe_history import SP500_UNIVERSE_SNAPSHOT_ID
 
 
 PRICE_DATA_REQUIREMENTS = ("adj_close", "price_history", "returns")
+PIT_PRICE_TARGET_BENCHMARK_SYMBOLS = ("SPY", "QQQ", "TLT")
 FORMAL_DIAGNOSTIC_YEARS = 10
 SANDBOX_DIAGNOSTIC_YEARS = 3
 GROUP_MONOTONICITY_WINDOW_PERIODS = 3
@@ -430,6 +436,7 @@ FACTOR_DISPLAY_NAME_V4_OVERRIDES = {
     "s_liq_amihud_20d_rank": "非流动性排名 (20d) [Rank]",
     "s_beta_market_252d_raw": "市场 Beta (252d) [Raw]",
     "s_size_cur_log": "对数市值 (当前) [Raw]",
+    "s_f2_mom_raw_cur_external_fama_french_us_research_factors_daily": "[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]",
     "s_alpha_ffblend_resid_mkt_rank": "[综合] - FF3 风格复合基石 (等权) [Beta-Free]",
     VALUE_VOL_WNZT_F3_FACTOR_ID: VALUE_VOL_WNZT_F3_FACTOR_NAME,
     "s_alpha_vol_downsiderev_std_rk": "[风险] - 反向下行风险 Alpha (252d) [Refined-Rank]",
@@ -482,6 +489,13 @@ FACTOR_DISPLAY_NAME_V4_METRIC_LABELS = {
     "vol_conc": "量能汇聚",
     "winsor3ret": "平滑收益率",
     "winsorret": "平滑收益率",
+}
+FACTOR_DISPLAY_SPECIAL_F1_SEMANTICS = {
+    "f1_financial_release_timing": {
+        "core_semantic": "财报发布时效滞后得分",
+        "style_family": "情绪",
+        "include_style_prefix": True,
+    },
 }
 FACTOR_GOVERNANCE_CATEGORY_BY_DESCRIPTOR = {
     "alpha": "other",
@@ -1475,6 +1489,36 @@ def _factor_display_compact_expression(expression: Any) -> str:
     return re.sub(r"\s+", "", str(expression or "").strip())
 
 
+def _factor_display_special_f1_semantic(
+    *,
+    factor_id: str,
+    descriptor: Mapping[str, Any],
+    expression: Any,
+) -> Mapping[str, Any] | None:
+    combined = _factor_display_context_text(
+        factor_id=factor_id,
+        descriptor=descriptor,
+        expression=expression,
+    )
+    for token, semantic in FACTOR_DISPLAY_SPECIAL_F1_SEMANTICS.items():
+        if token in combined:
+            return semantic
+    return None
+
+
+def _factor_display_special_f1_window(expression: Any) -> str:
+    compact_expression = _factor_display_compact_expression(expression)
+    for pattern in (
+        r"TS_Rank\(.+,(\d+)\)",
+        r"TS_Min\([^,]+,(\d+)\)",
+        r"TS_Return\([^,]+,(\d+)\)",
+    ):
+        match = re.search(pattern, compact_expression, flags=re.IGNORECASE)
+        if match:
+            return f"{match.group(1)}d"
+    return ""
+
+
 def _factor_display_base_semantic(
     *,
     factor_id: str,
@@ -1485,6 +1529,13 @@ def _factor_display_base_semantic(
     category = str(descriptor.get("category") or "").strip().lower()
     window = _factor_display_window_label(descriptor.get("window"))
     compact_expression = _factor_display_compact_expression(expression)
+    special_semantic = _factor_display_special_f1_semantic(
+        factor_id=factor_id,
+        descriptor=descriptor,
+        expression=expression,
+    )
+    if special_semantic:
+        return str(special_semantic.get("core_semantic") or "因子信号"), _factor_display_special_f1_window(expression) or window
     std_window = re.search(
         r"(DownsideStd|Std)\s*\(\s*Return\s*\(\s*Close\s*,\s*\d+\s*\)\s*,\s*(\d+)\s*\)",
         compact_expression,
@@ -1714,6 +1765,15 @@ def _factor_display_parameter_tokens(
     expression_lower = expression_text.lower()
     compact_expression = _factor_display_compact_expression(expression_text)
     tokens: list[str] = []
+    special_semantic = _factor_display_special_f1_semantic(
+        factor_id=factor_id,
+        descriptor=descriptor,
+        expression=expression,
+    )
+    if special_semantic:
+        special_window = _factor_display_special_f1_window(expression)
+        if special_window:
+            return [special_window]
     if "ffblend" in expression_lower or "ffblend" in metric:
         return ["等权"]
     if window_label and window_label not in {"当前", "最新"}:
@@ -1823,6 +1883,13 @@ def _factor_display_style_family(
     descriptor: Mapping[str, Any],
     expression: Any,
 ) -> str:
+    special_semantic = _factor_display_special_f1_semantic(
+        factor_id=factor_id,
+        descriptor=descriptor,
+        expression=expression,
+    )
+    if special_semantic and special_semantic.get("style_family"):
+        return str(special_semantic["style_family"])
     combined = _factor_display_context_text(factor_id=factor_id, descriptor=descriptor, expression=expression)
     if "ffblend" in combined:
         return "综合"
@@ -1946,7 +2013,12 @@ def _factor_display_structured_projection(
         residual_control=residual_control,
     )
     parameter_label = "/".join(parameter_tokens)
-    if tier == "F3":
+    special_semantic = _factor_display_special_f1_semantic(
+        factor_id=factor_id,
+        descriptor=descriptor,
+        expression=expression,
+    )
+    if tier == "F3" or bool(special_semantic and special_semantic.get("include_style_prefix")):
         style_family = _factor_display_style_family(
             factor_id=factor_id,
             descriptor=descriptor,
@@ -2179,6 +2251,194 @@ def factor_publish_metadata_v4(
         "composition_method": list(composition_methods or []),
         "name_audit": dict(name_audit or {}),
     }
+
+
+def external_factor_import_display_projection_v1(
+    *,
+    source_id: Any = None,
+    dataset_key: Any = None,
+    frequency: Any = None,
+    source_name: Any = None,
+    factor_id: Any = None,
+    factor_name: Any = None,
+    metrics: Mapping[str, Any] | None = None,
+    previous_display_name: Any = None,
+) -> dict[str, Any]:
+    source_key = str(source_id or "").strip().lower()
+    dataset = str(dataset_key or factor_id or "").strip()
+    dataset_lower = dataset.lower()
+    frequency_text = str(frequency or "").strip().upper()
+    metric_map = metrics if isinstance(metrics, Mapping) else {}
+    if source_key == "fama_french" and dataset_lower == "fama_french_us_research_factors_daily":
+        display_name = "[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]"
+        short_name = "Fama-French 美股日频因子"
+        style_family = "[外部]"
+        core_semantic = "Fama-French 美股研究日频因子"
+        frequency_label = "Daily"
+        source_label = "French-Data Library"
+        source_dataset = "external:fama_french_us_research_factors_daily"
+        style_reason = "来自学术公开因子库，作为外部 Beta 与风格暴露参照，不与自研 Alpha 混同。"
+        semantic_reason = "保留 Fama-French 学术来源语义，便于实盘归因识别其 Beta/风格解释角色。"
+        frequency_reason = "源数据标注为 daily，表示日频收益暴露。"
+    else:
+        frequency_label = "Daily" if frequency_text == "DAILY" else ("Monthly" if frequency_text == "MONTHLY" else (frequency_text.title() or "当前"))
+        source_label = str(source_name or source_id or "外部来源").strip()
+        core_semantic = str(factor_name or dataset or factor_id or "外部公开因子").strip()
+        display_name = f"[外部] - {core_semantic} ({frequency_label}) [Raw]"
+        short_name = _factor_display_short_name(display_name)
+        style_family = "[外部]"
+        source_dataset = f"external:{dataset or factor_id or source_key or 'unknown'}"
+        style_reason = "来自外部公开或上传源，需与自研 Alpha 展示区分。"
+        semantic_reason = "沿用来源数据集或字段名称，便于回溯 manifest 与 parser。"
+        frequency_reason = "使用导入作业声明的频率作为窗口标签。"
+    governance_reason = "Raw_F2 证据显示尚未完成 Winsorize、Neutralize、Z-Score 或 Rank 全链路处理。"
+    rank_ic = _safe_round(_coerce_float(metric_map.get("rank_ic")), 4)
+    ir = _safe_round(_coerce_float(metric_map.get("ir") if metric_map.get("ir") is not None else metric_map.get("rank_icir")), 4)
+    style_corr = _safe_round(abs(_coerce_float(metric_map.get("max_style_correlation"))), 4)
+    turnover = _safe_round(_coerce_float(metric_map.get("turnover_rate_weekly") if metric_map.get("turnover_rate_weekly") is not None else metric_map.get("turnover")), 2)
+    structured_components = {
+        "style_family": style_family,
+        "style_family_reason": style_reason,
+        "core_semantic": core_semantic,
+        "core_semantic_reason": semantic_reason,
+        "frequency_label": frequency_label,
+        "frequency_reason": frequency_reason,
+        "governance_tag": "Raw",
+        "governance_reason": governance_reason,
+        "source_label": source_label,
+        "source_dataset": source_dataset,
+        "tier_label": "F2",
+        "parameter_label": frequency_label,
+        "governance_level": "Raw",
+        "benchmark_label": "学术 Beta / 风格暴露",
+        "audit_gaps": ["Winsorize 未完成", "Neutralize 未完成", "Z-Score 未完成", "Rank 未完成"],
+    }
+    expert_review = {
+        "summary": "高 IC、低 IR、高换手的外部学术风格因子，更适合作为剥离工具或平滑后的参考信号，不建议直接作为 F3 权重项。",
+        "metric_diagnostics": [
+            {"metric": "RankIC", "value": rank_ic, "diagnosis": "预测能力较强；进入组合前仍需稳定性复核。"},
+            {"metric": "RankICIR", "value": ir, "diagnosis": "稳定性不足，需通过平滑或更长窗口观察。"},
+            {"metric": "Style_Corr", "value": style_corr, "diagnosis": "与既有风格相关性低，可提供增量归因参照。"},
+            {"metric": "Turnover_Rate", "value": turnover, "diagnosis": "换手偏高，直接实盘可能被交易成本侵蚀。"},
+        ],
+        "architect_recommendations": [
+            "作为中性化或归因剥离基准，帮助识别自研因子中的学术 Beta 暴露。",
+            "尝试 TS_Mean(..., 5) 等时序平滑，再观察 RankICIR 与换手率是否改善。",
+        ],
+    }
+    collision_key = f"external:{source_key or source_label.lower()}:{dataset_lower or str(factor_id or '').lower()}:{frequency_label.lower()}"
+    previous = str(previous_display_name or "").strip()
+    aliases = [item for item in (previous, str(factor_name or "").strip(), dataset, source_dataset) if item and item != display_name]
+    return {
+        "display_name_cn": display_name,
+        "short_name_cn": short_name,
+        "semantic_key": re.sub(r"[^a-z0-9]+", "_", collision_key.lower()).strip("_"),
+        "governance_badges": ["外部", "B3 检疫", "Raw"],
+        "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
+        "naming_protocol_version": FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
+        "naming_standard_version": FACTOR_DISPLAY_NAME_STANDARD_VERSION,
+        "base_display_name_cn": display_name,
+        "compact_display_name_cn": display_name,
+        "name_collision_key": collision_key,
+        "name_dedupe_suffix": "",
+        "name_collision_group": [],
+        "legacy_name_aliases": list(dict.fromkeys(aliases)),
+        "name_audit": {
+            "previous_display_name": previous or None,
+            "new_display_name": display_name,
+            "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
+            "naming_protocol_version": FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
+            "naming_standard_version": FACTOR_DISPLAY_NAME_STANDARD_VERSION,
+            "dedupe_strategy": FACTOR_DISPLAY_NAME_DEDUPE_STRATEGY,
+            "rename_reason": "external_factor_import_projection",
+            "structured_components": structured_components,
+            "base_display_name_cn": display_name,
+            "expert_review": expert_review,
+        },
+    }
+
+
+def _external_import_publish_metadata_projection(
+    factor: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    versions = factor.get("versions")
+    if not isinstance(versions, Sequence) or isinstance(versions, (str, bytes, bytearray)):
+        return None
+    for version in versions:
+        if not isinstance(version, Mapping):
+            continue
+        metadata = version.get("metadata")
+        if not isinstance(metadata, Mapping):
+            metadata = _decode_json_dict(version.get("metadata_json"))
+        publish_metadata = metadata.get("publish_metadata") if isinstance(metadata, Mapping) else None
+        if not isinstance(publish_metadata, Mapping):
+            continue
+        display_name = str(
+            publish_metadata.get("display_name_cn")
+            or publish_metadata.get("base_display_name_cn")
+            or ""
+        ).strip()
+        if not display_name:
+            continue
+        name_audit = publish_metadata.get("name_audit") if isinstance(publish_metadata.get("name_audit"), Mapping) else {}
+        previous_name = str(factor.get("stored_name") or factor.get("name") or "").strip()
+        aliases = [
+            item
+            for item in (
+                previous_name,
+                str(factor.get("id") or "").strip(),
+            )
+            if item and item != display_name
+        ]
+        return {
+            "display_name_cn": display_name,
+            "short_name_cn": _factor_display_short_name(display_name),
+            "semantic_key": re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                str(publish_metadata.get("name_collision_key") or factor.get("id") or "").lower(),
+            ).strip("_"),
+            "governance_badges": list(publish_metadata.get("governance_badges") or ["外部", "B3 检疫", "Raw"]),
+            "name_schema_version": str(publish_metadata.get("naming_rule_version") or FACTOR_DISPLAY_NAME_SCHEMA_VERSION),
+            "naming_protocol_version": str(
+                publish_metadata.get("naming_protocol_version") or FACTOR_DISPLAY_NAME_PROTOCOL_VERSION
+            ),
+            "naming_standard_version": str(
+                publish_metadata.get("naming_standard_version") or FACTOR_DISPLAY_NAME_STANDARD_VERSION
+            ),
+            "base_display_name_cn": publish_metadata.get("base_display_name_cn") or display_name,
+            "compact_display_name_cn": publish_metadata.get("compact_display_name_cn") or display_name,
+            "name_collision_key": publish_metadata.get("name_collision_key") or display_name,
+            "name_dedupe_suffix": publish_metadata.get("name_dedupe_suffix") or "",
+            "name_collision_group": list(publish_metadata.get("name_collision_group") or []),
+            "legacy_name_aliases": list(dict.fromkeys(aliases)),
+            "name_audit": dict(name_audit or {}),
+        }
+    return None
+
+
+def _external_import_factor_display_projection(
+    factor: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    factor_id = str(factor.get("id") or factor.get("factor_id") or "").strip()
+    source = str(factor.get("source") or "").strip().upper()
+    expression = str(factor.get("expression") or "")
+    lookup_text = "|".join((factor_id, source, expression, str(factor.get("stored_name") or factor.get("name") or ""))).lower()
+    if source != "PUBLIC_FACTOR_IMPORT" and "external_" not in lookup_text and "externalfactor(" not in lookup_text:
+        return None
+    metadata_projection = _external_import_publish_metadata_projection(factor)
+    if metadata_projection is not None:
+        return metadata_projection
+    if "fama_french_us_research_factors_daily" not in lookup_text:
+        return None
+    return external_factor_import_display_projection_v1(
+        source_id="fama_french",
+        dataset_key="fama_french_us_research_factors_daily",
+        frequency=factor.get("frequency") or "DAILY",
+        factor_id=factor_id,
+        factor_name=factor.get("stored_name") or factor.get("name") or factor_id,
+        previous_display_name=factor.get("stored_name") or factor.get("name"),
+    )
 
 
 AUTO_MINED_FACTOR_ID_PATTERN = re.compile(
@@ -6020,14 +6280,16 @@ def build_pit_data_overview(
         }
         for item in blocker_items
     ]
-    sample_symbols = sorted(
-        {
-            str(row.get("symbol") or "").upper()
-            for row in coverage_rows
-            if str(row.get("symbol") or "").strip()
-        }
-        or set(history_summary.latest_symbols)
-    )[:8]
+    coverage_symbol_set = {
+        str(row.get("symbol") or "").upper()
+        for row in coverage_rows
+        if str(row.get("symbol") or "").strip()
+    }
+    benchmark_overlay_symbols = tuple(PIT_PRICE_TARGET_BENCHMARK_SYMBOLS)
+    benchmark_overlay_ready_symbols = sorted(set(benchmark_overlay_symbols) & coverage_symbol_set)
+    benchmark_overlay_total = len(benchmark_overlay_symbols)
+    benchmark_overlay_ready = len(benchmark_overlay_ready_symbols)
+    sample_symbols = sorted(coverage_symbol_set or set(history_summary.latest_symbols))[:8]
     coverage_total = int((price_snapshot or {}).get("metadata", {}).get("total_symbol_count") or 0) if isinstance((price_snapshot or {}).get("metadata"), Mapping) else 0
     coverage_ready = int((price_snapshot or {}).get("metadata", {}).get("covered_symbol_count") or 0) if isinstance((price_snapshot or {}).get("metadata"), Mapping) else 0
     if coverage_total <= 0:
@@ -6547,6 +6809,13 @@ def build_pit_data_overview(
             "metrics": [
                 {"label": "价格行", "value": int(counts.get("price_bars") or 0)},
                 {"label": "覆盖标的", "value": f"{coverage_ready}/{coverage_total}"},
+                {"label": "PIT目标", "value": f"{coverage_ready}/{coverage_total}"},
+                {
+                    "label": "基准ETF",
+                    "value": f"{benchmark_overlay_ready}/{benchmark_overlay_total}",
+                    "symbols": list(benchmark_overlay_symbols),
+                    "ready_symbols": benchmark_overlay_ready_symbols,
+                },
                 {"label": "历史锚点", "value": history_summary.historical_count},
             ],
             "blockers": [
@@ -6997,6 +7266,10 @@ def build_pit_data_overview(
             "total_symbol_count": coverage_total,
             "coverage_pct": coverage_pct,
             "price_bar_rows": int(counts.get("price_bars") or 0),
+            "benchmark_overlay_covered_symbol_count": benchmark_overlay_ready,
+            "benchmark_overlay_total_symbol_count": benchmark_overlay_total,
+            "benchmark_overlay_symbols": list(benchmark_overlay_symbols),
+            "benchmark_overlay_ready_symbols": benchmark_overlay_ready_symbols,
             "universe_member_rows": history_summary.historical_count,
             "raw_universe_member_rows": history_summary.raw_count,
             "universe_history_anchor_count": raw_universe_anchor_count,
@@ -7149,18 +7422,21 @@ class FactorResearchService:
             "content": artifact.content,
         }
 
-    def create_external_factor_local_file_upload(self, request: Any) -> dict[str, Any]:
-        payload = dict(_as_mapping(request))
-        source_id = self._normalize_external_source_id(payload.get("source_id"))
-        dataset_key = str(payload.get("dataset_key") or "").strip()
-        filename = str(payload.get("filename") or "").strip()
-        if not source_id or not dataset_key or not filename:
-            raise ValueError("source_id, dataset_key, and filename are required")
-        source, dataset = self._external_factor_source_and_dataset(source_id, dataset_key)
-        if self._external_source_access_policy(source) == "REFERENCE_ONLY":
-            raise ValueError("reference-only sources cannot create uploaded factor files")
-        content_text = str(payload.get("content_text") or "")
-        analysis = analyze_public_factor_upload_text(content_text, filename=filename)
+    def _persist_external_factor_uploaded_file(
+        self,
+        *,
+        source_id: str,
+        dataset_key: str,
+        filename: str,
+        content_text: str,
+        content_type: str | None,
+        sample_limit: int = 5,
+    ) -> dict[str, Any]:
+        analysis = analyze_public_factor_upload_text(
+            content_text,
+            filename=filename,
+            sample_limit=sample_limit,
+        )
         manifest = self._external_manifest_from_analysis(analysis, template_key=dataset_key)
         mapping_rows = self._external_mapping_rows_from_analysis(analysis)
         file_id = f"extfile_{uuid4().hex[:12]}"
@@ -7178,7 +7454,7 @@ class FactorResearchService:
                     source_id,
                     dataset_key,
                     filename,
-                    payload.get("content_type"),
+                    content_type,
                     manifest.get("file_sha256") or "",
                     content_text,
                     dumps(manifest),
@@ -7194,6 +7470,62 @@ class FactorResearchService:
             "manifest": manifest,
             "mapping_rows": mapping_rows,
             "created_at": created_at,
+        }
+
+    def _external_auto_download_file_payload(
+        self,
+        *,
+        source: Mapping[str, Any],
+        dataset: Mapping[str, Any],
+        dataset_key: str,
+    ) -> dict[str, str]:
+        source_id = str(source.get("source_id") or "")
+        if source_id != "fama_french":
+            raise ValueError(f"automatic download is not implemented for external source: {source_id}")
+        download_url = fama_french_dataset_download_url(dataset_key)
+        if not download_url:
+            raise ValueError(f"automatic download is not configured for external dataset: {dataset_key}")
+        try:
+            with urllib.request.urlopen(download_url, timeout=20) as response:
+                archive_bytes = response.read()
+        except Exception as exc:  # pragma: no cover - exact urllib failures vary by host policy.
+            raise ValueError(f"Fama-French source download failed: {exc}") from exc
+        normalized_csv = normalize_fama_french_dataset_zip(archive_bytes, dataset_key=dataset_key)
+        return {
+            "filename": f"{dataset_key}.csv",
+            "content_text": normalized_csv,
+            "content_type": "text/csv",
+            "download_url": download_url,
+            "source_archive_sha256": hashlib.sha256(archive_bytes).hexdigest(),
+            "dataset_name": str(dataset.get("label") or dataset_key),
+        }
+
+    def create_external_factor_local_file_upload(self, request: Any) -> dict[str, Any]:
+        payload = dict(_as_mapping(request))
+        source_id = self._normalize_external_source_id(payload.get("source_id"))
+        dataset_key = str(payload.get("dataset_key") or "").strip()
+        filename = str(payload.get("filename") or "").strip()
+        if not source_id or not dataset_key or not filename:
+            raise ValueError("source_id, dataset_key, and filename are required")
+        source, dataset = self._external_factor_source_and_dataset(source_id, dataset_key)
+        if self._external_source_access_policy(source) == "REFERENCE_ONLY":
+            raise ValueError("reference-only sources cannot create uploaded factor files")
+        content_text = str(payload.get("content_text") or "")
+        saved = self._persist_external_factor_uploaded_file(
+            source_id=source_id,
+            dataset_key=dataset_key,
+            filename=filename,
+            content_text=content_text,
+            content_type=payload.get("content_type"),
+        )
+        return {
+            "file_id": saved["file_id"],
+            "source_id": source_id,
+            "dataset_key": dataset_key,
+            "filename": filename,
+            "manifest": saved["manifest"],
+            "mapping_rows": saved["mapping_rows"],
+            "created_at": saved["created_at"],
             "source_name": source.get("label") or source_id,
             "dataset_name": dataset.get("label") or dataset_key,
         }
@@ -7212,11 +7544,35 @@ class FactorResearchService:
             raise ValueError("reference-only mode cannot create import jobs")
         file_id = str(payload.get("file_id") or "").strip()
         file_row = self._external_uploaded_file_row(file_id) if file_id else None
+        download_payload: dict[str, str] = {}
+        if import_mode == "AUTO_DOWNLOAD":
+            download_payload = self._external_auto_download_file_payload(
+                source=source,
+                dataset=dataset,
+                dataset_key=dataset_key,
+            )
+            saved_download = self._persist_external_factor_uploaded_file(
+                source_id=source_id,
+                dataset_key=dataset_key,
+                filename=download_payload["filename"],
+                content_text=download_payload["content_text"],
+                content_type=download_payload["content_type"],
+                sample_limit=100,
+            )
+            file_id = str(saved_download["file_id"])
+            file_row = self._external_uploaded_file_row(file_id)
         if import_mode == "LOCAL_FILE" and not file_row:
             raise ValueError("file_id is required for local file import precheck")
         if file_row:
             manifest = loads(file_row.get("manifest_json"), {})
             mapping_rows = loads(file_row.get("mapping_rows_json"), [])
+            if download_payload:
+                manifest = {
+                    **manifest,
+                    "download_url": download_payload.get("download_url"),
+                    "source_archive_sha256": download_payload.get("source_archive_sha256"),
+                    "source_materialized_at": iso_now(),
+                }
         else:
             manifest = self._external_manifest_from_source_dataset(dataset, template_key=dataset_key)
             mapping_rows = self._external_mapping_rows_from_dataset(dataset)
@@ -7231,6 +7587,7 @@ class FactorResearchService:
             "raw_file_ref": f"external_factor_uploaded_files/{file_id}" if file_id else None,
             "manifest_ref": f"external_factor_import_manifests/{job_id}" if file_id else None,
             "template_ref": str(dataset.get("dataset_id") or dataset_key),
+            "download_url": download_payload.get("download_url"),
         }
         with self.storage.connection() as conn:
             conn.execute(
@@ -7340,11 +7697,794 @@ class FactorResearchService:
             (
                 now,
                 now,
-                dumps(["await_d2_review", "quarantine_intake_after_approval"]),
+                dumps(["b3_quarantine_intake", "b3_quarantine_run"]),
                 str(job_id),
             ),
         )
+        self.materialize_external_factor_import_review_submissions(job_id=str(job_id), limit=1)
         return self.get_external_factor_import_job(job_id)
+
+    def _ensure_external_import_auto_download_materialized(self, row: Mapping[str, Any]) -> Mapping[str, Any]:
+        if str(row.get("file_id") or "").strip():
+            return row
+        if str(row.get("import_mode") or "").upper() != "AUTO_DOWNLOAD":
+            return row
+        source_id = self._normalize_external_source_id(row.get("source_id"))
+        dataset_key = str(row.get("dataset_key") or "").strip()
+        source, dataset = self._external_factor_source_and_dataset(source_id, dataset_key)
+        download_payload = self._external_auto_download_file_payload(
+            source=source,
+            dataset=dataset,
+            dataset_key=dataset_key,
+        )
+        saved_download = self._persist_external_factor_uploaded_file(
+            source_id=source_id,
+            dataset_key=dataset_key,
+            filename=download_payload["filename"],
+            content_text=download_payload["content_text"],
+            content_type=download_payload["content_type"],
+            sample_limit=100,
+        )
+        file_id = str(saved_download["file_id"])
+        manifest = {
+            **dict(saved_download["manifest"]),
+            "download_url": download_payload.get("download_url"),
+            "source_archive_sha256": download_payload.get("source_archive_sha256"),
+            "source_materialized_at": iso_now(),
+        }
+        mapping_rows = list(saved_download["mapping_rows"] or [])
+        artifact_paths = loads(row.get("artifact_paths_json"), {})
+        artifact_paths = {
+            **dict(artifact_paths),
+            "uploaded_file_id": file_id,
+            "raw_file_ref": f"external_factor_uploaded_files/{file_id}",
+            "manifest_ref": f"external_factor_import_manifests/{row.get('id')}",
+            "template_ref": str(dataset.get("dataset_id") or dataset_key),
+            "download_url": download_payload.get("download_url"),
+        }
+        risk_flags = self._external_import_risk_flags(source, manifest, mapping_rows)
+        now = iso_now()
+        with self.storage.connection() as conn:
+            conn.execute(
+                """
+                UPDATE external_factor_import_jobs
+                SET file_id = ?,
+                    manifest_json = ?,
+                    mapping_rows_json = ?,
+                    artifact_paths_json = ?,
+                    risk_flags_json = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    file_id,
+                    dumps(manifest),
+                    dumps(mapping_rows),
+                    dumps(artifact_paths),
+                    dumps(risk_flags),
+                    now,
+                    row.get("id"),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO external_factor_import_manifests (
+                    id, job_id, source_id, dataset_key, file_id, sha256,
+                    row_count, column_count, manifest_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"extmanifest_{uuid4().hex[:12]}",
+                    row.get("id"),
+                    source_id,
+                    dataset_key,
+                    file_id,
+                    str(manifest.get("file_sha256") or ""),
+                    int(manifest.get("row_count") or 0),
+                    int(manifest.get("column_count") or 0),
+                    dumps(manifest),
+                    now,
+                ),
+            )
+        return self.storage.fetch_one("SELECT * FROM external_factor_import_jobs WHERE id = ?", (row.get("id"),)) or row
+
+    def materialize_external_factor_import_review_submissions(
+        self,
+        *,
+        job_id: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        limit = max(1, min(int(limit or 50), 100))
+        params: list[Any] = []
+        where = ["status = 'REVIEW_SUBMITTED'"]
+        if job_id:
+            where.append("id = ?")
+            params.append(str(job_id))
+        rows = self.storage.fetch_all(
+            f"""
+            SELECT *
+            FROM external_factor_import_jobs
+            WHERE {' AND '.join(where)}
+            ORDER BY datetime(COALESCE(submitted_at, updated_at, created_at)) DESC, id DESC
+            LIMIT ?
+            """,
+            tuple([*params, limit]),
+        )
+        materialized: list[str] = []
+        skipped: list[str] = []
+        for row in rows:
+            current_job_id = str(row.get("id") or "")
+            if not current_job_id:
+                continue
+            try:
+                row = self._ensure_external_import_auto_download_materialized(row)
+            except ValueError:
+                pass
+            existing_rows = self.storage.fetch_all(
+                "SELECT * FROM factor_quarantine_candidates WHERE source_mining_job_id = ?",
+                (current_job_id,),
+            )
+            if existing_rows and not any(self._external_import_candidate_needs_materialization_repair(item) for item in existing_rows):
+                skipped.append(current_job_id)
+                continue
+            created = self._materialize_external_import_quarantine_candidates(
+                row,
+                force=bool(existing_rows),
+            )
+            if created:
+                materialized.append(current_job_id)
+        return {
+            "materialized_count": len(materialized),
+            "skipped_existing_count": len(skipped),
+            "job_ids": materialized,
+        }
+
+    def list_external_factor_import_review_queue(self, *, limit: int = 20) -> dict[str, Any]:
+        limit = max(1, min(int(limit or 20), 50))
+        rows = self.storage.fetch_all(
+            """
+            SELECT job.*
+            FROM external_factor_import_jobs AS job
+            WHERE job.status = 'REVIEW_SUBMITTED'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM factor_quarantine_candidates AS candidate
+                  WHERE candidate.source_mining_job_id = job.id
+              )
+            ORDER BY datetime(COALESCE(submitted_at, updated_at, created_at)) DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        count_row = self.storage.fetch_one(
+            """
+            SELECT COUNT(*) AS total
+            FROM external_factor_import_jobs AS job
+            WHERE job.status = 'REVIEW_SUBMITTED'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM factor_quarantine_candidates AS candidate
+                  WHERE candidate.source_mining_job_id = job.id
+              )
+            """
+        )
+        items = [self._external_import_review_queue_item(row) for row in rows]
+        return {
+            "items": items,
+            "summary": {
+                "total": int((count_row or {}).get("total") or 0),
+                "items_returned": len(items),
+                "review_boundary": "DIRECT_B3_QUARANTINE",
+                "queue_state": "MATERIALIZED_TO_B3",
+                "direct_publish_allowed": False,
+            },
+        }
+
+    def list_external_factor_import_quarantine_candidates(self, *, limit: int = 20) -> dict[str, Any]:
+        limit = max(1, min(int(limit or 20), 100))
+        rows = self.storage.fetch_all(
+            """
+            SELECT candidate.*
+            FROM factor_quarantine_candidates AS candidate
+            JOIN external_factor_import_jobs AS job
+              ON job.id = candidate.source_mining_job_id
+            ORDER BY datetime(candidate.updated_at) DESC, candidate.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        total_row = self.storage.fetch_one(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN candidate.status = 'PASSED' THEN 1 ELSE 0 END) AS passed_count,
+                SUM(CASE WHEN candidate.status = 'PUBLISHED' THEN 1 ELSE 0 END) AS published_count,
+                SUM(CASE WHEN candidate.status = 'REJECTED' THEN 1 ELSE 0 END) AS rejected_count,
+                SUM(CASE WHEN candidate.status NOT IN ('PASSED', 'PUBLISHED', 'REJECTED') THEN 1 ELSE 0 END) AS needs_review_count
+            FROM factor_quarantine_candidates AS candidate
+            JOIN external_factor_import_jobs AS job
+              ON job.id = candidate.source_mining_job_id
+            """
+        ) or {}
+        return {
+            "items": [self._decode_quarantine_candidate_row(row) for row in rows],
+            "summary": {
+                "total": int(total_row.get("total") or 0),
+                "page": 1,
+                "page_size": limit,
+                "total_pages": 1,
+                "passed_count": int(total_row.get("passed_count") or 0),
+                "needs_review_count": int(total_row.get("needs_review_count") or 0),
+                "published_count": int(total_row.get("published_count") or 0),
+                "rejected_count": int(total_row.get("rejected_count") or 0),
+            },
+        }
+
+    @staticmethod
+    def _external_import_candidate_needs_materialization_repair(row: Mapping[str, Any]) -> bool:
+        metrics = loads(row.get("candidate_metrics_json"), {})
+        manifest = metrics.get("manifest") if isinstance(metrics.get("manifest"), Mapping) else {}
+        warnings = {str(item).upper() for item in manifest.get("warnings") or []}
+        rejected_reason = str(row.get("rejected_reason") or "")
+        return (
+            "SOURCE_FILE_NOT_MATERIALIZED" in warnings
+            or "源文件尚未物化" in rejected_reason
+            or (
+                str(row.get("source_mining_job_id") or "").startswith("extimp_")
+                and int(manifest.get("row_count") or 0) <= 0
+            )
+        )
+
+    def _materialize_external_import_quarantine_candidates(
+        self,
+        row: Mapping[str, Any],
+        *,
+        force: bool = False,
+    ) -> list[dict[str, Any]]:
+        manifest = loads(row.get("manifest_json"), {})
+        mapping_rows = loads(row.get("mapping_rows_json"), [])
+        risk_flags = loads(row.get("risk_flags_json"), [])
+        specs = self._external_import_candidate_specs(row, manifest, mapping_rows)
+        now = iso_now()
+        created: list[dict[str, Any]] = []
+        for spec in specs:
+            candidate_id = self._external_import_quarantine_candidate_id(str(row.get("id") or ""), spec["factor_id"])
+            existing = self.storage.fetch_one("SELECT * FROM factor_quarantine_candidates WHERE id = ?", (candidate_id,))
+            if existing:
+                if not force:
+                    created.append(self._decode_quarantine_candidate_row(existing))
+                    continue
+                metrics = self._external_import_candidate_metrics(row, manifest, spec, risk_flags)
+                self.storage.execute(
+                    """
+                    UPDATE factor_quarantine_candidates
+                    SET expression = ?,
+                        status = 'PENDING',
+                        publish_status = 'BLOCKED',
+                        gate_summary_json = ?,
+                        candidate_metrics_json = ?,
+                        failure_samples_json = ?,
+                        pit_evidence_json = ?,
+                        publish_eligibility_json = ?,
+                        target_factor_id = NULL,
+                        updated_at = ?,
+                        rejected_reason = NULL
+                    WHERE id = ?
+                    """,
+                    (
+                        spec["expression"],
+                        dumps({"external_import": "PENDING", "target_layer": "L2"}),
+                        dumps(metrics),
+                        dumps([]),
+                        dumps({"status": "DIAGNOSTIC_ONLY", "source": "PUBLIC_FACTOR_IMPORT"}),
+                        dumps({
+                            "status": "BLOCKED",
+                            "reason": "外部因子已进入 B3 检疫，等待检疫结果。",
+                            "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
+                        }),
+                        now,
+                        candidate_id,
+                    ),
+                )
+                if self._external_import_requires_manifest_block(manifest, risk_flags):
+                    created.append(
+                        self._mark_external_import_candidate_quarantine_blocked(
+                            candidate_id,
+                            row=row,
+                            manifest=manifest,
+                            metrics=metrics,
+                            now=now,
+                        )
+                    )
+                else:
+                    created.append(
+                        self._run_external_import_candidate_quarantine(
+                            candidate_id,
+                            row=row,
+                            manifest=manifest,
+                            metrics=metrics,
+                            now=now,
+                        )
+                    )
+                continue
+            metrics = self._external_import_candidate_metrics(row, manifest, spec, risk_flags)
+            self.storage.insert_json_row(
+                "factor_quarantine_candidates",
+                {
+                    "id": candidate_id,
+                    "mining_candidate_id": f"extcand_{candidate_id[7:]}",
+                    "source_mining_job_id": row.get("id"),
+                    "expression": spec["expression"],
+                    "status": "PENDING",
+                    "publish_status": "BLOCKED",
+                    "gate_summary_json": dumps({"external_import": "PENDING", "target_layer": "L2"}),
+                    "cluster_id": f"external_import_{row.get('id')}",
+                    "candidate_metrics_json": dumps(metrics),
+                    "failure_samples_json": dumps([]),
+                    "pit_evidence_json": dumps({"status": "DIAGNOSTIC_ONLY", "source": "PUBLIC_FACTOR_IMPORT"}),
+                    "publish_eligibility_json": dumps({
+                        "status": "BLOCKED",
+                        "reason": "外部因子已进入 B3 检疫，等待检疫结果。",
+                        "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
+                    }),
+                    "target_factor_id": None,
+                    "created_at": now,
+                    "updated_at": now,
+                    "published_at": None,
+                    "rejected_reason": None,
+                },
+            )
+            if self._external_import_requires_manifest_block(manifest, risk_flags):
+                created.append(
+                    self._mark_external_import_candidate_quarantine_blocked(
+                        candidate_id,
+                        row=row,
+                        manifest=manifest,
+                        metrics=metrics,
+                        now=now,
+                    )
+                )
+            else:
+                created.append(
+                    self._run_external_import_candidate_quarantine(
+                        candidate_id,
+                        row=row,
+                        manifest=manifest,
+                        metrics=metrics,
+                        now=now,
+                    )
+                )
+        if created:
+            self.storage.execute(
+                """
+                UPDATE external_factor_import_jobs
+                SET next_actions_json = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (dumps(["b3_quarantine_completed"]), iso_now(), row.get("id")),
+            )
+        return created
+
+    @staticmethod
+    def _external_import_quarantine_candidate_id(job_id: str, factor_id: str) -> str:
+        digest = hashlib.sha256(f"{job_id}:{factor_id}".encode("utf-8")).hexdigest()[:12]
+        return f"fq_ext_{digest}"
+
+    def _external_import_candidate_specs(
+        self,
+        row: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+        mapping_rows: Sequence[Any],
+    ) -> list[dict[str, str]]:
+        if (
+            str(row.get("source_id") or "") == "fama_french"
+            and str(row.get("import_mode") or "").upper() == "AUTO_DOWNLOAD"
+        ):
+            factor_id = str(row.get("dataset_key") or row.get("id") or "external_factor")
+            return [
+                {
+                    "factor_id": factor_id,
+                    "factor_name": str(row.get("dataset_name") or factor_id),
+                    "expression": self._external_import_expression(row, factor_id),
+                }
+            ]
+        field_mapping = {
+            str(item.get("target_field") or ""): str(item.get("source_field") or "")
+            for item in mapping_rows
+            if isinstance(item, Mapping) and item.get("target_field")
+        }
+        file_row = self._external_uploaded_file_row(str(row.get("file_id") or ""))
+        sample_rows: list[Mapping[str, Any]] = []
+        if file_row:
+            analysis = analyze_public_factor_upload_text(
+                str(file_row.get("content_text") or ""),
+                filename=str(file_row.get("filename") or ""),
+                sample_limit=10000,
+            )
+            sample_rows = [item for item in analysis.get("sample_rows") or [] if isinstance(item, Mapping)]
+        if not sample_rows:
+            sample_rows = [item for item in manifest.get("sample_rows") or [] if isinstance(item, Mapping)]
+
+        specs_by_factor: dict[str, dict[str, str]] = {}
+        factor_field = field_mapping.get("factor_id") or "factor_id"
+        name_field = field_mapping.get("factor_name") or "factor_name"
+        for item in sample_rows:
+            factor_id = str(item.get(factor_field) or "").strip()
+            if not factor_id:
+                continue
+            factor_name = str(item.get(name_field) or factor_id).strip()
+            specs_by_factor.setdefault(
+                factor_id,
+                {
+                    "factor_id": factor_id,
+                    "factor_name": factor_name,
+                    "expression": self._external_import_expression(row, factor_id),
+                },
+            )
+        if specs_by_factor:
+            return list(specs_by_factor.values())
+
+        fallback_factor_id = str(row.get("dataset_key") or row.get("id") or "external_factor")
+        return [
+            {
+                "factor_id": fallback_factor_id,
+                "factor_name": str(row.get("dataset_name") or fallback_factor_id),
+                "expression": self._external_import_expression(row, fallback_factor_id),
+            }
+        ]
+
+    @staticmethod
+    def _external_import_expression(row: Mapping[str, Any], factor_id: str) -> str:
+        token = re.sub(
+            r"[^a-zA-Z0-9_]+",
+            "_",
+            f"{row.get('source_id')}_{row.get('dataset_key')}_{factor_id}",
+        ).strip("_")
+        return f"ExternalFactor({token or 'external_factor'})"
+
+    @staticmethod
+    def _external_import_requires_manifest_block(manifest: Mapping[str, Any], risk_flags: Sequence[Any]) -> bool:
+        normalized_flags = {str(item).strip().upper() for item in risk_flags}
+        warnings = {str(item).strip().upper() for item in manifest.get("warnings") or []}
+        return (
+            int(manifest.get("row_count") or 0) <= 0
+            or "SOURCE_FILE_NOT_MATERIALIZED" in normalized_flags
+            or "SOURCE_FILE_NOT_MATERIALIZED" in warnings
+        )
+
+    def _external_import_normalized_rows(self, row: Mapping[str, Any]) -> list[dict[str, str]]:
+        file_row = self._external_uploaded_file_row(str(row.get("file_id") or ""))
+        if not file_row:
+            return []
+        reader = csv.DictReader(io.StringIO(str(file_row.get("content_text") or "")))
+        return [
+            {str(key): str(value or "") for key, value in item.items() if key is not None}
+            for item in reader
+        ]
+
+    @staticmethod
+    def _external_import_metric_summary(rows: Sequence[Mapping[str, Any]], *, frequency: str) -> dict[str, Any]:
+        values_by_factor: dict[str, list[float]] = {}
+        dates: set[str] = set()
+        for item in rows:
+            factor_id = str(item.get("factor_id") or "").strip()
+            date_value = str(item.get("date") or "").strip()
+            if not factor_id:
+                continue
+            try:
+                value = float(item.get("value"))
+            except (TypeError, ValueError):
+                continue
+            values_by_factor.setdefault(factor_id, []).append(value)
+            if date_value:
+                dates.add(date_value)
+        factor_stats: list[dict[str, Any]] = []
+        periods_per_year = 252.0 if str(frequency or "").upper() == "DAILY" else 12.0
+        for factor_id, values in values_by_factor.items():
+            if not values:
+                continue
+            mean_value = _mean(values) or 0.0
+            std_value = _std(values) or 0.0
+            autocorr = _spearman(values[:-1], values[1:]) if len(values) >= 3 else None
+            annualized_ir = (
+                mean_value / std_value * math.sqrt(periods_per_year)
+                if std_value > 1e-12
+                else 0.0
+            )
+            abs_diffs = [abs(right - left) for left, right in zip(values, values[1:])]
+            factor_stats.append(
+                {
+                    "factor_id": factor_id,
+                    "observation_count": len(values),
+                    "mean_return": _safe_round(mean_value, 6),
+                    "volatility": _safe_round(std_value, 6),
+                    "rank_ic_proxy": _safe_round(autocorr, 4),
+                    "annualized_ir_proxy": _safe_round(annualized_ir, 4),
+                    "turnover_proxy": _safe_round((_mean(abs_diffs) or 0.0) * 100.0, 4),
+                }
+            )
+        best_rank_ic = max(
+            (abs(_coerce_float(item.get("rank_ic_proxy"))) for item in factor_stats if item.get("factor_id") != "ff_rf"),
+            default=0.0,
+        )
+        best_ir = max(
+            (abs(_coerce_float(item.get("annualized_ir_proxy"))) for item in factor_stats if item.get("factor_id") != "ff_rf"),
+            default=0.0,
+        )
+        turnover = max(
+            (_coerce_float(item.get("turnover_proxy")) for item in factor_stats),
+            default=0.0,
+        )
+        min_expected_dates = 252 if str(frequency or "").upper() == "DAILY" else 60
+        coverage = min(100.0, len(dates) / max(1, min_expected_dates) * 100.0)
+        return {
+            "date_count": len(dates),
+            "factor_count": len(values_by_factor),
+            "factor_stats": factor_stats[:12],
+            "rank_ic": _safe_round(best_rank_ic, 4) or 0.0,
+            "ir": _safe_round(best_ir, 4) or 0.0,
+            "coverage": _safe_round(coverage, 2) or 0.0,
+            "turnover": _safe_round(turnover, 4) or 0.0,
+            "score": _safe_round(min(100.0, coverage * 0.5 + min(best_ir, 2.0) * 15.0 + min(best_rank_ic, 0.1) * 200.0), 2) or 0.0,
+            "method": "external_factor_time_series_proxy_v1",
+        }
+
+    def _external_import_candidate_metrics(
+        self,
+        row: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+        spec: Mapping[str, str],
+        risk_flags: Sequence[Any],
+    ) -> dict[str, Any]:
+        row_count = int(manifest.get("row_count") or 0)
+        metric_summary = self._external_import_metric_summary(
+            self._external_import_normalized_rows(row),
+            frequency=str(row.get("frequency") or ""),
+        )
+        display_projection = external_factor_import_display_projection_v1(
+            source_id=row.get("source_id"),
+            dataset_key=row.get("dataset_key"),
+            frequency=row.get("frequency"),
+            source_name=row.get("source_name"),
+            factor_id=spec.get("factor_id"),
+            factor_name=spec.get("factor_name"),
+            metrics=metric_summary,
+            previous_display_name=f"{row.get('source_name') or row.get('source_id')} / {spec.get('factor_name') or spec.get('factor_id')}",
+        )
+        display_name = str(display_projection["display_name_cn"])
+        return {
+            "pipeline_version": "external_factor_import_v1",
+            "source": "PUBLIC_FACTOR_IMPORT",
+            "external_import_job_id": row.get("id"),
+            "external_source_id": row.get("source_id"),
+            "external_dataset_key": row.get("dataset_key"),
+            "external_frequency": row.get("frequency"),
+            "external_factor_id": spec.get("factor_id"),
+            "external_factor_name": spec.get("factor_name"),
+            "external_import_display_name": display_name,
+            "external_import_name_audit": display_projection.get("name_audit"),
+            "external_import_risk_flags": list(risk_flags or []),
+            "manifest": {
+                "row_count": row_count,
+                "column_count": int(manifest.get("column_count") or 0),
+                "parsing_status": manifest.get("parsing_status"),
+                "template_key": manifest.get("template_key"),
+                "warnings": list(manifest.get("warnings") or []),
+            },
+            "target_layer": "L2",
+            "source_factor_ids": [f"external:{spec.get('factor_id')}"],
+            "rank_ic": metric_summary["rank_ic"],
+            "ir": metric_summary["ir"],
+            "coverage": metric_summary["coverage"] if row_count > 0 else 0.0,
+            "turnover": metric_summary["turnover"],
+            "score": metric_summary["score"],
+            "fitness_score": metric_summary["score"],
+            "external_diagnostics": {
+                **metric_summary,
+                "row_count": row_count,
+                "rank_ic_method": metric_summary["method"],
+                "direct_publish_allowed": False,
+            },
+        }
+
+    def _run_external_import_candidate_quarantine(
+        self,
+        candidate_id: str,
+        *,
+        row: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+        metrics: Mapping[str, Any],
+        now: str,
+    ) -> dict[str, Any]:
+        diagnostics = metrics.get("external_diagnostics") if isinstance(metrics.get("external_diagnostics"), Mapping) else {}
+        row_count = int(manifest.get("row_count") or 0)
+        date_count = int(diagnostics.get("date_count") or 0)
+        factor_count = int(diagnostics.get("factor_count") or 0)
+        source_ready = row_count > 0 and date_count > 0 and factor_count > 0
+        status = "PASSED" if source_ready else "REJECTED"
+        publish_status = "ELIGIBLE" if source_ready else "BLOCKED"
+        reason = (
+            "外部公开因子源文件已物化并完成 B3 源数据检疫；已进入可上线发布候选，正式发布仍需通过发布准入与历史重复过滤。"
+            if source_ready
+            else "外部因子源文件已写入，但有效日期或因子列不足，B3 无法形成可审计检疫结果。"
+        )
+        gate_summary = {
+            "external_import": "PASSED" if source_ready else "FAILED",
+            "source_manifest": "PASSED" if source_ready else "FAILED",
+            "target_layer": "L2",
+            "gate_basis": "PUBLIC_FACTOR_IMPORT_B3",
+            "manifest_row_count": row_count,
+            "date_count": date_count,
+            "factor_count": factor_count,
+            "rank_ic": "COMPUTED" if source_ready else "NOT_COMPUTABLE",
+            "ir": "COMPUTED" if source_ready else "NOT_COMPUTABLE",
+            "direct_publish_allowed": False,
+        }
+        is_oos = {
+            "is_rank_ic": metrics.get("rank_ic"),
+            "is_ir": metrics.get("ir"),
+            "is_coverage": metrics.get("coverage"),
+            "method": diagnostics.get("method") or "external_factor_time_series_proxy_v1",
+            "source_row_count": row_count,
+        }
+        orthogonal = {
+            "method": "External source integrity",
+            "max_abs_correlation": 0.0,
+            "source_factor_ids": metrics.get("source_factor_ids") or [],
+            "direct_publish_allowed": False,
+        }
+        stability = {
+            "coverage_pct": metrics.get("coverage"),
+            "turnover": metrics.get("turnover"),
+            "source_date_count": date_count,
+            "source_factor_count": factor_count,
+            "risk_label": "stable" if source_ready else "blocked",
+        }
+        risk_tags = [
+            {
+                "code": "EXTERNAL_REFERENCE_SOURCE",
+                "label": "外部公开来源",
+                "detail": "B3 确认公开源文件、manifest、字段映射和时间序列代理指标；发布仍需走可上线发布队列。",
+            }
+        ]
+        summary = {
+            "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
+            "gate_summary": gate_summary,
+            "publish_status": publish_status,
+            "publish_reason": reason,
+            "scoring_detail": diagnostics,
+            "admission_report": [],
+            "external_import_job_id": row.get("id"),
+            "external_source_id": row.get("source_id"),
+            "external_dataset_key": row.get("dataset_key"),
+        }
+        run_id = f"fqr_ext_{uuid4().hex[:12]}"
+        self.storage.insert_json_row(
+            "factor_quarantine_runs",
+            {
+                "id": run_id,
+                "candidate_id": candidate_id,
+                "status": status,
+                "request_json": dumps({
+                    "reason": "external_factor_import_auto_b3",
+                    "external_import_job_id": row.get("id"),
+                }),
+                "is_oos_json": dumps(is_oos),
+                "orthogonal_json": dumps(orthogonal),
+                "stability_json": dumps(stability),
+                "risk_tags_json": dumps(risk_tags),
+                "summary_json": dumps(summary),
+                "artifact_refs_json": dumps({}),
+                "created_at": now,
+                "completed_at": now,
+                "error_message": None,
+            },
+        )
+        self.storage.execute(
+            """
+            UPDATE factor_quarantine_candidates
+            SET status = ?,
+                publish_status = ?,
+                gate_summary_json = ?,
+                candidate_metrics_json = ?,
+                publish_eligibility_json = ?,
+                pit_evidence_json = ?,
+                updated_at = ?,
+                rejected_reason = ?
+            WHERE id = ?
+            """,
+            (
+                status,
+                publish_status,
+                dumps(gate_summary),
+                dumps(dict(metrics)),
+                dumps({"status": publish_status, "reason": reason, "rule_version": FACTOR_QUARANTINE_RULE_VERSION}),
+                dumps({"status": "DIAGNOSTIC_ONLY", "source": "PUBLIC_FACTOR_IMPORT"}),
+                now,
+                None if status == "PASSED" else reason,
+                candidate_id,
+            ),
+        )
+        return self.get_factor_quarantine_candidate(candidate_id)
+
+    def _mark_external_import_candidate_quarantine_blocked(
+        self,
+        candidate_id: str,
+        *,
+        row: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+        metrics: Mapping[str, Any],
+        now: str,
+    ) -> dict[str, Any]:
+        reason = "外部因子源文件尚未物化，B3 检疫无法计算 RankIC/IR；请先完成真实文件下载或本地上传。"
+        gate_summary = {
+            "external_import": "FAILED",
+            "source_manifest": "FAILED",
+            "target_layer": "L2",
+            "gate_basis": "PUBLIC_FACTOR_IMPORT_B3",
+            "manifest_row_count": int(manifest.get("row_count") or 0),
+        }
+        summary = {
+            "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
+            "gate_summary": gate_summary,
+            "publish_status": "BLOCKED",
+            "publish_reason": reason,
+            "scoring_detail": {},
+            "admission_report": [],
+            "external_import_job_id": row.get("id"),
+        }
+        run_id = f"fqr_ext_{uuid4().hex[:12]}"
+        self.storage.insert_json_row(
+            "factor_quarantine_runs",
+            {
+                "id": run_id,
+                "candidate_id": candidate_id,
+                "status": "REJECTED",
+                "request_json": dumps({
+                    "reason": "external_factor_import_manifest_blocked",
+                    "external_import_job_id": row.get("id"),
+                }),
+                "is_oos_json": dumps({"status": "NOT_COMPUTABLE", "reason": reason}),
+                "orthogonal_json": dumps({"status": "NOT_COMPUTABLE", "reason": reason}),
+                "stability_json": dumps({"status": "NOT_COMPUTABLE", "reason": reason}),
+                "risk_tags_json": dumps([
+                    {
+                        "code": "SOURCE_FILE_NOT_MATERIALIZED",
+                        "label": "源文件未物化",
+                        "detail": reason,
+                    }
+                ]),
+                "summary_json": dumps(summary),
+                "artifact_refs_json": dumps({}),
+                "created_at": now,
+                "completed_at": now,
+                "error_message": None,
+            },
+        )
+        self.storage.execute(
+            """
+            UPDATE factor_quarantine_candidates
+            SET status = 'REJECTED',
+                publish_status = 'BLOCKED',
+                gate_summary_json = ?,
+                candidate_metrics_json = ?,
+                publish_eligibility_json = ?,
+                pit_evidence_json = ?,
+                updated_at = ?,
+                rejected_reason = ?
+            WHERE id = ?
+            """,
+            (
+                dumps(gate_summary),
+                dumps(dict(metrics)),
+                dumps({"status": "BLOCKED", "reason": reason, "rule_version": FACTOR_QUARANTINE_RULE_VERSION}),
+                dumps({"status": "DIAGNOSTIC_ONLY", "source": "PUBLIC_FACTOR_IMPORT"}),
+                now,
+                reason,
+                candidate_id,
+            ),
+        )
+        return self.get_factor_quarantine_candidate(candidate_id)
 
     @staticmethod
     def _normalize_external_source_id(value: Any) -> str:
@@ -7616,7 +8756,7 @@ class FactorResearchService:
         if review_status == "READY_FOR_REVIEW":
             return ["inspect_manifest", "submit_review"]
         if review_status == "SUBMITTED":
-            return ["await_d2_review", "quarantine_intake_after_approval"]
+            return ["b3_quarantine_intake", "b3_quarantine_run"]
         return ["complete_semantic_mapping", "inspect_manifest"]
 
     def _external_import_job_from_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
@@ -7660,6 +8800,39 @@ class FactorResearchService:
                 },
                 review_submitted=str(row.get("review_status") or "").upper() == "SUBMITTED",
             ),
+        }
+
+    @staticmethod
+    def _external_import_review_queue_item(row: Mapping[str, Any]) -> dict[str, Any]:
+        manifest = loads(row.get("manifest_json"), {})
+        artifact_paths = loads(row.get("artifact_paths_json"), {})
+        risk_flags = loads(row.get("risk_flags_json"), [])
+        next_actions = loads(row.get("next_actions_json"), [])
+        return {
+            "id": row.get("id"),
+            "source_id": row.get("source_id"),
+            "dataset_key": row.get("dataset_key"),
+            "source_name": row.get("source_name") or "",
+            "dataset_name": row.get("dataset_name") or "",
+            "import_mode": row.get("import_mode") or "LOCAL_FILE",
+            "status": row.get("status") or "REVIEW_SUBMITTED",
+            "review_status": row.get("review_status") or "SUBMITTED",
+            "frequency": row.get("frequency") or "MONTHLY",
+            "submitted_at": row.get("submitted_at"),
+            "updated_at": row.get("updated_at"),
+            "manifest": {
+                "row_count": int(manifest.get("row_count") or 0),
+                "column_count": int(manifest.get("column_count") or 0),
+                "parsing_status": manifest.get("parsing_status") or "",
+                "template_key": manifest.get("template_key") or "",
+                "warnings": list(manifest.get("warnings") or []),
+            },
+            "artifact_paths": artifact_paths if isinstance(artifact_paths, Mapping) else {},
+            "risk_flags": list(risk_flags or []),
+            "next_actions": list(next_actions or []),
+            "governance_gate": "REVIEW_BEFORE_QUARANTINE",
+            "queue_state": "AWAITING_D2_REVIEW",
+            "direct_publish_allowed": False,
         }
 
     def create_research_waiver(self, request: Any) -> dict[str, Any]:
@@ -10585,7 +11758,7 @@ class FactorResearchService:
         factor["blocker_reason_summary"] = self._build_blocker_reason_summary(policy)
         factor["batch_diagnostic_summary"] = self._build_batch_diagnostic_summary(factor, policy)
         factor["strategy_creation_risk"] = self._build_strategy_creation_risk(factor, policy)
-        naming_projection = factor_display_name_projection_v4(
+        naming_projection = _external_import_factor_display_projection(factor) or factor_display_name_projection_v4(
             factor_id=str(factor.get("id") or ""),
             name=factor.get("stored_name") or factor.get("name"),
             source=factor.get("source"),
@@ -10775,6 +11948,14 @@ class FactorResearchService:
 
     def _quarantine_candidate_id_for_expression(self, expression: str) -> str:
         return f"fq_{self._signature_hash(self._expression_signature(expression), 14)}"
+
+    def _quarantine_candidate_id_for_mining_row(self, row: Mapping[str, Any], expression: str) -> str:
+        source_job_id = str(row.get("job_id") or row.get("source_mining_job_id") or "").strip()
+        mining_candidate_id = str(row.get("id") or row.get("mining_candidate_id") or "").strip()
+        if not source_job_id or not mining_candidate_id:
+            return self._quarantine_candidate_id_for_expression(expression)
+        signature = self._expression_signature(f"{source_job_id}|{mining_candidate_id}|{expression}")
+        return f"fq_{hashlib.sha1(signature.encode('utf-8')).hexdigest()[:14]}"
 
     def _factor_mining_request_signature_for_row(self, row: Mapping[str, Any]) -> tuple[Any, ...]:
         request = _decode_json_dict(row.get("request_json"))
@@ -11156,6 +12337,29 @@ class FactorResearchService:
             neutralization_scope=metrics.get("neutralization_scope") or metrics.get("orthogonality_intent"),
             residual_control=metrics.get("residual_control") or ("market_beta" if "beta" in expression.lower() else None),
         )
+        is_external_import = (
+            str(metrics.get("pipeline_version") or "") == "external_factor_import_v1"
+            or str(metrics.get("source") or "").upper() == "PUBLIC_FACTOR_IMPORT"
+            or str(candidate.get("source_mining_job_id") or "").startswith("extimp_")
+        )
+        if is_external_import:
+            external_projection = external_factor_import_display_projection_v1(
+                source_id=metrics.get("external_source_id"),
+                dataset_key=metrics.get("external_dataset_key"),
+                frequency=metrics.get("external_frequency"),
+                factor_id=metrics.get("external_factor_id"),
+                factor_name=metrics.get("external_factor_name"),
+                metrics=metrics,
+                previous_display_name=metrics.get("external_import_display_name") or candidate.get("factor_name") or candidate.get("name"),
+            )
+            metrics = dict(metrics)
+            metrics["external_import_display_name"] = external_projection["display_name_cn"]
+            metrics["external_import_name_audit"] = external_projection.get("name_audit")
+            candidate["candidate_metrics"] = metrics
+            naming_projection = {
+                **dict(naming_projection),
+                **external_projection,
+            }
         structured_display_name = str(
             naming_projection.get("base_display_name_cn")
             or naming_projection.get("display_name_cn")
@@ -11545,6 +12749,7 @@ class FactorResearchService:
     def factor_quarantine_intake(self, request: Any) -> dict[str, Any]:
         payload = dict(_as_mapping(request))
         requested_job_id = str(payload.get("mining_job_id") or payload.get("job_id") or "").strip()
+        explicit_job_intake = bool(requested_job_id)
         candidate_ids = {
             str(item).strip()
             for item in payload.get("candidate_ids") or []
@@ -11584,8 +12789,38 @@ class FactorResearchService:
             expression = str(row.get("expression") or "").strip()
             if not expression:
                 continue
+            row_job_id = str(row.get("job_id") or "").strip()
+            row_mining_candidate_id = str(row.get("id") or row.get("mining_candidate_id") or "").strip()
             candidate_id = self._quarantine_candidate_id_for_expression(expression)
-            existing = self.storage.fetch_one("SELECT * FROM factor_quarantine_candidates WHERE id = ?", (candidate_id,))
+            source_scoped_candidate_id = self._quarantine_candidate_id_for_mining_row(row, expression)
+            existing = None
+            if explicit_job_intake and row_job_id and row_mining_candidate_id:
+                existing = self.storage.fetch_one(
+                    """
+                    SELECT *
+                    FROM factor_quarantine_candidates
+                    WHERE source_mining_job_id = ?
+                      AND mining_candidate_id = ?
+                    ORDER BY updated_at DESC, created_at DESC, id
+                    LIMIT 1
+                    """,
+                    (row_job_id, row_mining_candidate_id),
+                )
+                if existing:
+                    candidate_id = str(existing.get("id") or source_scoped_candidate_id)
+            if not existing:
+                existing = self.storage.fetch_one("SELECT * FROM factor_quarantine_candidates WHERE id = ?", (candidate_id,))
+                if (
+                    existing
+                    and explicit_job_intake
+                    and row_job_id
+                    and str(existing.get("source_mining_job_id") or "") != row_job_id
+                ):
+                    candidate_id = source_scoped_candidate_id
+                    existing = self.storage.fetch_one(
+                        "SELECT * FROM factor_quarantine_candidates WHERE id = ?",
+                        (candidate_id,),
+                    )
             if not existing:
                 existing = self.storage.fetch_one(
                     """
@@ -11598,7 +12833,18 @@ class FactorResearchService:
                     (expression,),
                 )
                 if existing:
-                    candidate_id = str(existing.get("id") or candidate_id)
+                    if (
+                        explicit_job_intake
+                        and row_job_id
+                        and str(existing.get("source_mining_job_id") or "") != row_job_id
+                    ):
+                        candidate_id = source_scoped_candidate_id
+                        existing = self.storage.fetch_one(
+                            "SELECT * FROM factor_quarantine_candidates WHERE id = ?",
+                            (candidate_id,),
+                        )
+                    else:
+                        candidate_id = str(existing.get("id") or candidate_id)
             if existing:
                 if str(existing.get("status") or "") != "PUBLISHED":
                     next_mining_candidate_id = row.get("id")
@@ -12570,6 +13816,11 @@ class FactorResearchService:
         expression = str(candidate.get("expression") or "")
         candidate_metrics = candidate.get("candidate_metrics") if isinstance(candidate.get("candidate_metrics"), Mapping) else {}
         target_layer = str(candidate.get("target_layer") or candidate_metrics.get("target_layer") or "L2").upper()
+        is_external_import = (
+            str(candidate_metrics.get("pipeline_version") or "") == "external_factor_import_v1"
+            or str(candidate_metrics.get("source") or "").upper() == "PUBLIC_FACTOR_IMPORT"
+            or str(candidate.get("source_mining_job_id") or "").startswith("extimp_")
+        )
         phase2_metadata = self._factor_phase2_metadata(expression, candidate_metrics)
         wnzt_evidence = phase2_metadata.get("wnzt_evidence") if isinstance(phase2_metadata.get("wnzt_evidence"), Mapping) else {}
         if bool(candidate_metrics.get("raw_f2")) and target_layer != "L1":
@@ -12580,14 +13831,14 @@ class FactorResearchService:
             if not candidate_metrics.get("operator_config_snapshot_id") or not candidate_metrics.get("f1_catalog_snapshot_id"):
                 raise ValueError("Raw_F2 缺少工厂配置或 F1 快照引用，不能发布。")
         published_identity = _published_factor_identity(expression, target_layer=target_layer, metrics=candidate_metrics)
-        factor_id = published_identity.factor_id
+        factor_id = str(candidate.get("target_factor_id") or published_identity.factor_id) if is_external_import else published_identity.factor_id
         now = iso_now()
         existing = self.storage.fetch_one(
             "SELECT id FROM factor_definitions WHERE id = ? AND deleted_at IS NULL",
             (factor_id,),
         )
         if existing:
-            raise ValueError("自动挖掘因子已经发布，不能重复覆盖。")
+            raise ValueError("候选因子已经发布，不能重复覆盖。")
         latest_run = candidate.get("latest_run") if isinstance(candidate.get("latest_run"), Mapping) else {}
         run_summary = latest_run.get("summary") if isinstance(latest_run.get("summary"), Mapping) else {}
         gate_summary = candidate.get("gate_summary") if isinstance(candidate.get("gate_summary"), Mapping) else {}
@@ -12595,31 +13846,44 @@ class FactorResearchService:
         composition_methods = candidate.get("composition_methods") or candidate_metrics.get("composition_methods") or []
         investment_logic = str(candidate.get("investment_logic") or candidate_metrics.get("investment_logic") or "").strip()
         pit_evidence = run_summary.get("pit_evidence") if isinstance(run_summary.get("pit_evidence"), Mapping) else {}
-        naming_projection = factor_display_name_projection_v4(
-            factor_id=factor_id,
-            name=_auto_mined_factor_name(factor_id, expression),
-            source="AUTO_MINED",
-            expression=expression,
-            descriptor=published_identity.descriptor,
-            tier_level=published_identity.tier,
-            neutralization_scope=candidate_metrics.get("neutralization_scope") or candidate_metrics.get("orthogonality_intent"),
-            residual_control=candidate_metrics.get("residual_control") or ("market_beta" if "beta" in expression.lower() else None),
-        )
-        naming_projection = self._resolve_factor_display_name_for_scope(
-            {
-                "id": factor_id,
-                "source": "AUTO_MINED",
-                "lifecycle_status": "VERIFIED",
-                "lifecycle": "online",
-                "tier_level": published_identity.tier,
-                "expression": expression,
-                "descriptor": published_identity.descriptor,
-                "parent_factor_ids": candidate_metrics.get("source_factor_ids") or [],
-                "operator_chain": operator_chain,
-                **naming_projection,
-            }
-        )
+        if is_external_import:
+            naming_projection = external_factor_import_display_projection_v1(
+                source_id=candidate_metrics.get("external_source_id"),
+                dataset_key=candidate_metrics.get("external_dataset_key"),
+                frequency=candidate_metrics.get("external_frequency"),
+                factor_id=candidate_metrics.get("external_factor_id") or factor_id,
+                factor_name=candidate_metrics.get("external_factor_name"),
+                metrics=candidate_metrics,
+                previous_display_name=candidate_metrics.get("external_import_display_name") or candidate.get("display_name_cn"),
+            )
+        else:
+            naming_projection = factor_display_name_projection_v4(
+                factor_id=factor_id,
+                name=_auto_mined_factor_name(factor_id, expression),
+                source="AUTO_MINED",
+                expression=expression,
+                descriptor=published_identity.descriptor,
+                tier_level=published_identity.tier,
+                neutralization_scope=candidate_metrics.get("neutralization_scope") or candidate_metrics.get("orthogonality_intent"),
+                residual_control=candidate_metrics.get("residual_control") or ("market_beta" if "beta" in expression.lower() else None),
+            )
+            naming_projection = self._resolve_factor_display_name_for_scope(
+                {
+                    "id": factor_id,
+                    "source": "AUTO_MINED",
+                    "lifecycle_status": "VERIFIED",
+                    "lifecycle": "online",
+                    "tier_level": published_identity.tier,
+                    "expression": expression,
+                    "descriptor": published_identity.descriptor,
+                    "parent_factor_ids": candidate_metrics.get("source_factor_ids") or [],
+                    "operator_chain": operator_chain,
+                    **naming_projection,
+                }
+            )
         factor_name = str(naming_projection["display_name_cn"])
+        publish_naming_rule = "external_factor_import_projection" if is_external_import else published_identity.naming_rule
+        publish_source = "PUBLIC_FACTOR_IMPORT" if is_external_import else "AUTO_MINED"
         self._assert_factor_display_name_unique_for_online_scope(factor_id=factor_id, display_name=factor_name)
         publish_metadata = factor_publish_metadata_v4(
             factor_id=factor_id,
@@ -12694,7 +13958,7 @@ class FactorResearchService:
                 "cluster_id": candidate.get("cluster_id"),
                 "gate_summary": gate_summary,
                 "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
-                "publish_naming_rule": published_identity.naming_rule,
+                "publish_naming_rule": publish_naming_rule,
                 "naming_rule_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
                 "publish_metadata": publish_metadata,
                 "diagnostic_warnings": diagnostic_warnings,
@@ -12708,7 +13972,7 @@ class FactorResearchService:
         diagnostic_summary = self._hydrate_auto_mined_diagnostic_summary(
             {
                 "id": factor_id,
-                "source": "AUTO_MINED",
+                "source": publish_source,
                 "latest_diagnostic_completed_at": now,
             },
             diagnostic_summary,
@@ -12721,16 +13985,21 @@ class FactorResearchService:
                     direction, frequency, expression, tags_json, data_requirements_json,
                     institutional_note, created_by, created_at, updated_at
                 )
-                VALUES (?, ?, 'US', 'SP500', 'AUTO_MINED', 'VERIFIED', 'COMPLETED', 'HIGH_IS_BETTER',
+                VALUES (?, ?, 'US', 'SP500', ?, 'VERIFIED', 'COMPLETED', 'HIGH_IS_BETTER',
                         'DAILY', ?, ?, ?, ?, 'system_rule', ?, ?)
                 """,
                 (
                     factor_id,
                     factor_name,
+                    publish_source,
                     expression,
-                    dumps(["自动挖掘", "检疫通过", target_layer]),
+                    dumps((["外部因子", "检疫通过", target_layer] if is_external_import else ["自动挖掘", "检疫通过", target_layer])),
                     dumps(_merge_factor_data_requirements(expression, (), include_default_price_requirements=True)),
-                    f"自动挖掘因子，已通过 D2 检疫和正交化门禁；发布目标为 {target_layer}，生产策略仍需人工确认。",
+                    (
+                        f"外部公开因子，已通过 B3 源数据检疫；发布目标为 {target_layer}，生产策略仍需二次组合与成本审计。"
+                        if is_external_import
+                        else f"自动挖掘因子，已通过 D2 检疫和正交化门禁；发布目标为 {target_layer}，生产策略仍需人工确认。"
+                    ),
                     now,
                     now,
                 ),
@@ -12747,7 +14016,7 @@ class FactorResearchService:
                     dumps({
                         "source_candidate_id": candidate_id,
                         "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
-                        "publish_naming_rule": published_identity.naming_rule,
+                        "publish_naming_rule": publish_naming_rule,
                         "publish_metadata": publish_metadata,
                         "display_name_cn": factor_name,
                         "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
@@ -12799,12 +14068,12 @@ class FactorResearchService:
                         "factor_name": factor_name,
                         "display_name_cn": factor_name,
                         "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
-                        "source": "AUTO_MINED",
+                        "source": publish_source,
                         "lifecycle_status": "VERIFIED",
                         "target_layer": target_layer,
                         "operator_chain": operator_chain,
                         "composition_methods": composition_methods,
-                        "publish_naming_rule": published_identity.naming_rule,
+                        "publish_naming_rule": publish_naming_rule,
                         "publish_metadata": publish_metadata,
                         "pit_gate_mode": pit_evidence.get("gate_mode") or "DIAGNOSTIC_ONLY",
                         "diagnostic_warnings": diagnostic_warnings,
@@ -12831,7 +14100,7 @@ class FactorResearchService:
                         relation_type,
                         dumps({
                             "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
-                            "publish_naming_rule": published_identity.naming_rule,
+                            "publish_naming_rule": publish_naming_rule,
                             "publish_metadata": publish_metadata,
                             "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
                         }),
@@ -12864,7 +14133,7 @@ class FactorResearchService:
                             "recipe_family": candidate_metrics.get("recipe_family"),
                             "orthogonality_intent": candidate_metrics.get("orthogonality_intent"),
                             "rule_version": FACTOR_QUARANTINE_RULE_VERSION,
-                            "publish_naming_rule": published_identity.naming_rule,
+                            "publish_naming_rule": publish_naming_rule,
                             "publish_metadata": publish_metadata,
                             "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
                         }),
@@ -12886,7 +14155,11 @@ class FactorResearchService:
                     factor_id,
                     now,
                     now,
-                    dumps({"status": "PUBLISHED", "reason": "已自动发布为自动挖掘因子。", "event_id": event_id}),
+                    dumps({
+                        "status": "PUBLISHED",
+                        "reason": "已发布为外部公开因子。" if is_external_import else "已自动发布为自动挖掘因子。",
+                        "event_id": event_id,
+                    }),
                     candidate_id,
                 ),
             )
@@ -15337,7 +16610,7 @@ class FactorResearchService:
             str(factor.get("id") or ""),
             str(factor.get("source") or ""),
         )
-        naming_projection = factor_display_name_projection_v4(
+        naming_projection = _external_import_factor_display_projection(factor) or factor_display_name_projection_v4(
             factor_id=str(factor.get("id") or ""),
             name=factor.get("stored_name"),
             source=factor.get("source"),

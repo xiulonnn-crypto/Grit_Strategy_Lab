@@ -196,6 +196,20 @@ function filterQuarantineRowsByDate(
   return rows.filter((row) => shortDate(row.submitted_at) === normalizedDate);
 }
 
+function isExternalImportQuarantineRow(row: ApiFactorQuarantineResultRow): boolean {
+  return text(row.candidate_id, '').startsWith('fq_ext_');
+}
+
+function sortQuarantineRowsForFactory(rows: ApiFactorQuarantineResultRow[]): ApiFactorQuarantineResultRow[] {
+  return [...rows].sort((left, right) => {
+    const externalDelta = Number(isExternalImportQuarantineRow(right)) - Number(isExternalImportQuarantineRow(left));
+    if (externalDelta !== 0) return externalDelta;
+    const timeDelta = timestampValue(right.submitted_at) - timestampValue(left.submitted_at);
+    if (timeDelta !== 0) return timeDelta;
+    return text(right.candidate_id, '').localeCompare(text(left.candidate_id, ''));
+  });
+}
+
 function countQuarantineRowsByResult(
   rows: ApiFactorQuarantineResultRow[],
   result: string,
@@ -1981,7 +1995,7 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
         };
       })
       : quarantineCandidates.map(quarantineRowFromCandidate);
-    return sortByTimeDesc(rows, (row) => row.submitted_at);
+    return sortQuarantineRowsForFactory(rows);
   }, [overview, quarantineCandidates, quarantineCandidateById]);
   const publishableFactors = useMemo(() => {
     const direct = asList<ApiPublishableFactorRow>(overview?.publishable_factors);
@@ -2047,30 +2061,66 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
     : 0;
   const latestSubmittedDate = shortDate(scoringCandidates[0]?.submitted_at ?? quarantineRows[0]?.submitted_at ?? '');
   const metricDateLabel = filters.date || '全部日期';
+  const metricFilterActive = Boolean(
+    searchedSummary
+    || filters.factorName.trim()
+    || statusToken(filters.result) !== 'ALL'
+    || (filters.date && filters.date !== autoFilterDate)
+  );
+  const metricScopedRows = metricFilterActive ? renderedQuarantineRows : dateScopedQuarantineRows;
+  const metricSummaryNumber = (key: string): number | null => {
+    if (!metricFilterActive || !searchedSummary) return null;
+    const value = numeric(searchedSummary[key], NaN);
+    return Number.isFinite(value) ? value : null;
+  };
+  const metricScopedTotal = metricSummaryNumber('total') ?? metricScopedRows.length;
+  const metricScopedCandidateIds = new Set(
+    metricScopedRows.map((row) => text(row.candidate_id, '')).filter(Boolean),
+  );
   const metricQuarantinePassCount = countQuarantineRowsByResult(dateScopedQuarantineRows, 'PASS');
   const metricQuarantineFailCount = countQuarantineRowsByResult(dateScopedQuarantineRows, 'FAIL');
+  const metricScopedPassCount = metricFilterActive
+    ? (metricSummaryNumber('passed_count') ?? countQuarantineRowsByResult(metricScopedRows, 'PASS'))
+      + (metricSummaryNumber('published_count') ?? 0)
+    : numeric(overview?.monitor_summary?.quarantine_pass_count, metricQuarantinePassCount);
+  const metricScopedFailCount = metricFilterActive
+    ? metricSummaryNumber('rejected_count') ?? countQuarantineRowsByResult(metricScopedRows, 'FAIL')
+    : numeric(overview?.monitor_summary?.failure_candidate_count, metricQuarantineFailCount);
   const metricPublishableCount = filters.date
-    ? publishableFactors.filter((item) => dateScopedCandidateIds.has(text(item.candidate_id ?? item.factor_id, ''))).length
+    ? publishableFactors.filter((item) => (metricFilterActive ? metricScopedCandidateIds : dateScopedCandidateIds).has(text(item.candidate_id ?? item.factor_id, ''))).length
     : publishableFactors.length;
+  const metricAlphaConcentration = metricFilterActive
+    ? Math.max(
+      0,
+      ...[...displayedQuarantineCandidates, ...quarantineCandidates]
+        .filter((candidate) => metricScopedCandidateIds.has(text(candidate.id, '')))
+        .map((candidate) => numeric(record(candidate.candidate_metrics).s_grade_correlation, NaN))
+        .filter((value) => Number.isFinite(value)),
+    )
+    : overview?.monitor_summary?.alpha_concentration;
   const metricCards: FactorFactoryMetricCard[] = [
     {
       key: 'yesterday_formula_count',
       label: '公式量（所选日期）',
-      value: numeric(overview?.monitor_summary?.selected_date_formula_count ?? overview?.monitor_summary?.formula_count, 0),
+      value: metricFilterActive
+        ? metricScopedTotal
+        : numeric(overview?.monitor_summary?.selected_date_formula_count ?? overview?.monitor_summary?.formula_count, 0),
       hint: `${metricDateLabel} OperatorEngine 公式空间`,
       tooltip: '所选日期 OperatorEngine 去重后的完整公式空间数量，不再用 50 条预览代替任务入口。',
     },
     {
       key: 'initial_screen_pass',
       label: '初筛通过（所选日期交付检疫）',
-      value: numeric(overview?.monitor_summary?.initial_screen_pass_count, scoringCandidates.length),
+      value: metricFilterActive
+        ? metricScopedTotal
+        : numeric(overview?.monitor_summary?.initial_screen_pass_count, scoringCandidates.length),
       hint: `${metricDateLabel} Raw_F2 批次交付`,
       tooltip: '所选日期从公式空间进入因子检疫的 Raw_F2 数量，Top50 仅是分页展示。',
     },
     {
       key: 'quarantine_pass',
       label: '检疫通过',
-      value: numeric(overview?.monitor_summary?.quarantine_pass_count, metricQuarantinePassCount),
+      value: metricScopedPassCount,
       hint: `${metricDateLabel} PASS / PUBLISHED`,
       tooltip: '当前日期因子检疫裁决为 PASS 或已发布边界内可继续推进的候选数量。',
     },
@@ -2084,14 +2134,14 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
     {
       key: 'alpha_concentration',
       label: 'Alpha 浓度',
-      value: decimal(overview?.monitor_summary?.alpha_concentration),
+      value: decimal(metricAlphaConcentration),
       hint: 'S 级相关性峰值',
       tooltip: '候选与已有 S 级或高置信因子的相关性峰值，用来提示 Alpha 是否过度集中或重复。',
     },
     {
       key: 'failure_candidate',
       label: '失败',
-      value: numeric(overview?.monitor_summary?.failure_candidate_count, metricQuarantineFailCount),
+      value: metricScopedFailCount,
       hint: `${metricDateLabel} FAIL`,
       tooltip: '当前日期因子检疫裁决为 FAIL 的候选数量；Raw_F2 缺少治理证据也计入失败。',
     },
@@ -2112,6 +2162,11 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
   const detailBaseName = text(detailCandidate?.base_display_name_cn ?? detailAudit.base_display_name_cn, '');
   const detailBenchmark = text(detailAudit.benchmark_label, '');
   const detailDedupe = text(detailCandidate?.name_dedupe_suffix, '');
+  const detailExpertReview = record(record(detailCandidate?.name_audit).expert_review);
+  const detailExpertDiagnostics = asList<AnyRecord>(detailExpertReview.metric_diagnostics);
+  const detailArchitectRecommendations = asList<unknown>(detailExpertReview.architect_recommendations)
+    .map((item) => text(item, ''))
+    .filter(Boolean);
   const latestRun = overview?.latest_run ?? null;
   const latestConfigSnapshotId = overview?.operator_config?.latest_operator_config_snapshot?.snapshot_id
     ?? configPayload?.latest_operator_config_snapshot?.snapshot_id
@@ -2722,31 +2777,82 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
                 <h3>命名审计</h3>
                 <div className="factor-factory-expression-stack factor-factory-name-audit">
                   <div>
-                    <span>Base Name</span>
+                    <span>基础名称</span>
                     <code>{detailBaseName || '未记录'}</code>
                   </div>
                   <div>
-                    <span>Final Name</span>
+                    <span>最终名称</span>
                     <code>{detailFinalName}</code>
                   </div>
                   <div>
-                    <span>Dedupe</span>
+                    <span>风格族</span>
+                    <code>{text(detailAudit.style_family, '未记录')}</code>
+                  </div>
+                  <div>
+                    <span>核心语义</span>
+                    <code>{text(detailAudit.core_semantic, '未记录')}</code>
+                  </div>
+                  <div>
+                    <span>时间窗口</span>
+                    <code>{text(detailAudit.frequency_label ?? detailAudit.parameter_label, '未记录')}</code>
+                  </div>
+                  <div>
+                    <span>治理状态</span>
+                    <code>{text(detailAudit.governance_tag ?? detailAudit.governance_level, '未记录')}</code>
+                  </div>
+                  <div>
+                    <span>去重</span>
                     <code>{detailDedupe || '未触发'}</code>
                   </div>
                   <div>
-                    <span>Benchmark</span>
+                    <span>基准/用途</span>
                     <code>{detailBenchmark || '未推断'}</code>
                   </div>
                   <div>
-                    <span>Parents</span>
+                    <span>父因子</span>
                     <code>{asList<string>(record(detailCandidate.candidate_metrics).source_factor_ids).join(' / ') || '未记录'}</code>
                   </div>
                   <div>
-                    <span>Expression</span>
+                    <span>表达式</span>
                     <code>{detailCandidate.expression}</code>
                   </div>
                 </div>
+                {text(detailAudit.style_family_reason, '') ? (
+                  <p className="factor-detail-note">{text(detailAudit.style_family_reason, '')}</p>
+                ) : null}
+                {text(detailAudit.governance_reason, '') ? (
+                  <p className="factor-detail-note">{text(detailAudit.governance_reason, '')}</p>
+                ) : null}
               </section>
+              {text(detailExpertReview.summary, '') || detailExpertDiagnostics.length || detailArchitectRecommendations.length ? (
+                <section>
+                  <h3>专家复核建议</h3>
+                  {text(detailExpertReview.summary, '') ? <p className="factor-detail-note">{text(detailExpertReview.summary, '')}</p> : null}
+                  {detailExpertDiagnostics.length ? (
+                    <div className="factor-factory-report-table" role="table" aria-label="专家复核指标">
+                      <div className="factor-factory-report-row factor-factory-report-row--head" role="row">
+                        <span role="columnheader">指标</span>
+                        <span role="columnheader">数值</span>
+                        <span role="columnheader">诊断</span>
+                      </div>
+                      {detailExpertDiagnostics.map((item) => (
+                        <div className="factor-factory-report-row" role="row" key={text(item.metric)}>
+                          <span role="cell">{text(item.metric)}</span>
+                          <span role="cell">{Number.isFinite(numeric(item.value, NaN)) ? decimal(item.value) : text(item.value, '未生成')}</span>
+                          <span role="cell">{text(item.diagnosis, '未记录')}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  {detailArchitectRecommendations.length ? (
+                    <div className="factor-detail-chip-row">
+                      {detailArchitectRecommendations.map((item) => (
+                        <span className="factor-phase2-chip factor-phase2-chip--info" key={item}>{item}</span>
+                      ))}
+                    </div>
+                  ) : null}
+                </section>
+              ) : null}
               <section>
                 <h3>因子打分明细</h3>
                 <div className="factor-detail-metric-grid">

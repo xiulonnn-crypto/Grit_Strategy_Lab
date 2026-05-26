@@ -215,6 +215,20 @@ function overviewFixture(): ApiSnapshotOverview {
     ],
     data_layer_readiness: [
       {
+        layer_id: 'l1_market_data',
+        title_cn: 'L1 基础行情',
+        status: 'PARTIAL_READY',
+        summary: '10Y PIT 价格回放可用；30Y Full Ready 仍在修复队列。',
+        metrics: [
+          { label: '覆盖', value: '1266/1482' },
+          { label: '价格行数', value: 6485875 },
+        ],
+        pit_metrics: [
+          { label: 'PIT目标', value: '1154/1224' },
+          { label: '基准ETF', value: '3/3' },
+        ],
+      },
+      {
         layer_id: 'l2_fundamental_data',
         title_cn: 'L2 财务截面',
         status: 'READY',
@@ -606,6 +620,15 @@ describe('SnapshotsPage operations console', () => {
     expect(within(queue).getAllByText(/公司行为|Corporate/).length).toBeGreaterThan(0);
   });
 
+  it('keeps financial balance observations out of the pending queue', async () => {
+    renderSnapshotsPage();
+
+    const queue = await screen.findByTestId('snapshots-pending-queue');
+
+    expect(within(queue).queryByText('财务平衡校验部分可用')).toBeNull();
+    expect(within(queue).queryByText('publish_date 与 available_at 已完整；会计恒等式作为观察项保留，不再占用主告警位。')).toBeNull();
+  });
+
   it('maps health card status to evidence or drilldown anchors', async () => {
     renderSnapshotsPage();
 
@@ -623,7 +646,10 @@ describe('SnapshotsPage operations console', () => {
     expect(l4Card).toBeTruthy();
 
     expect(screen.getByText('1 层部分可用')).toBeTruthy();
-    expect(within(l1Card as HTMLElement).getByText(/股票 .* · 债券/)).toBeTruthy();
+    expect(within(l1Card as HTMLElement).getByText(/股票 PIT 1154\s*\/\s*1224/)).toHaveClass('snapshots-ops-metric-value-line');
+    expect(within(l1Card as HTMLElement).getByText(/ETF 3\s*\/\s*3 · 债券/)).toHaveClass('snapshots-ops-metric-value-line');
+    expect(within(l1Card as HTMLElement).queryByText(/股票 PIT 1154\s*\/\s*1224 \+ ETF 3\s*\/\s*3 · 债券/)).toBeNull();
+    expect(within(l1Card as HTMLElement).queryByText(/股票 1266\s*\/\s*1482/)).toBeNull();
     expect(within(l1Card as HTMLElement).queryByText(/公司行动 .* ·/)).toBeNull();
     expect(within(l2Card as HTMLElement).getByText('已就绪')).toHaveClass('snapshots-ops-status--ready');
     expect(within(l2Card as HTMLElement).getByText('100.0%')).toBeTruthy();

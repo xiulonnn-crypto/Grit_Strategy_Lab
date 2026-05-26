@@ -375,6 +375,122 @@ describe('FactorFactoryPage', () => {
     expect(screen.queryByText('因子改造类')).not.toBeInTheDocument();
   });
 
+  it('shows submitted public factor imports as B3 quarantine results instead of a manual intake queue', async () => {
+    const overview = factoryOverview();
+    const externalDisplayName = '[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]';
+    const externalNameAudit = {
+      structured_components: {
+        style_family: '[外部]',
+        style_family_reason: '来自学术公开因子库，作为外部 Beta 与风格暴露参照，不与自研 Alpha 混同。',
+        core_semantic: 'Fama-French 美股研究日频因子',
+        frequency_label: 'Daily',
+        governance_tag: 'Raw',
+        governance_reason: 'Raw_F2 证据显示尚未完成 Winsorize、Neutralize、Z-Score 或 Rank 全链路处理。',
+        benchmark_label: '学术 Beta / 风格暴露',
+      },
+      expert_review: {
+        summary: '高 IC、低 IR、高换手的外部学术风格因子，更适合作为剥离工具或平滑后的参考信号，不建议直接作为 F3 权重项。',
+        metric_diagnostics: [
+          { metric: 'RankIC', value: 0.139, diagnosis: '预测能力较强；进入组合前仍需稳定性复核。' },
+          { metric: 'RankICIR', value: 0.498, diagnosis: '稳定性不足，需通过平滑或更长窗口观察。' },
+        ],
+        architect_recommendations: ['作为中性化或归因剥离基准。', '尝试 TS_Mean(..., 5) 等时序平滑。'],
+      },
+    };
+    const externalCandidate = {
+      ...overview.quarantine.items[0]!,
+      id: 'fq_ext_ready_001',
+      mining_candidate_id: 'extcand_ready_001',
+      source_mining_job_id: 'extimp_ready_001',
+      expression: 'ExternalFactor(fama_french_us_research_factors_daily)',
+      status: 'PASSED' as const,
+      publish_status: 'ELIGIBLE',
+      display_name_cn: externalDisplayName,
+      factor_name: externalDisplayName,
+      base_display_name_cn: externalDisplayName,
+      name_audit: externalNameAudit,
+      quarantine_result: 'PASS',
+      reason_summary: '外部公开因子源文件已物化并完成 B3 源数据检疫；已进入可上线发布候选，正式发布仍需通过发布准入与历史重复过滤。',
+      candidate_metrics: {
+        pipeline_version: 'external_factor_import_v1',
+        external_import_job_id: 'extimp_ready_001',
+        external_import_display_name: externalDisplayName,
+        manifest: { row_count: 18 },
+        external_diagnostics: { factor_count: 6, date_count: 3 },
+      },
+      publish_eligibility: {
+        status: 'ELIGIBLE',
+        reason: '外部公开因子源文件已物化并完成 B3 源数据检疫；已进入可上线发布候选，正式发布仍需通过发布准入与历史重复过滤。',
+      },
+    };
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(factoryOverview({
+      quarantine: {
+        ...overview.quarantine,
+        items: [externalCandidate, ...overview.quarantine.items],
+        summary: { ...overview.quarantine.summary, total: 2, rejected_count: 1 },
+      },
+      external_import_review_queue: {
+        items: [],
+        summary: {
+          total: 0,
+          items_returned: 0,
+          review_boundary: 'DIRECT_B3_QUARANTINE',
+          queue_state: 'MATERIALIZED_TO_B3',
+          direct_publish_allowed: false,
+        },
+      },
+      external_import_quarantine: {
+        items: [externalCandidate],
+        summary: { total: 1, page: 1, page_size: 12, total_pages: 1, passed_count: 1 },
+      },
+      publishable_factors: [{
+        candidate_id: 'fq_ext_ready_001',
+        factor_id: 's_f2_mom_raw_cur_external_fama_french_us_research_factors_daily',
+        factor_name: externalDisplayName,
+        display_name_cn: externalDisplayName,
+        base_display_name_cn: externalDisplayName,
+        name_audit: externalNameAudit,
+        target_layer: 'L2',
+        score: 77.48,
+        quarantine_status: 'PASS',
+        quarantine_result: 'PASS',
+        parent_factor_ids: ['external:fama_french_us_research_factors_daily'],
+        expression: externalCandidate.expression,
+        candidate_metrics: externalCandidate.candidate_metrics,
+        gate_summary: externalCandidate.gate_summary,
+        pit_evidence: externalCandidate.pit_evidence,
+        publish_eligibility: externalCandidate.publish_eligibility,
+        detail_modal_enabled: true,
+      }],
+      quarantine_result_rows: [{
+        candidate_id: 'fq_ext_ready_001',
+        submitted_at: '2026-05-26T05:26:37Z',
+        factor_name: externalDisplayName,
+        display_name_cn: externalDisplayName,
+        base_display_name_cn: externalDisplayName,
+        name_audit: externalNameAudit,
+        target_layer: 'L2',
+        quarantine_result: 'PASS',
+        reason_summary: '外部公开因子源文件已物化并完成 B3 源数据检疫；已进入可上线发布候选，正式发布仍需通过发布准入与历史重复过滤。',
+        detail_modal_enabled: true,
+      }, ...(overview.quarantine_result_rows ?? [])],
+    })));
+
+    renderFactory();
+
+    await screen.findByRole('heading', { name: '因子检疫' });
+    expect(screen.queryByLabelText('外部因子复核队列')).not.toBeInTheDocument();
+    expect(screen.getAllByText(externalDisplayName).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText('外部公开因子源文件已物化并完成 B3 源数据检疫；已进入可上线发布候选，正式发布仍需通过发布准入与历史重复过滤。')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '可上线发布' })).toBeInTheDocument();
+    expect(screen.getAllByText('PASS').length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getAllByRole('button', { name: '详情' })[0]!);
+    expect(await screen.findByRole('heading', { name: '专家复核建议' })).toBeInTheDocument();
+    expect(screen.getByText('Fama-French 美股研究日频因子')).toBeInTheDocument();
+    expect(screen.getByText('尝试 TS_Mean(..., 5) 等时序平滑。')).toBeInTheDocument();
+  });
+
   it('renders quarantine reason fallbacks instead of unreadable placeholders', async () => {
     const overview = factoryOverview();
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({
@@ -647,9 +763,9 @@ describe('FactorFactoryPage', () => {
     fireEvent.click(screen.getAllByRole('button', { name: '详情' })[0]);
     const dialog = await screen.findByRole('dialog', { name: /现金流回报/ });
     expect(within(dialog).getByText('命名审计')).toBeInTheDocument();
-    expect(within(dialog).getByText('Base Name')).toBeInTheDocument();
-    expect(within(dialog).getByText('Final Name')).toBeInTheDocument();
-    expect(within(dialog).getByText('Dedupe')).toBeInTheDocument();
+    expect(within(dialog).getByText('基础名称')).toBeInTheDocument();
+    expect(within(dialog).getByText('最终名称')).toBeInTheDocument();
+    expect(within(dialog).getByText('去重')).toBeInTheDocument();
     expect(within(dialog).getByText('对标 SP500')).toBeInTheDocument();
     expect(within(dialog).getByText('s_val_cfp_ltm_raw / s_vol_downside_252d_rank')).toBeInTheDocument();
   });
@@ -803,7 +919,7 @@ describe('FactorFactoryPage', () => {
       ...Array.from({ length: 5 }, (_, index) => makeRow(index + 5, 'FAIL')),
     ];
     const olderRows = Array.from({ length: 4 }, (_, index) => makeRow(index + 1, 'PASS', '2026-05-15'));
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({
+    const overviewPayload = {
       ...overview,
       latest_run: { ...overview.latest_run!, run_date: '2026-05-19' },
       task_rows: [
@@ -817,7 +933,7 @@ describe('FactorFactoryPage', () => {
         initial_screen_pass_count: 10,
         quarantine_pass_count: 4,
         s_grade_promotion_count: 0,
-        alpha_concentration: 0,
+        alpha_concentration: 0.22,
         failure_candidate_count: 5,
         failure_reason_distribution: {
           a: 1,
@@ -833,7 +949,64 @@ describe('FactorFactoryPage', () => {
       quarantine: { ...overview.quarantine, items: [], summary: { total: currentRows.length + olderRows.length } },
       quarantine_result_rows: [...currentRows, ...olderRows],
       publishable_factors: [],
-    }));
+    };
+    const candidateFromRow = (row: ReturnType<typeof makeRow>): ApiFactorQuarantineCandidate => ({
+      id: row.candidate_id,
+      mining_candidate_id: row.candidate_id,
+      expression: row.factor_name,
+      factor_name: row.factor_name,
+      target_layer: row.target_layer,
+      status: row.quarantine_result === 'PASS' ? 'PASSED' : 'REJECTED',
+      quarantine_result: row.quarantine_result,
+      publish_status: row.quarantine_result === 'PASS' ? 'ELIGIBLE' : 'BLOCKED',
+      gate_summary: {},
+      candidate_metrics: { target_layer: row.target_layer },
+      failure_samples: [],
+      pit_evidence: {},
+      publish_eligibility: {
+        status: row.quarantine_result === 'PASS' ? 'ELIGIBLE' : 'BLOCKED',
+        reason: row.reason_summary,
+      },
+      created_at: row.submitted_at,
+      updated_at: row.submitted_at,
+      last_quarantine_at: row.submitted_at,
+      latest_run: {
+        id: `${row.candidate_id}_run`,
+        status: 'COMPLETED',
+        created_at: row.submitted_at,
+        completed_at: row.submitted_at,
+        summary: {},
+      },
+      reason_summary: row.reason_summary,
+    });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/factor-quarantine/candidates')) {
+        const parsed = new URL(url, 'http://127.0.0.1');
+        const date = parsed.searchParams.get('date') ?? '';
+        const result = parsed.searchParams.get('result') ?? 'ALL';
+        const page = Number(parsed.searchParams.get('page') ?? '1');
+        const pageSize = Number(parsed.searchParams.get('page_size') ?? '50');
+        const matchingRows = [...currentRows, ...olderRows]
+          .filter((row) => !date || row.submitted_at.slice(0, 10) === date)
+          .filter((row) => result === 'ALL' || row.quarantine_result === result);
+        const start = Math.max(0, (page - 1) * pageSize);
+        return jsonResponse({
+          items: matchingRows.slice(start, start + pageSize).map(candidateFromRow),
+          summary: {
+            total: matchingRows.length,
+            page,
+            page_size: pageSize,
+            total_pages: matchingRows.length ? Math.ceil(matchingRows.length / pageSize) : 1,
+            passed_count: matchingRows.filter((row) => row.quarantine_result === 'PASS').length,
+            published_count: 0,
+            rejected_count: matchingRows.filter((row) => row.quarantine_result === 'FAIL').length,
+            needs_review_count: 0,
+          },
+        });
+      }
+      return jsonResponse(overviewPayload);
+    });
 
     renderFactory();
 
@@ -843,6 +1016,7 @@ describe('FactorFactoryPage', () => {
     expect(metricValue('initial_screen_pass')).toHaveTextContent('10');
     expect(metricValue('quarantine_pass')).toHaveTextContent('4');
     expect(metricValue('failure_candidate')).toHaveTextContent('5');
+    expect(metricValue('alpha_concentration')).toHaveTextContent('0.220');
     expect(document.querySelectorAll('.factor-factory-metric-tooltip')).toHaveLength(6);
     expect(document.querySelector('[data-metric-key="quarantine_pass"] .factor-factory-metric-tooltip')).toHaveAttribute(
       'title',
@@ -855,6 +1029,22 @@ describe('FactorFactoryPage', () => {
     expect(document.querySelector('[data-task-kind="refinement"]')).not.toBeInTheDocument();
     expect(document.querySelector('[data-task-kind="quarantine"]')).not.toBeInTheDocument();
     expect(document.querySelectorAll('.factor-factory-result-row:not(.factor-factory-result-row--head)')).toHaveLength(9);
+
+    const dateInput = document.querySelector('.factor-factory-filter-row input[type="date"]') as HTMLInputElement;
+    fireEvent.change(dateInput, { target: { value: '2026-05-15' } });
+    await waitFor(() => expect(metricValue('yesterday_formula_count')).toHaveTextContent('4'));
+    expect(metricValue('initial_screen_pass')).toHaveTextContent('4');
+    expect(metricValue('quarantine_pass')).toHaveTextContent('4');
+    expect(metricValue('alpha_concentration')).toHaveTextContent('0.000');
+    expect(metricValue('failure_candidate')).toHaveTextContent('0');
+    expect(document.querySelector('[data-metric-key="failure_candidate"] .factor-phase2-metric__hint')).toHaveTextContent('2026-05-15');
+
+    fireEvent.change(dateInput, { target: { value: '2026-05-14' } });
+    await waitFor(() => expect(metricValue('yesterday_formula_count')).toHaveTextContent('0'));
+    expect(metricValue('initial_screen_pass')).toHaveTextContent('0');
+    expect(metricValue('quarantine_pass')).toHaveTextContent('0');
+    expect(metricValue('alpha_concentration')).toHaveTextContent('0.000');
+    expect(metricValue('failure_candidate')).toHaveTextContent('0');
   });
 
   it('keeps submitted factors in quarantine history instead of sending them back to scoring', async () => {

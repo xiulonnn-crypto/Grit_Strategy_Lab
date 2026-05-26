@@ -1,0 +1,14 @@
+{
+  "url": "http://127.0.0.1:4173/?v=1779787878938#/factors/s_f2_mom_raw_cur_external_fama_french_us_research_factors_daily",
+  "h1": "[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]诊断报告",
+  "expected": "[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]",
+  "hasExpectedName": true,
+  "hasWrongName": false,
+  "hasCoreSemantic": true,
+  "mobileHasExpectedName": true,
+  "mobileHasWrongName": false,
+  "consoleErrors": [],
+  "failedRequests": [],
+  "screenshotDesktop": "output\\ui-artifact-trace\\factor-detail-external-naming\\detail-desktop-final.png",
+  "screenshotMobile": "output\\ui-artifact-trace\\factor-detail-external-naming\\detail-mobile-final.png"
+}

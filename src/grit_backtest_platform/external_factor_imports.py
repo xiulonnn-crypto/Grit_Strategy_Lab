@@ -69,6 +69,26 @@ TEMPLATE_EXAMPLE_ROWS = (
     },
 )
 
+FAMA_FRENCH_DATASET_DOWNLOADS: Mapping[str, str] = {
+    "fama_french_us_research_factors_daily": (
+        "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/"
+        "F-F_Research_Data_5_Factors_2x3_daily_CSV.zip"
+    ),
+    "fama_french_us_research_factors_monthly": (
+        "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/"
+        "F-F_Research_Data_5_Factors_2x3_CSV.zip"
+    ),
+}
+
+FAMA_FRENCH_FACTOR_NAMES: Mapping[str, str] = {
+    "Mkt-RF": "Market excess return",
+    "SMB": "Size factor",
+    "HML": "Value factor",
+    "RMW": "Profitability factor",
+    "CMA": "Investment factor",
+    "RF": "Risk-free rate",
+}
+
 FIELD_ALIASES: Mapping[str, tuple[str, ...]] = {
     "date": ("date", "as_of", "month", "period", "observation_date", "trade_date"),
     "factor_id": ("factor_id", "factor", "factor_code", "code", "signal_id", "name"),
@@ -257,6 +277,40 @@ def build_public_factor_xlsx_template() -> TemplateArtifact:
     )
 
 
+def fama_french_dataset_download_url(dataset_key: str) -> str | None:
+    return FAMA_FRENCH_DATASET_DOWNLOADS.get(str(dataset_key or "").strip())
+
+
+def normalize_fama_french_dataset_zip(content: bytes, *, dataset_key: str) -> str:
+    with zipfile.ZipFile(io.BytesIO(content), "r") as archive:
+        names = [
+            name
+            for name in archive.namelist()
+            if name.lower().endswith((".csv", ".txt"))
+        ]
+        if not names:
+            raise ValueError("Fama-French archive does not contain a CSV/TXT payload")
+        raw = archive.read(names[0])
+    for encoding in ("utf-8-sig", "latin-1"):
+        try:
+            decoded = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        decoded = raw.decode("utf-8", errors="replace")
+    return normalize_fama_french_dataset_text(decoded, dataset_key=dataset_key)
+
+
+def normalize_fama_french_dataset_text(text: str, *, dataset_key: str) -> str:
+    rows = _parse_fama_french_rows(text, dataset_key=dataset_key)
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=TEMPLATE_COLUMNS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue()
+
+
 def analyze_public_factor_upload_text(
     text: str | bytes,
     *,
@@ -284,6 +338,66 @@ def analyze_public_factor_upload_text(
             parsed_format=parsed_format,
         ),
     }
+
+
+def _parse_fama_french_rows(text: str, *, dataset_key: str) -> list[dict[str, str]]:
+    parsed = csv.reader(io.StringIO(text))
+    headers: list[str] | None = None
+    normalized_rows: list[dict[str, str]] = []
+    frequency = "daily" if "daily" in str(dataset_key).lower() else "monthly"
+    for raw_row in parsed:
+        row = [str(cell or "").strip() for cell in raw_row]
+        if not any(row):
+            if headers and normalized_rows:
+                break
+            continue
+        first = row[0].lstrip("\ufeff")
+        if headers is None:
+            factor_headers = [cell for cell in row[1:] if cell]
+            if factor_headers and any(cell in FAMA_FRENCH_FACTOR_NAMES for cell in factor_headers):
+                headers = ["date", *factor_headers]
+            continue
+        if not first.isdigit() or len(first) not in {6, 8}:
+            if normalized_rows:
+                break
+            continue
+        date_value = _normalize_fama_french_date(first)
+        for index, factor_id in enumerate(headers[1:], start=1):
+            if index >= len(row):
+                continue
+            raw_value = row[index].strip()
+            if raw_value in {"", "-99.99", "-999", "-999.0"}:
+                continue
+            try:
+                value = float(raw_value) / 100.0
+            except ValueError:
+                continue
+            normalized_rows.append(
+                {
+                    "date": date_value,
+                    "factor_id": _normalize_fama_french_factor_id(factor_id),
+                    "factor_name": FAMA_FRENCH_FACTOR_NAMES.get(factor_id, factor_id),
+                    "symbol": "",
+                    "value": f"{value:.8f}".rstrip("0").rstrip("."),
+                    "frequency": frequency,
+                    "source_dataset": dataset_key,
+                    "region": "US",
+                    "notes": "Kenneth French Data Library auto download",
+                }
+            )
+    if not normalized_rows:
+        raise ValueError("Fama-French payload did not contain parseable factor rows")
+    return normalized_rows
+
+
+def _normalize_fama_french_date(value: str) -> str:
+    if len(value) == 8:
+        return f"{value[:4]}-{value[4:6]}-{value[6:8]}"
+    return f"{value[:4]}-{value[4:6]}-01"
+
+
+def _normalize_fama_french_factor_id(value: str) -> str:
+    return "ff_" + _normalize_token(value.replace("-", "_"))
 
 
 def suggest_public_factor_field_mapping(columns: Sequence[str]) -> dict[str, str | None]:

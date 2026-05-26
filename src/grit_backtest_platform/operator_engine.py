@@ -174,6 +174,123 @@ class PandasBottleneckOperatorEngine:
                         if done:
                             return _result(config, candidates, generated)
 
+        windowed_unary_ops = (
+            "TS_Mean",
+            "TS_Std",
+            "TS_Max",
+            "TS_Min",
+            "TS_Delta",
+            "TS_Skew",
+            "TS_Kurt",
+            "Decay_Linear",
+            "High_Day",
+            "Sum_Out_Of",
+        )
+        windowed_base_signals: list[tuple[str, str, int, int]] = []
+        if "TS_Return" in enabled:
+            for field_id in fields:
+                for window in windows:
+                    windowed_base_signals.append((f"TS_Return({field_id}, {window})", field_id, window, window + 1))
+
+        for op_code in windowed_unary_ops:
+            if op_code not in enabled:
+                continue
+            for field_id in fields:
+                for window in windows:
+                    expression = f"{op_code}({field_id}, {window})"
+                    windowed_base_signals.append((expression, field_id, window, window))
+                    done = append(
+                        expression,
+                        (field_id,),
+                        (
+                            {"code": "F1", "label": field_id},
+                            {"code": op_code, "label": f"{op_code} n={window}"},
+                        ),
+                        1,
+                        window,
+                    )
+                    if done:
+                        return _result(config, candidates, generated)
+
+        binary_ts_ops = ("TS_Cov", "Reg_Slope", "Reg_Resid")
+        for op_code in binary_ts_ops:
+            if op_code not in enabled:
+                continue
+            for left_index, left in enumerate(fields):
+                for right in fields[left_index + 1:]:
+                    for window in windows:
+                        done = append(
+                            f"{op_code}({left}, {right}, {window})",
+                            (left, right),
+                            (
+                                {"code": "F1_A", "label": left},
+                                {"code": "F1_B", "label": right},
+                                {"code": op_code, "label": f"{op_code} n={window}"},
+                            ),
+                            1,
+                            window,
+                        )
+                        if done:
+                            return _result(config, candidates, generated)
+
+        cs_templates = {
+            "CS_Rank": "CS_Rank({signal})",
+            "CS_ZScore": "CS_ZScore({signal})",
+            "CS_Scale": "CS_Scale({signal})",
+            "CS_Neutral": 'CS_Neutral({signal}, by="industry")',
+        }
+        nonlinear_templates = {
+            "Abs": "Abs({signal})",
+            "Sign": "Sign({signal})",
+            "Log": "Log(Abs({signal}))",
+            "Signed_Power": "Signed_Power({signal}, 2)",
+            "If_Then_Else": "If_Then_Else({signal} > 0, {signal}, 0)",
+        }
+        for op_code, template in {**cs_templates, **nonlinear_templates}.items():
+            if op_code not in enabled:
+                continue
+            for field_id in fields:
+                done = append(
+                    template.format(signal=field_id),
+                    (field_id,),
+                    (
+                        {"code": "F1", "label": field_id},
+                        {"code": op_code, "label": op_code},
+                    ),
+                    1,
+                    1,
+                )
+                if done:
+                    return _result(config, candidates, generated)
+
+        wrapper_templates = {
+            "CS_Rank": "CS_Rank({signal})",
+            "CS_ZScore": "CS_ZScore({signal})",
+            "CS_Scale": "CS_Scale({signal})",
+            "Abs": "Abs({signal})",
+            "Sign": "Sign({signal})",
+            "Log": "Log(Abs({signal}))",
+            "Signed_Power": "Signed_Power({signal}, 2)",
+        }
+        if config.default_depth >= 2 and windowed_base_signals:
+            for op_code, template in wrapper_templates.items():
+                if op_code not in enabled:
+                    continue
+                for signal, field_id, window, max_window in windowed_base_signals:
+                    done = append(
+                        template.format(signal=signal),
+                        (field_id,),
+                        (
+                            {"code": "F1", "label": field_id},
+                            {"code": "BASE_SIGNAL", "label": f"window n={window}"},
+                            {"code": op_code, "label": op_code},
+                        ),
+                        2,
+                        max_window,
+                    )
+                    if done:
+                        return _result(config, candidates, generated)
+
         return _result(config, candidates, generated)
 
 
@@ -252,6 +369,10 @@ def materialize_operator_engine_result(
     *,
     run_id: str,
     root: str | Path = ".",
+    job_id: str | None = None,
+    source_job_id: str | None = None,
+    created_at: str | None = None,
+    refined_count: int | None = None,
 ) -> dict[str, Any]:
     """Persist a reproducible Raw_F2 formula ledger and bounded evidence artifacts."""
     base_dir = Path(root) / "artifacts" / "factor-factory" / "operator-engine" / str(run_id)
@@ -317,12 +438,35 @@ def materialize_operator_engine_result(
 
     formula_manifest_rel = f"artifacts/factor-factory/operator-engine/{run_id}/formula-manifest.json"
     raw_f2_matrix_rel = f"artifacts/factor-factory/operator-engine/{run_id}/raw-f2-matrix.json"
+    formula_count = result.deduped_formula_count
+    manifest_refined_count = formula_count if refined_count is None else int(refined_count)
+    manifest_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "job_id": job_id,
+                "source_job_id": source_job_id,
+                "formula_count": formula_count,
+                "refined_count": manifest_refined_count,
+                "candidate_ids": [candidate["candidate_id"] for candidate in manifest_candidates],
+                "expressions": [candidate["normalized_expression"] for candidate in manifest_candidates],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
     manifest_payload = {
         "run_id": run_id,
+        "job_id": job_id,
+        "source_job_id": source_job_id,
         "backend": result.backend,
         "requested_budget": result.requested_budget,
         "generated_formula_count": result.generated_formula_count,
         "deduped_formula_count": result.deduped_formula_count,
+        "formula_count": formula_count,
+        "refined_count": manifest_refined_count,
+        "hash": manifest_hash,
+        "created_at": created_at,
         "truncated": result.truncated,
         "candidates": manifest_candidates,
     }

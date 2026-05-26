@@ -3750,7 +3750,9 @@
   gap: 4px;
 }
 
-.snapshots-ops-metric-line strong {
+.snapshots-ops-health-card .snapshots-ops-metric-value {
+  display: grid;
+  gap: 2px;
   color: var(--ops-text-title);
   font-size: 22px;
   line-height: 26px;
@@ -3758,7 +3760,17 @@
   overflow-wrap: anywhere;
 }
 
-.snapshots-ops-metric-line span {
+.snapshots-ops-health-card .snapshots-ops-metric-value-line {
+  display: block;
+  max-width: 100%;
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  white-space: nowrap;
+}
+
+.snapshots-ops-metric-subtitle {
   color: var(--ops-text-sub);
   font-size: 12px;
   line-height: 18px;

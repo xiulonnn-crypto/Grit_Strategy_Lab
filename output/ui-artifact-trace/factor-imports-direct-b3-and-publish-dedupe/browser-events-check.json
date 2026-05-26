@@ -1,0 +1,70 @@
+{
+  "events": [
+    {
+      "type": "request",
+      "url": "http://127.0.0.1:4173/?v=1779778355484-events",
+      "method": "GET"
+    },
+    {
+      "type": "response",
+      "url": "http://127.0.0.1:4173/?v=1779778355484-events",
+      "status": 200
+    },
+    {
+      "type": "request",
+      "url": "http://127.0.0.1:4173/assets/index-DvfIkUsb.js",
+      "method": "GET"
+    },
+    {
+      "type": "request",
+      "url": "http://127.0.0.1:4173/assets/index-CYw5dWeJ.css",
+      "method": "GET"
+    },
+    {
+      "type": "response",
+      "url": "http://127.0.0.1:4173/assets/index-CYw5dWeJ.css",
+      "status": 200
+    },
+    {
+      "type": "response",
+      "url": "http://127.0.0.1:4173/assets/index-DvfIkUsb.js",
+      "status": 200
+    },
+    {
+      "type": "request",
+      "url": "http://127.0.0.1:4173/assets/factor-factory-page-ysRoANFy.js",
+      "method": "GET"
+    },
+    {
+      "type": "request",
+      "url": "http://127.0.0.1:4173/assets/format-Bjk81z9u.js",
+      "method": "GET"
+    },
+    {
+      "type": "request",
+      "url": "http://127.0.0.1:4173/assets/factor-phase2-pages-CmMWWaCx.css",
+      "method": "GET"
+    },
+    {
+      "type": "response",
+      "url": "http://127.0.0.1:4173/assets/factor-phase2-pages-CmMWWaCx.css",
+      "status": 200
+    },
+    {
+      "type": "response",
+      "url": "http://127.0.0.1:4173/assets/format-Bjk81z9u.js",
+      "status": 200
+    },
+    {
+      "type": "response",
+      "url": "http://127.0.0.1:4173/assets/factor-factory-page-ysRoANFy.js",
+      "status": 200
+    },
+    {
+      "type": "request",
+      "url": "http://127.0.0.1:8000/factor-factory/overview",
+      "method": "GET"
+    }
+  ],
+  "bodyExcerpt": "GSL\nGrit Strategy Lab\n策略研究与回测平台\n\n组合\n\n组合仪表板\n组合列表\n组合回测\n组合实验室\n资产库\n\n策略\n\n策略工作台\n策略库\n回测列表\n优化实验室\n\n因子\n\n因子库\n公开因子入库\n因子工厂\n\n数据\n\nPIT 清洗中心\n数据快照\n\n闭环因子工厂\n\n因子任务生产台\n\n按因子挖掘任务与因子组合任务组织生产；检疫结果在右侧列表展示， 通过后进入可上线发布队列。\n\n启动自动化\n暂停自动化\n立即运行\n线上 Raw_F2 精炼\n工厂配置\n已暂停\n每日计划：GMT+8 14:00\n检疫与发布\n下次批次：等待启动\n立即运行：不改变自动化状态\nPIT 非 Full Ready 仅进入诊断/风险提示\n\n公式量（所选日期）\n?\n\n0\n\n全部日期 OperatorEngine 公式空间\n\n初筛通过（所选日期交付检疫）\n?\n\n0\n\n全部日期 Raw_F2 批次交付\n\n检疫通过\n?\n\n0\n\n全部日期 PASS / PUBLISHED\n\nS 级晋升\n?\n\n0\n\n全部日期 发布准入 ELIGIBLE\n\nAlpha 浓度\n?\n\n未生成\n\nS 级相关性峰值\n\n失败\n?\n\n0\n\n全部日期 FAIL\n\nB1 因子任务\n\n因子任务\n2 类任务\n因子挖掘任务\nF1-算子展开-Raw_F2-WNZT-Refined_F2。\n因子组合任务\n从 Refined_F2 构建 F3 组合候选，发布前仍需检疫通过和人工确认。\n2026-05-26 因子挖掘任务\nF1-算子展开-Raw_F2-WNZT-Refined_F2\n待开始\nF1\n→\n算子展开\n→\nRaw_F2\n→\nWNZT\n→\nRefined_F2\nF2\nRaw_F2因子交付量 0\nRefined_F2因子交付量 0\n0 当前批次\n2026-05-26 因子组合任务\n从 Refined_F2 构建 F3 组合候选，发布前仍需检疫通过和人工确认。\n待开始\nRefined_F2\n→\nF3组合\n→\n检疫\n→\n发布确认\nF3\n组合候选量 0\n0 当前批次\n\nB2 候选评分\n\n治理候选\n默认收起\n暂无待送检候选；已送检因子已移至 B3 因子检疫列表。\n一键送检\n\nB3 因子检疫\n\n因子检疫\n第 1/1 页 · 显示 0-0/0\n日期\n因子名\n裁决\n全部裁决\nPASS\nWARN\nFAIL\n查询\n日期\n因子名\n裁决\n原因\n操作\n没有匹配的检疫历史记录。\n上一页\n50/页\n下一页\nF2 改造库\n\n改造因子检疫通过后发布入 F2，必须保留 TRANSFORMED_FROM 血缘和 Raw -> Winsorize -> Neutralize -> Z-Score -> Rank。\n\nF3 组合库\n\n组合因子检疫通过后发布入 F3，必须保留父因子、投资逻辑、组合手段和相关性/正交性审计。\n\n历史检疫\n\n历史拒绝因子与原因可搜索，失败项不可发布，WARN 项需要带限制条件进入审计。\n\nF1 原始数据\n\nF1 仅限 Close、Open、Volume、MarketCap、Sector 等未经算子的事实字段；出现 Return、MA、Std 等算子即进入 F2 Raw Signal，并保留 WNZT 缺失与同族冗余提示。"
+}

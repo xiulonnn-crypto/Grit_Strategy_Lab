@@ -539,6 +539,63 @@ def test_factor_factory_publishable_recomputes_complex_f2_identity_and_skips_exi
     assert by_candidate["fq_new_identity"]["factor_id"] != "s_f2_mom_raw_cur_px"
 
 
+def test_factor_factory_publishable_skips_existing_online_display_name_without_publish_event() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-factory-publishable-existing-name"))
+    service = client.app.state.service
+    storage = service.storage
+    source_job_id = "mine_publishable_existing_name"
+    now = "2026-05-26T09:30:00Z"
+    _seed_online_f2_factor(
+        client,
+        factor_id="s_f2_mom_raw_cur_f1_price_close",
+        expression='ZScore(Neutralize(Winsorize(TS_Rank(TS_Return(f1_price_close, 3), 5), method="MAD"), by="industry,market_cap"))',
+        name="平滑收益率 (当前) [Raw]",
+    )
+    metrics = {
+        "rank_ic": 0.05,
+        "ir": 0.5,
+        "score": 0.061,
+        "fitness_score": 0.061,
+        "target_layer": "L2",
+        "source_factor_ids": ["f1_dollar_volume_base"],
+        "raw_f2": True,
+        "refined_f2": True,
+        "wnzt_complete": True,
+        "pipeline_version": "raw_refined_f2_v2",
+        "raw_expression": 'ZScore(Neutralize(Winsorize(TS_Rank(TS_Return(f1_dollar_volume_base, 5), 5), method="MAD"), by="industry,market_cap"))',
+        "refined_expression": 'ZScore(Neutralize(Winsorize(TS_Rank(TS_Return(f1_dollar_volume_base, 5), 5), method="MAD"), by="industry,market_cap"))',
+    }
+    storage.insert_json_row(
+        "factor_quarantine_candidates",
+        {
+            "id": "fq_existing_online_name",
+            "mining_candidate_id": "rawf2_existing_online_name",
+            "source_mining_job_id": source_job_id,
+            "expression": metrics["refined_expression"],
+            "status": "PASSED",
+            "publish_status": "ELIGIBLE",
+            "gate_summary_json": dumps({"redundancy_pruning": "PASSED"}),
+            "cluster_id": "cluster_existing_online_name",
+            "candidate_metrics_json": dumps(metrics),
+            "failure_samples_json": dumps([]),
+            "pit_evidence_json": dumps({"status": "READY"}),
+            "publish_eligibility_json": dumps({"status": "ELIGIBLE"}),
+            "target_factor_id": "s_f2_mom_raw_cur_f1_dollar_volume_base",
+            "created_at": now,
+            "updated_at": now,
+            "published_at": None,
+            "rejected_reason": None,
+        },
+    )
+
+    publishable = service._factor_factory_publishable_factors(  # noqa: SLF001
+        source_mining_job_id=source_job_id,
+        fallback_items=[],
+    )
+
+    assert publishable == []
+
+
 def test_factor_factory_publishable_applies_online_prune_evidence_to_semantic_duplicates(monkeypatch) -> None:
     client, _db_path = create_test_client(_runtime_dir("factor-factory-publishable-online-prune"))
     service = client.app.state.service
