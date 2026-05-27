@@ -3614,6 +3614,7 @@ export type ApiExternalFactorFrequency =
 export type ApiExternalFactorImportMode =
   | "AUTO_DOWNLOAD"
   | "LOCAL_FILE"
+  | "SOURCE_MANIFEST"
   | "REFERENCE_ONLY";
 
 export type ApiExternalFactorDataset = {
@@ -4032,6 +4033,7 @@ export type ApiFactorFactoryOverview = {
   funnel: ApiFactorFactoryFunnel;
   mining: ApiFactorMiningJobListResponse;
   quarantine: ApiFactorQuarantineCandidateListResponse;
+  external_import_precheck_jobs?: ApiExternalFactorImportReviewQueue;
   external_import_review_queue?: ApiExternalFactorImportReviewQueue;
   external_import_quarantine?: ApiFactorQuarantineCandidateListResponse;
   gate_policy: ApiFactorFactoryGatePolicy;

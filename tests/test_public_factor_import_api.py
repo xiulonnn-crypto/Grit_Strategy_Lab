@@ -176,6 +176,7 @@ def test_factor_sources_registry_api_exposes_review_gated_sources(tmp_path) -> N
     assert sources["fama_french"]["access_policy"] == "PUBLIC_DOWNLOAD"
     assert sources["aqr"]["access_policy"] == "LICENSE_REQUIRED"
     assert sources["msci_facs"]["access_policy"] == "REFERENCE_ONLY"
+    assert "SOURCE_MANIFEST" in sources["aqr"]["supported_import_modes"]
 
 
 def test_auto_download_precheck_builds_source_manifest_and_can_submit_review(tmp_path) -> None:
@@ -212,6 +213,39 @@ def test_auto_download_precheck_builds_source_manifest_and_can_submit_review(tmp
     assert submitted["review_status"] == "SUBMITTED"
 
 
+def test_license_required_source_manifest_precheck_does_not_auto_download(tmp_path) -> None:
+    client, _db_path = create_test_client(tmp_path)
+
+    response = client.post(
+        "/factor-sources/import-jobs",
+        json={
+            "source_id": "aqr",
+            "dataset_key": "aqr_public_style_factors",
+            "import_mode": "SOURCE_MANIFEST",
+            "frequency": "DAILY",
+        },
+    )
+    job = assert_ok(response)
+
+    assert job["source_id"] == "aqr"
+    assert job["import_mode"] == "SOURCE_MANIFEST"
+    assert job["status"] == "REVIEW_GATED"
+    assert job["review_status"] == "PENDING_REVIEW"
+    assert job["manifest"]["parsing_status"] == "SOURCE_MANIFEST_READY"
+    assert job["manifest"]["row_count"] == 0
+    assert "SOURCE_FILE_NOT_MATERIALIZED" in job["risk_flags"]
+    assert "LICENSE_ATTESTATION_REQUIRED" in job["risk_flags"]
+    assert job["next_actions"] == ["upload_source_file", "inspect_manifest"]
+
+    overview = assert_ok(client.get("/factor-factory/overview"))
+    precheck_jobs = overview["external_import_precheck_jobs"]
+    assert precheck_jobs["summary"]["total"] == 1
+    assert precheck_jobs["items"][0]["id"] == job["id"]
+    assert precheck_jobs["items"][0]["review_status"] == "PENDING_REVIEW"
+    assert precheck_jobs["items"][0]["next_actions"] == ["upload_source_file", "inspect_manifest"]
+    assert overview["external_import_review_queue"]["summary"]["total"] == 0
+
+
 def test_submitted_public_factor_import_enters_b3_quarantine(tmp_path) -> None:
     client, _db_path = create_test_client(tmp_path)
     _install_fama_french_download_fixture(client)
@@ -244,15 +278,16 @@ def test_submitted_public_factor_import_enters_b3_quarantine(tmp_path) -> None:
     assert item["candidate_metrics"]["pipeline_version"] == "external_factor_import_v1"
     assert item["candidate_metrics"]["manifest"]["row_count"] == 18
     assert item["candidate_metrics"]["external_diagnostics"]["factor_count"] == 6
-    assert item["display_name_cn"] == "[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]"
-    assert item["base_display_name_cn"] == "[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]"
+    assert item["display_name_cn"] == "[外部] - Fama-French 美股研究日频因子 (Daily) [Refined]"
+    assert item["base_display_name_cn"] == "[外部] - Fama-French 美股研究日频因子 (Daily) [Refined]"
+    assert item["target_factor_id"] == "s_f2_mom_raw_cur_external_fama_french_us_research_factors_daily"
     assert item["name_audit"]["structured_components"]["style_family"] == "[外部]"
     assert item["name_audit"]["structured_components"]["core_semantic"] == "Fama-French 美股研究日频因子"
-    assert item["name_audit"]["structured_components"]["governance_tag"] == "Raw"
+    assert item["name_audit"]["structured_components"]["governance_tag"] == "Refined"
     assert item["name_audit"]["expert_review"]["architect_recommendations"]
     publishable = overview["publishable_factors"]
     assert [row["candidate_id"] for row in publishable] == [item["id"]]
-    assert publishable[0]["display_name_cn"] == "[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]"
+    assert publishable[0]["display_name_cn"] == "[外部] - Fama-French 美股研究日频因子 (Daily) [Refined]"
     assert publishable[0]["name_audit"]["structured_components"]["frequency_label"] == "Daily"
     assert publishable[0]["publish_eligibility"]["status"] == "ELIGIBLE"
 
@@ -268,15 +303,28 @@ def test_submitted_public_factor_import_enters_b3_quarantine(tmp_path) -> None:
     listed_factor = next(row for row in factor_list["items"] if row["id"] == published_factor_id)
     factor_detail = assert_ok(client.get(f"/factors/{published_factor_id}"))
     for projected in (listed_factor, factor_detail):
-        assert projected["name"] == "[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]"
-        assert projected["display_name_cn"] == "[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]"
-        assert projected["base_display_name_cn"] == "[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]"
+        assert projected["name"] == "[外部] - Fama-French 美股研究日频因子 (Daily) [Refined]"
+        assert projected["display_name_cn"] == "[外部] - Fama-French 美股研究日频因子 (Daily) [Refined]"
+        assert projected["base_display_name_cn"] == "[外部] - Fama-French 美股研究日频因子 (Daily) [Refined]"
         assert projected["name_audit"]["structured_components"]["style_family"] == "[外部]"
         assert projected["name_audit"]["structured_components"]["core_semantic"] == "Fama-French 美股研究日频因子"
-        assert projected["name_audit"]["structured_components"]["governance_tag"] == "Raw"
+        assert projected["name_audit"]["structured_components"]["governance_tag"] == "Refined"
     assert factor_detail["name_audit"]["expert_review"]["architect_recommendations"][1].startswith("尝试 TS_Mean")
 
     with client.app.state.service.storage.connection() as conn:
+        persisted = conn.execute(
+            """
+            SELECT target_factor_id, candidate_metrics_json
+            FROM factor_quarantine_candidates
+            WHERE id = ?
+            """,
+            (item["id"],),
+        ).fetchone()
+        assert persisted["target_factor_id"] == "s_f2_mom_raw_cur_external_fama_french_us_research_factors_daily"
+        persisted_metrics = json.loads(persisted["candidate_metrics_json"])
+        assert persisted_metrics["external_import_display_name"] == "[外部] - Fama-French 美股研究日频因子 (Daily) [Refined]"
+        assert persisted_metrics["wnzt_complete"] is True
+        assert persisted_metrics["wnzt_evidence"]["source"] == "PUBLIC_FACTOR_IMPORT_B3"
         quarantine_count = conn.execute(
             """
             SELECT COUNT(*) AS count

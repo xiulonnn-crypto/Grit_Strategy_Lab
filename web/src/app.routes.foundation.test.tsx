@@ -427,7 +427,7 @@ describe('App runtime routes', () => {
     expect(document.querySelector('.pfic-page')).not.toBeNull();
     expect(await screen.findByRole('heading', { level: 1, name: '公开因子入库中心' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '导入本地文件' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '新建预检' })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '新建预检' }).length).toBeGreaterThanOrEqual(1);
     expect((await screen.findAllByText('French-Data Library')).length).toBeGreaterThanOrEqual(1);
     await waitFor(() => {
       const requestedPaths = (mockServer?.fetchSpy.mock.calls ?? []).map(([input]) => {

@@ -35,6 +35,7 @@ import type {
 } from './types';
 import type {
   PublicFactorImportApi,
+  PublicFactorImportManifest,
   PublicFactorImportViewModel,
 } from './pages/public-factor-import-center-page';
 import { CreationTemplatePage } from './pages/creation-template-page';
@@ -158,10 +159,20 @@ function runtimeTime(...values: unknown[]): number {
   }, 0);
 }
 
-function latestExternalImportJobIdFromOverview(
+function externalImportJobIdsFromOverview(
   overview: ApiFactorFactoryOverview | null | undefined,
-): string | undefined {
+  limit = 8,
+): string[] {
   const snapshots: Array<{ jobId: string; updatedAt: number }> = [];
+  for (const item of overview?.external_import_precheck_jobs?.items || []) {
+    const jobId = runtimeString(item.id);
+    if (jobId) {
+      snapshots.push({
+        jobId,
+        updatedAt: runtimeTime(item.updated_at, item.submitted_at),
+      });
+    }
+  }
   for (const item of overview?.external_import_review_queue?.items || []) {
     const jobId = runtimeString(item.id);
     if (jobId) {
@@ -173,7 +184,10 @@ function latestExternalImportJobIdFromOverview(
   }
   for (const item of overview?.external_import_quarantine?.items || []) {
     const metrics = runtimeRecord(item.candidate_metrics);
-    const jobId = runtimeString(item.source_mining_job_id) || runtimeString(metrics.external_import_job_id);
+    const itemId = runtimeString(item.id);
+    const jobId = runtimeString(item.source_mining_job_id) ||
+      runtimeString(metrics.external_import_job_id) ||
+      (itemId.startsWith('extimp_') ? itemId : '');
     if (jobId) {
       snapshots.push({
         jobId,
@@ -182,7 +196,19 @@ function latestExternalImportJobIdFromOverview(
     }
   }
   snapshots.sort((left, right) => right.updatedAt - left.updatedAt);
-  return snapshots[0]?.jobId;
+  const seen = new Set<string>();
+  const jobIds: string[] = [];
+  for (const snapshot of snapshots) {
+    if (seen.has(snapshot.jobId)) {
+      continue;
+    }
+    seen.add(snapshot.jobId);
+    jobIds.push(snapshot.jobId);
+    if (jobIds.length >= limit) {
+      break;
+    }
+  }
+  return jobIds;
 }
 
 function mapExternalFactorRegistry(
@@ -312,34 +338,106 @@ function mapExternalFactorJob(job: ApiExternalFactorImportJob): Partial<PublicFa
   const mappingRows = Array.isArray(job.mapping_rows) ? job.mapping_rows : [];
   const nextActions = Array.isArray(job.next_actions) ? job.next_actions : [];
   const reviewStatus = String(job.review_status || '');
+  const sourceManifestReviewReady = reviewStatus === 'PENDING_REVIEW' &&
+    nextActions.includes('inspect_manifest') &&
+    !nextActions.includes('complete_semantic_mapping');
+  const mappings: PublicFactorImportViewModel['mappings'] = mappingRows.map((row) => ({
+    externalColumn: row.source_field || row.target_field,
+    fullName: row.target_field || row.source_field,
+    family: row.semantic_role || '语义字段',
+    usage: `${row.transform || 'identity'} · ${row.data_type || 'string'}`,
+    tags: [
+      row.required ? '必填' : '可选',
+      row.confidence >= 0.8 ? '高置信' : '需复核',
+    ],
+  }));
+  const manifest: PublicFactorImportViewModel['manifest'] = {
+    jobId: job.id,
+    sourceName: job.source_name || job.source_id,
+    datasetKey: job.dataset_key,
+    asOfDate: job.as_of_date || job.updated_at || job.created_at,
+    parserVersion: job.manifest?.template_key || 'public_us_factor_template_v1',
+    rawFileHash: hash,
+    rowCount: Number(job.manifest?.row_count ?? 0),
+    artifactPath: job.artifact_paths?.manifest_ref || job.artifact_paths?.raw_file_ref || '等待 manifest',
+    reviewNote: `${reviewStatus} · ${job.governance_gate} · ${nextActions.join(' / ')}`,
+    reviewStatus,
+    nextActions,
+    submitReady: (reviewStatus === 'READY_FOR_REVIEW' && nextActions.includes('submit_review')) || sourceManifestReviewReady,
+  };
   return {
     activeSourceId: job.source_id,
     activeDatasetId: job.dataset_key,
-    mappings: mappingRows.map((row) => ({
-      externalColumn: row.source_field || row.target_field,
-      fullName: row.target_field || row.source_field,
-      family: row.semantic_role || '语义字段',
-      usage: `${row.transform || 'identity'} · ${row.data_type || 'string'}`,
-      tags: [
-        row.required ? '必填' : '可选',
-        row.confidence >= 0.8 ? '高置信' : '需复核',
-      ],
-    })),
-    manifest: {
-      jobId: job.id,
-      sourceName: job.source_name || job.source_id,
-      datasetKey: job.dataset_key,
-      asOfDate: job.as_of_date || job.updated_at || job.created_at,
-      parserVersion: job.manifest?.template_key || 'public_us_factor_template_v1',
-      rawFileHash: hash,
-      rowCount: Number(job.manifest?.row_count ?? 0),
-      artifactPath: job.artifact_paths?.manifest_ref || job.artifact_paths?.raw_file_ref || '等待 manifest',
-      reviewNote: `${reviewStatus} · ${job.governance_gate} · ${nextActions.join(' / ')}`,
-      reviewStatus,
-      nextActions,
-      submitReady: reviewStatus === 'READY_FOR_REVIEW' && nextActions.includes('submit_review'),
-    },
+    mappings,
+    mappingsByDataset: { [job.dataset_key]: mappings },
+    manifest,
+    manifestsByDataset: { [job.dataset_key]: manifest },
   };
+}
+
+function externalImportPublishStatusLabel(status: string): string {
+  const normalized = String(status || '').toUpperCase();
+  if (normalized === 'PUBLISHED') return '已发布到因子库';
+  if (normalized === 'ELIGIBLE') return '可发布候选';
+  if (normalized === 'PASSED') return '检疫通过';
+  if (normalized === 'REJECTED') return '已拒绝';
+  if (normalized === 'FAILED') return '检疫失败';
+  return status || '待确认';
+}
+
+function externalImportQuarantineResultLabel(result: string): string {
+  const normalized = String(result || '').toUpperCase();
+  if (normalized === 'PASS') return 'B3 检疫通过';
+  if (normalized === 'WARN') return 'B3 需复核';
+  if (normalized === 'FAIL') return 'B3 检疫失败';
+  return result || '待确认';
+}
+
+function externalImportFactorStatusLabel(publishStatus: string, quarantineResult: string): string {
+  const normalizedPublish = String(publishStatus || '').toUpperCase();
+  if (normalizedPublish === 'PUBLISHED') return '已发布到正式因子库';
+  if (normalizedPublish === 'ELIGIBLE') return 'B3 通过，待发布准入';
+  const normalizedQuarantine = String(quarantineResult || '').toUpperCase();
+  if (normalizedQuarantine === 'PASS') return 'B3 检疫通过';
+  if (normalizedQuarantine === 'WARN') return 'B3 需人工复核';
+  if (normalizedQuarantine === 'FAIL') return 'B3 检疫失败';
+  return publishStatus || quarantineResult || '待确认';
+}
+
+function externalImportAuditByJobId(
+  overview: ApiFactorFactoryOverview | null | undefined,
+): Map<string, Partial<PublicFactorImportManifest>> {
+  const audits = new Map<string, Partial<PublicFactorImportManifest>>();
+  for (const item of overview?.external_import_quarantine?.items || []) {
+    const record = runtimeRecord(item);
+    const metrics = runtimeRecord(record.candidate_metrics);
+    const itemId = runtimeString(record.id);
+    const jobId = runtimeString(record.source_mining_job_id) ||
+      runtimeString(metrics.external_import_job_id) ||
+      (itemId.startsWith('extimp_') ? itemId : '');
+    if (!jobId) {
+      continue;
+    }
+    const publishStatus = runtimeString(record.publish_status) || runtimeString(record.status);
+    const quarantineResult = runtimeString(record.quarantine_result);
+    const publishStatusLabel = externalImportPublishStatusLabel(publishStatus);
+    const quarantineResultLabel = externalImportQuarantineResultLabel(quarantineResult);
+    const factorName =
+      runtimeString(record.display_name_cn) ||
+      runtimeString(record.factor_name) ||
+      runtimeString(metrics.external_import_display_name) ||
+      runtimeString(record.target_factor_id);
+    audits.set(jobId, {
+      reviewOutcome: `${quarantineResultLabel} · ${publishStatusLabel}`,
+      quarantineResult: quarantineResultLabel,
+      publishStatus: publishStatusLabel,
+      factorStatus: externalImportFactorStatusLabel(publishStatus, quarantineResult),
+      factorName,
+      quarantineCandidateId: itemId,
+      targetFactorId: runtimeString(record.target_factor_id),
+    });
+  }
+  return audits;
 }
 
 export function isRouteChunkLoadError(error: unknown): boolean {
@@ -534,7 +632,7 @@ function factorMetricValue(value: unknown): number | null {
   return Number.isFinite(numeric) ? numeric : null;
 }
 
-function factorDiagnosticSummary(factor: ApiFactorListItem): { rank_ic?: unknown; ir?: unknown } {
+function factorDiagnosticSummary(factor: ApiFactorListItem): { rank_ic?: unknown; ir?: unknown; status?: unknown } {
   return factor.latest_diagnostic_summary ?? factor.batch_diagnostic_summary ?? {};
 }
 
@@ -657,13 +755,14 @@ function mapFactorOption(factor: ApiFactorListItem): FactorModelOption {
     market: factor.market ?? null,
     tierLevel: factor.tier_level ?? factor.tier_projection?.key ?? null,
     factorLevel: factor.factor_level ?? factor.factor_level_projection?.key ?? null,
+    factorLevelLabel: factor.factor_level_label ?? factor.factor_level_projection?.label ?? undefined,
     opCompleted,
     rankIc,
     ir,
     rankIcLabel: factorMetricLabel('Rank IC', rankIc, 3),
     irLabel: factorMetricLabel('IR', ir, 2),
     sourceLabel: factor.source === 'SYSTEM_SEED' ? '系统默认' : factor.source === 'AUTO_MINED' ? '自动挖掘' : '人工',
-    diagnosticStatus: factor.diagnostic_status,
+    diagnosticStatus: String(diagnosticSummary.status ?? factor.diagnostic_status ?? ''),
     lifecycleStatus: factor.lifecycle_status,
     uiState: factor.ui_state ?? null,
     uiStateLabel: factor.ui_state_label ?? null,
@@ -910,19 +1009,65 @@ function PublicFactorImportRoutePage(): JSX.Element {
       if (!api.getFactorFactoryOverview || !api.getExternalFactorImportJob) {
         return registryPatch;
       }
+      const getExternalFactorImportJob = api.getExternalFactorImportJob;
       try {
         const overview = await api.getFactorFactoryOverview();
-        const latestJobId = latestExternalImportJobIdFromOverview(overview);
-        if (!latestJobId) {
+        const auditByJobId = externalImportAuditByJobId(overview);
+        const jobIds = externalImportJobIdsFromOverview(overview);
+        if (!jobIds.length) {
           return registryPatch;
         }
-        const jobPatch = mapExternalFactorJob(await api.getExternalFactorImportJob(latestJobId));
+        const jobPatches = (await Promise.all(jobIds.map(async (jobId) => {
+          try {
+            const job = await getExternalFactorImportJob(jobId);
+            const patch = mapExternalFactorJob(job);
+            const audit = auditByJobId.get(job.id);
+            if (patch.manifest && audit) {
+              patch.manifest = { ...patch.manifest, ...audit };
+              patch.manifestsByDataset = {
+                ...(patch.manifestsByDataset ?? {}),
+                [patch.manifest.datasetKey]: patch.manifest,
+              };
+            }
+            return patch;
+          } catch {
+            return null;
+          }
+        }))).filter(Boolean) as Array<Partial<PublicFactorImportViewModel>>;
+        if (!jobPatches.length) {
+          return registryPatch;
+        }
+        const latestJobPatch = jobPatches[0];
+        const mappingsByDataset = { ...(registryPatch.mappingsByDataset ?? {}) };
+        const manifestsByDataset = { ...(registryPatch.manifestsByDataset ?? {}) };
+        for (const patch of jobPatches) {
+          for (const [datasetKey, mappings] of Object.entries(patch.mappingsByDataset ?? {})) {
+            if (!mappingsByDataset[datasetKey]) {
+              mappingsByDataset[datasetKey] = mappings;
+            }
+          }
+          for (const [datasetKey, manifest] of Object.entries(patch.manifestsByDataset ?? {})) {
+            if (!manifestsByDataset[datasetKey]) {
+              manifestsByDataset[datasetKey] = manifest;
+            }
+          }
+          if (patch.activeDatasetId && patch.mappings?.length && !mappingsByDataset[patch.activeDatasetId]) {
+            mappingsByDataset[patch.activeDatasetId] = patch.mappings;
+          }
+          if (patch.activeDatasetId && patch.manifest && !manifestsByDataset[patch.activeDatasetId]) {
+            manifestsByDataset[patch.activeDatasetId] = patch.manifest;
+          }
+          if (patch.manifest?.datasetKey && !manifestsByDataset[patch.manifest.datasetKey]) {
+            manifestsByDataset[patch.manifest.datasetKey] = patch.manifest;
+          }
+        }
         return {
           ...registryPatch,
-          ...jobPatch,
+          ...latestJobPatch,
           sources: registryPatch.sources,
           datasets: registryPatch.datasets,
-          mappingsByDataset: registryPatch.mappingsByDataset,
+          mappingsByDataset,
+          manifestsByDataset,
           updatedAtLabel: registryPatch.updatedAtLabel,
         };
       } catch {
@@ -933,10 +1078,13 @@ function PublicFactorImportRoutePage(): JSX.Element {
       if (!api.createExternalFactorImportJob) {
         return null;
       }
+      const sourceId = normalizePublicFactorSourceId(payload.sourceId);
       const job = await api.createExternalFactorImportJob({
-        source_id: normalizePublicFactorSourceId(payload.sourceId),
+        source_id: sourceId,
         dataset_key: normalizePublicFactorDatasetKey(payload.datasetId),
-        import_mode: 'AUTO_DOWNLOAD',
+        import_mode: sourceId === 'fama_french' && payload.importMode === 'AUTO_DOWNLOAD'
+          ? 'AUTO_DOWNLOAD'
+          : 'SOURCE_MANIFEST',
         frequency: normalizePublicFactorFrequency(payload.frequency),
         created_by: 'researcher',
         precheck_notes: payload.note,

@@ -279,6 +279,7 @@ const FACTOR_MODEL_LEVELS = [
 type FactorModelLevelScore = (typeof FACTOR_MODEL_LEVELS)[number]['score'];
 const FACTOR_MODEL_LEVEL_BY_SCORE = new Map(FACTOR_MODEL_LEVELS.map((level) => [level.score, level]));
 const INVALID_FACTOR_DIAGNOSTIC_STATES = new Set(['FAILED', 'INVALID', 'DECAYED']);
+const COMPOSITE_FACTOR_SOURCE_LEVELS = new Set(['S', 'A', 'B']);
 
 const REBALANCE_OPTIONS = [
   { value: 'monthly', label: '每月', summary: '每月复核一次多因子组合权重。' },
@@ -404,7 +405,7 @@ function isCompositeModelFactor(factor: FactorModelOption): boolean {
   return (
     market === 'US' &&
     (tier === 'F3' || tier === 'L3') &&
-    (level === 'S' || level === 'A') &&
+    COMPOSITE_FACTOR_SOURCE_LEVELS.has(level) &&
     diagnostic === 'COMPLETED' &&
     ['W', 'N', 'Z', 'T'].every((code) => completed.has(code))
   );
@@ -977,7 +978,7 @@ export function FactorModelBuilderPage({
           <div>
             <p className="factor-phase2-hero__eyebrow">COMPOSITE_FACTOR / 美股 L3 因子策略</p>
             <h1 id="composite-factor-title">组合因子策略创建</h1>
-            <p>以一个已完成 WNZT、S/A 级、L3 美股因子为信号源，配置股票池、权重映射、再平衡和实盘约束后直接进入回测与优化。</p>
+            <p>以一个已完成 WNZT、S/A/B 级、L3 美股因子为信号源，配置股票池、权重映射、再平衡和实盘约束后直接进入回测与优化。</p>
           </div>
           <div className="factor-phase2-actions" aria-label="组合因子策略操作">
             <button className="factor-phase2-button" type="button" onClick={saveDraft}>保存草稿</button>
@@ -995,7 +996,7 @@ export function FactorModelBuilderPage({
             <div className="factor-phase2-panel__header">
               <div>
                 <h2 id="composite-factor-source">因子来源</h2>
-                <p>仅支持 WNZT 完成、S/A 级、L3 的美股因子，单因子权重固定为 100%。</p>
+                <p>仅支持 WNZT 完成、S/A/B 级、L3 的美股因子，单因子权重固定为 100%。</p>
               </div>
             </div>
             <div className="factor-phase2-panel__body">
@@ -1005,7 +1006,7 @@ export function FactorModelBuilderPage({
               </label>
               <div className="factor-phase2-list factor-model-selector-list composite-factor-list">
                 {!basketFactors.length ? (
-                  <div className="factor-phase2-empty">暂无可配置候选。仅显示已完成 WNZT、S/A 级、L3 的美股因子。</div>
+                  <div className="factor-phase2-empty">暂无可配置候选。仅显示已完成 WNZT、S/A/B 级、L3 的美股因子。</div>
                 ) : null}
                 {basketFactors.map((factor) => {
                   const isSelected = selectedIds.includes(factor.id);

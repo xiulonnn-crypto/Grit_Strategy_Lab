@@ -157,7 +157,6 @@ from .yahoo_provider import YahooMarketDataProvider
 
 FACTOR_FACTORY_PRUNE_EVIDENCE_SOURCES = {
     "MEASURED_DIAGNOSTIC_IC_SERIES",
-    "FACTOR_LIBRARY_HEATMAP_PROXY",
 }
 FACTOR_FACTORY_SYNC_QUARANTINE_LIMIT = 50
 
@@ -2001,13 +2000,24 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "next_run_at": next_run_at,
         }
 
-    def _decode_factor_factory_run_row(self, row: Mapping[str, Any]) -> dict[str, Any]:
-        mining_job = None
-        if row.get("mining_job_id"):
+    def _decode_factor_factory_run_row(
+        self,
+        row: Mapping[str, Any],
+        *,
+        mining_job: Mapping[str, Any] | None = None,
+        mining_jobs_by_id: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        decoded_mining_job = None
+        mining_job_id = str(row.get("mining_job_id") or "")
+        if mining_job_id and mining_jobs_by_id and mining_job_id in mining_jobs_by_id:
+            decoded_mining_job = mining_jobs_by_id[mining_job_id]
+        elif mining_job is not None:
+            decoded_mining_job = mining_job
+        elif mining_job_id:
             try:
-                mining_job = self.get_factor_mining_job(str(row.get("mining_job_id")))
+                decoded_mining_job = self.get_factor_mining_job(mining_job_id)
             except Exception:
-                mining_job = None
+                decoded_mining_job = None
         request_payload = loads(row.get("request_json"), {})
         return {
             "id": row.get("id"),
@@ -2020,7 +2030,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "config_snapshot": request_payload.get("config_snapshot") if isinstance(request_payload, Mapping) else None,
             "config_signature": row.get("config_signature"),
             "mining_job_id": row.get("mining_job_id"),
-            "mining_job": mining_job,
+            "mining_job": decoded_mining_job,
             "summary": loads(row.get("summary_json"), {}),
             "started_at": row.get("started_at"),
             "completed_at": row.get("completed_at"),
@@ -2135,6 +2145,21 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 })
                 return current_summary
 
+        existing_counts = quarantine_counts()
+        if existing_counts["total"] > FACTOR_FACTORY_SYNC_QUARANTINE_LIMIT:
+            apply_quarantine_counts(
+                existing_counts,
+                status="COMPLETED" if existing_counts["pending"] <= 0 else "PARTIAL",
+            )
+            current_summary.setdefault("redundancy_pruning", {
+                "status": "DEFERRED",
+                "reason": "existing_quarantine_exceeds_sync_limit",
+                "source_mining_job_id": mining_job_id,
+                "pending_count": existing_counts["pending"],
+                "sync_limit": FACTOR_FACTORY_SYNC_QUARANTINE_LIMIT,
+            })
+            return current_summary
+
         intake = self.factor_quarantine_intake({
             "mining_job_id": mining_job_id,
             "source": "factor_factory",
@@ -2220,14 +2245,40 @@ class RealBacktestPlatformService(BacktestPlatformService):
         })
         return current_summary
 
-    def _refresh_factor_factory_run_row(self, row: Mapping[str, Any]) -> Mapping[str, Any]:
+    @staticmethod
+    def _factor_factory_overview_should_refresh_run_row(row: Mapping[str, Any], *, is_latest: bool) -> bool:
+        if is_latest:
+            return True
+        status = str(row.get("status") or "").upper()
+        if status in {"QUEUED", "RUNNING", "CANCEL_REQUESTED"}:
+            return True
+        summary = loads(row.get("summary_json"), {})
+        if not isinstance(summary, Mapping):
+            return True
+        if not summary.get("mining_status"):
+            return True
+        if "top_candidate_count" not in summary or "failed_sample_count" not in summary:
+            return True
+        if status == "COMPLETED":
+            auto_status = str(summary.get("auto_quarantine_status") or "").upper()
+            return auto_status not in {"COMPLETED", "PARTIAL", "DEFERRED", "FAILED"}
+        return False
+
+    def _refresh_factor_factory_run_row(
+        self,
+        row: Mapping[str, Any],
+        *,
+        mining_job: Mapping[str, Any] | None = None,
+        funnel_snapshot: Mapping[str, int] | None = None,
+    ) -> Mapping[str, Any]:
         mining_job_id = str(row.get("mining_job_id") or "")
         if not mining_job_id:
             return row
-        try:
-            mining_job = self.get_factor_mining_job(mining_job_id)
-        except Exception:
-            return row
+        if mining_job is None:
+            try:
+                mining_job = self.get_factor_mining_job(mining_job_id)
+            except Exception:
+                return row
         next_status = self._factor_factory_run_status_from_mining_job(str(mining_job.get("status") or ""))
         completed_at = row.get("completed_at")
         if next_status in {"COMPLETED", "FAILED", "CANCELLED"}:
@@ -2235,12 +2286,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
         summary = loads(row.get("summary_json"), {})
         if not isinstance(summary, Mapping):
             summary = {}
+        funnel = dict(funnel_snapshot) if isinstance(funnel_snapshot, Mapping) else self._factor_factory_funnel()
         updated_summary = {
             **dict(summary),
             "mining_status": mining_job.get("status"),
             "top_candidate_count": len(mining_job.get("top_candidates") or []),
             "failed_sample_count": len(mining_job.get("failed_samples") or []),
-            "funnel": self._factor_factory_funnel(),
+            "funnel": funnel,
         }
         mining_summary = mining_job.get("summary") if isinstance(mining_job.get("summary"), Mapping) else {}
         if mining_summary:
@@ -2279,8 +2331,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
             return refreshed or row
         return row
 
-    def _factor_factory_funnel(self) -> dict[str, int]:
-        mining_jobs = self.list_factor_mining_jobs()
+    def _factor_factory_funnel(self, *, mining_jobs: Mapping[str, Any] | None = None) -> dict[str, int]:
+        if mining_jobs is None:
+            mining_jobs = self.list_factor_mining_jobs()
         mining_items = mining_jobs.get("items") if isinstance(mining_jobs.get("items"), list) else []
         mined = 0
         for item in mining_items:
@@ -2314,24 +2367,35 @@ class RealBacktestPlatformService(BacktestPlatformService):
         }
 
     @staticmethod
+    def _factor_factory_operator_status_key(factor_service: Any, factor: Mapping[str, Any]) -> str:
+        if not factor or not hasattr(factor_service, "_factor_operator_status_light_key"):
+            return ""
+        try:
+            return str(factor_service._factor_operator_status_light_key(factor) or "")  # noqa: SLF001
+        except Exception:
+            return ""
+
+    @staticmethod
     def _factor_factory_redundancy_keys(
         *,
         factor_id: Any,
         name_collision_key: Any,
         base_display_name_cn: Any,
         expression: Any,
+        op_status_key: Any = None,
     ) -> set[str]:
         keys: set[str] = set()
+        op_prefix = f"op:{str(op_status_key).strip().upper()}|" if str(op_status_key or "").strip() else ""
         factor_key = re.sub(r"\s+", "", str(factor_id or "").strip().lower())
         if factor_key:
-            keys.add(f"factor:{factor_key}")
+            keys.add(f"{op_prefix}factor:{factor_key}")
         name_key = str(name_collision_key or base_display_name_cn or "").strip().lower()
         name_key = re.sub(r"\s+", "", name_key)
         if name_key:
-            keys.add(f"name:{name_key}")
+            keys.add(f"{op_prefix}name:{name_key}")
         expression_key = re.sub(r"\s+", "", str(expression or "").strip().lower())
         if not keys and expression_key:
-            keys.add(f"expr:{expression_key}")
+            keys.add(f"{op_prefix}expr:{expression_key}")
         return keys
 
     @staticmethod
@@ -2359,19 +2423,20 @@ class RealBacktestPlatformService(BacktestPlatformService):
         base_display_name_cn: Any = None,
         display_name_cn: Any = None,
         factor_name: Any = None,
+        op_status_key: Any = None,
     ) -> set[str]:
         keys: set[str] = set()
+        op_prefix = f"op:{str(op_status_key).strip().upper()}|" if str(op_status_key or "").strip() else ""
         factor_key = re.sub(r"\s+", "", str(factor_id or "").strip().lower())
         if factor_key:
-            keys.add(f"factor:{factor_key}")
-        keys.update(
-            cls._factor_factory_redundancy_semantic_keys(
-                name_collision_key,
-                base_display_name_cn,
-                display_name_cn,
-                factor_name,
-            )
+            keys.add(f"{op_prefix}factor:{factor_key}")
+        semantic_keys = cls._factor_factory_redundancy_semantic_keys(
+            name_collision_key,
+            base_display_name_cn,
+            display_name_cn,
+            factor_name,
         )
+        keys.update(f"{op_prefix}{key}" for key in semantic_keys)
         return keys
 
     @staticmethod
@@ -2398,21 +2463,6 @@ class RealBacktestPlatformService(BacktestPlatformService):
             )
         except Exception:
             return None
-
-    @staticmethod
-    def _factor_factory_correlation_match(
-        factor_service: Any,
-        left: Mapping[str, Any],
-        right: Mapping[str, Any],
-    ) -> bool:
-        if not left or not right:
-            return False
-        try:
-            same_cluster = factor_service._factor_same_prune_cluster(left, right)  # noqa: SLF001
-            correlation = factor_service._factor_pair_correlation(left, right)  # noqa: SLF001
-        except Exception:
-            return False
-        return bool(same_cluster and correlation > FACTOR_PRUNE_CORRELATION_THRESHOLD)
 
     def _factor_factory_library_publish_blockers(self) -> dict[str, dict[str, Any]]:
         blockers: dict[str, dict[str, Any]] = {}
@@ -2447,6 +2497,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if not factor_id:
                 continue
             seen_factor_ids.add(factor_id)
+            op_status_key = self._factor_factory_operator_status_key(factor_service, factor)
             add_blockers(
                 self._factor_factory_publishable_block_keys(
                     factor_id=factor_id,
@@ -2454,9 +2505,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     base_display_name_cn=factor.get("base_display_name_cn"),
                     display_name_cn=factor.get("display_name_cn"),
                     factor_name=factor.get("name"),
+                    op_status_key=op_status_key,
                 ),
                 reason="ONLINE_PUBLISHED_FACTOR" if factor_id in published_factor_ids else "ONLINE_FACTOR_DEFINITION",
-                source={"factor_id": factor_id},
+                source={"factor_id": factor_id, "op_status_key": op_status_key},
             )
         direct_online_rows = self.storage.fetch_all(
             """
@@ -2484,6 +2536,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     )
                 except Exception:
                     projection = {}
+            op_status_key = self._factor_factory_operator_status_key(factor_service, row)
             add_blockers(
                 self._factor_factory_publishable_block_keys(
                     factor_id=factor_id,
@@ -2491,9 +2544,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     base_display_name_cn=projection.get("base_display_name_cn") or row.get("name"),
                     display_name_cn=projection.get("display_name_cn") or row.get("name"),
                     factor_name=row.get("name"),
+                    op_status_key=op_status_key,
                 ),
                 reason="ONLINE_PUBLISHED_FACTOR" if factor_id in published_factor_ids else "ONLINE_FACTOR_DEFINITION",
-                source={"factor_id": factor_id},
+                source={"factor_id": factor_id, "op_status_key": op_status_key},
             )
 
         try:
@@ -2513,10 +2567,23 @@ class RealBacktestPlatformService(BacktestPlatformService):
             evidence_source = str(criteria.get("evidence_source") or offline_detail.get("evidence_source") or "").upper()
             if correlation <= threshold or evidence_source not in FACTOR_FACTORY_PRUNE_EVIDENCE_SOURCES:
                 continue
-            reason_prefix = "MEASURED_PRUNE" if evidence_source == "MEASURED_DIAGNOSTIC_IC_SERIES" else "LIBRARY_HEATMAP_PRUNE"
+            operator_status_light = (
+                criteria.get("operator_status_light")
+                if isinstance(criteria.get("operator_status_light"), Mapping)
+                else offline_detail.get("operator_status_light")
+                if isinstance(offline_detail.get("operator_status_light"), Mapping)
+                else {}
+            )
+            if isinstance(operator_status_light, Mapping) and operator_status_light.get("same") is False:
+                continue
+            reason_prefix = "MEASURED_PRUNE"
             comparison = offline_detail.get("comparison") if isinstance(offline_detail.get("comparison"), Mapping) else {}
             candidate = comparison.get("candidate") if isinstance(comparison.get("candidate"), Mapping) else {}
             mvp = comparison.get("mvp") if isinstance(comparison.get("mvp"), Mapping) else {}
+            candidate_status = operator_status_light.get("candidate") if isinstance(operator_status_light.get("candidate"), Mapping) else {}
+            mvp_status = operator_status_light.get("mvp") if isinstance(operator_status_light.get("mvp"), Mapping) else {}
+            candidate_op_status_key = str(candidate_status.get("key") or "").strip()
+            mvp_op_status_key = str(mvp_status.get("key") or candidate_op_status_key or "").strip()
             action_factor_ids = [str(item).strip() for item in action.get("factor_ids") or [] if str(item).strip()]
             action_factor_ids.extend(
                 str(value).strip()
@@ -2525,9 +2592,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
             )
             for factor_id in dict.fromkeys(action_factor_ids):
                 add_blockers(
-                    self._factor_factory_publishable_block_keys(factor_id=factor_id),
+                    self._factor_factory_publishable_block_keys(
+                        factor_id=factor_id,
+                        op_status_key=candidate_op_status_key,
+                    ),
                     reason=f"{reason_prefix}_FACTOR",
-                    source={"action_id": action.get("id"), "factor_id": factor_id, "correlation": correlation},
+                    source={"action_id": action.get("id"), "factor_id": factor_id, "correlation": correlation, "op_status_key": candidate_op_status_key},
                 )
             add_blockers(
                 self._factor_factory_publishable_block_keys(
@@ -2536,9 +2606,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     base_display_name_cn=candidate.get("base_display_name_cn"),
                     display_name_cn=candidate.get("display_name_cn"),
                     factor_name=candidate.get("factor_name") or candidate.get("name"),
+                    op_status_key=candidate_op_status_key,
                 ),
                 reason=f"{reason_prefix}_SEMANTIC",
-                source={"action_id": action.get("id"), "correlation": correlation, "threshold": threshold},
+                source={"action_id": action.get("id"), "correlation": correlation, "threshold": threshold, "op_status_key": candidate_op_status_key},
             )
             add_blockers(
                 self._factor_factory_publishable_block_keys(
@@ -2547,9 +2618,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     base_display_name_cn=mvp.get("base_display_name_cn"),
                     display_name_cn=mvp.get("display_name_cn"),
                     factor_name=mvp.get("factor_name") or mvp.get("name"),
+                    op_status_key=mvp_op_status_key,
                 ),
                 reason=f"{reason_prefix}_MVP",
-                source={"action_id": action.get("id"), "correlation": correlation, "threshold": threshold},
+                source={"action_id": action.get("id"), "correlation": correlation, "threshold": threshold, "op_status_key": mvp_op_status_key},
             )
         return blockers
 
@@ -2559,7 +2631,6 @@ class RealBacktestPlatformService(BacktestPlatformService):
         *,
         keys: set[str],
         item: Any,
-        factor_service: Any | None = None,
         correlation_projection: Mapping[str, Any] | None = None,
     ) -> None:
         matches = [
@@ -2567,16 +2638,6 @@ class RealBacktestPlatformService(BacktestPlatformService):
             for index, group in enumerate(groups)
             if keys.intersection(group.get("keys") or set())
         ]
-        if not matches and factor_service is not None and correlation_projection:
-            matches = [
-                index
-                for index, group in enumerate(groups)
-                if any(
-                    self._factor_factory_correlation_match(factor_service, correlation_projection, peer_projection)
-                    for peer_projection in (group.get("correlation_projections") or [])
-                    if isinstance(peer_projection, Mapping)
-                )
-            ]
         if not keys and not matches:
             groups.append(
                 {
@@ -2647,12 +2708,26 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 neutralization_scope=metrics.get("neutralization_scope") or metrics.get("orthogonality_intent"),
                 residual_control=metrics.get("residual_control") or ("market_beta" if "beta" in expression.lower() else None),
             )
+            op_status_key = self._factor_factory_operator_status_key(
+                factor_service,
+                {
+                    "id": target_factor_id,
+                    "source": "AUTO_MINED",
+                    "expression": expression,
+                    "latest_diagnostic_summary": {
+                        "wnzt_complete": metrics.get("wnzt_complete"),
+                        "wnzt_evidence": metrics.get("wnzt_evidence"),
+                        "operator_chain": metrics.get("operator_chain"),
+                    },
+                },
+            )
             block_keys = self._factor_factory_publishable_block_keys(
                 factor_id=target_factor_id,
                 name_collision_key=projection.get("name_collision_key"),
                 base_display_name_cn=projection.get("base_display_name_cn"),
                 display_name_cn=projection.get("display_name_cn"),
                 factor_name=projection.get("display_name_cn") or projection.get("base_display_name_cn"),
+                op_status_key=op_status_key,
             )
             blocked_by = next(
                 (
@@ -2713,6 +2788,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 name_collision_key=projection.get("name_collision_key"),
                 base_display_name_cn=projection.get("base_display_name_cn"),
                 expression=expression,
+                op_status_key=op_status_key,
             )
             correlation_projection = self._factor_factory_correlation_projection(
                 factor_service,
@@ -2729,7 +2805,6 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 groups,
                 keys=keys,
                 item=(row, dict(metrics), score),
-                factor_service=factor_service,
                 correlation_projection=correlation_projection,
             )
         kept = 0
@@ -2886,11 +2961,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
         *,
         source_mining_job_id: str,
         fallback_items: Sequence[Mapping[str, Any]],
+        defer_non_external: bool = False,
     ) -> list[dict[str, Any]]:
         rows: list[Mapping[str, Any]] = []
         source_mining_job_id = str(source_mining_job_id or "").strip()
         factor_service = self._factor_research_service()
-        library_blockers = self._factor_factory_library_publish_blockers()
+        library_blockers: dict[str, dict[str, Any]] | None = None
         if source_mining_job_id:
             rows = self.storage.fetch_all(
                 """
@@ -2971,6 +3047,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 candidate["publish_eligibility"] = publish_eligibility
             elif pipeline_version != "raw_refined_f2_v2":
                 continue
+            if defer_non_external and not is_external_import:
+                continue
             if (
                 not is_external_import
                 and bool(metrics.get("raw_f2"))
@@ -2999,6 +3077,23 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if factor_id in existing_factor_ids:
                 continue
             if is_external_import:
+                candidate_op_status = candidate.get("op_status") if isinstance(candidate.get("op_status"), Mapping) else None
+                projection_op_status = candidate_op_status or (
+                    factor_service._factor_processing_ops(  # noqa: SLF001
+                        {
+                            "id": factor_id,
+                            "source": "PUBLIC_FACTOR_IMPORT",
+                            "expression": expression,
+                            "latest_diagnostic_summary": {
+                                "operator_chain": metrics.get("operator_chain"),
+                                "wnzt_complete": metrics.get("wnzt_complete"),
+                                "wnzt_evidence": metrics.get("wnzt_evidence"),
+                            },
+                        }
+                    )
+                    if hasattr(factor_service, "_factor_processing_ops")
+                    else None
+                )
                 projection = external_factor_import_display_projection_v1(
                     source_id=metrics.get("external_source_id"),
                     dataset_key=metrics.get("external_dataset_key"),
@@ -3010,6 +3105,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     or candidate.get("display_name_cn")
                     or candidate.get("factor_name")
                     or candidate.get("name"),
+                    op_status=projection_op_status,
                 )
                 display_name = str(projection["display_name_cn"])
                 metrics = dict(metrics)
@@ -3045,20 +3141,37 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     or projection.get("display_name_cn")
                     or expression
                 )
+            op_status_key = self._factor_factory_operator_status_key(
+                factor_service,
+                {
+                    "id": factor_id,
+                    "source": "PUBLIC_FACTOR_IMPORT" if is_external_import else "AUTO_MINED",
+                    "expression": expression,
+                    "latest_diagnostic_summary": {
+                        "wnzt_complete": metrics.get("wnzt_complete"),
+                        "wnzt_evidence": metrics.get("wnzt_evidence"),
+                        "operator_chain": metrics.get("operator_chain"),
+                    },
+                },
+            )
             block_keys = self._factor_factory_publishable_block_keys(
                 factor_id=factor_id,
                 name_collision_key=projection.get("name_collision_key"),
                 base_display_name_cn=projection.get("base_display_name_cn") or display_name,
                 display_name_cn=display_name,
                 factor_name=candidate.get("factor_name") or candidate.get("name"),
+                op_status_key=op_status_key,
             )
-            if block_keys.intersection(library_blockers):
+            if not is_external_import and library_blockers is None:
+                library_blockers = self._factor_factory_library_publish_blockers()
+            if block_keys.intersection(library_blockers or {}):
                 continue
             keys = self._factor_factory_redundancy_keys(
                 factor_id=factor_id,
                 name_collision_key=projection.get("name_collision_key"),
                 base_display_name_cn=projection.get("base_display_name_cn") or display_name,
                 expression=expression,
+                op_status_key=op_status_key,
             )
             correlation_projection = self._factor_factory_correlation_projection(
                 factor_service,
@@ -3114,13 +3227,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "published_at": candidate.get("published_at"),
                 "detail_modal_enabled": True,
                 "redundancy_pruning": "PASSED",
+                "operator_status_key": op_status_key,
             }
             candidate_row["redundancy_group_key"] = "|".join(sorted(keys))
             self._append_factor_factory_redundancy_group(
                 groups,
                 keys=keys,
                 item=candidate_row,
-                factor_service=factor_service,
                 correlation_projection=correlation_projection,
             )
         winners = [
@@ -3179,8 +3292,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
             or len(top_candidates)
         )
         refined_f2_count = int(operator_engine_summary.get("refined_f2_batch_delivered_count") or 0)
+        l3_count_known = "f3_composition_candidate_count" in operator_engine_summary
+        l3_candidate_count = int(operator_engine_summary.get("f3_composition_candidate_count") or 0)
         source_candidate_metric_rows: list[Mapping[str, Any]] = []
-        if source_mining_job_id:
+        if source_mining_job_id and (refined_f2_count <= 0 or not l3_count_known):
             source_candidate_metric_rows = self.storage.fetch_all(
                 """
                 SELECT candidate_metrics_json
@@ -3195,12 +3310,13 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 for row in source_candidate_metric_rows
                 if bool(loads(row.get("candidate_metrics_json"), {}).get("refined_f2"))
             )
-        l3_candidate_count = sum(
-            1
-            for row in source_candidate_metric_rows
-            if str(loads(row.get("candidate_metrics_json"), {}).get("target_layer") or "").upper() == "L3"
-        )
-        if not source_candidate_metric_rows:
+        if source_candidate_metric_rows and not l3_count_known:
+            l3_candidate_count = sum(
+                1
+                for row in source_candidate_metric_rows
+                if str(loads(row.get("candidate_metrics_json"), {}).get("target_layer") or "").upper() == "L3"
+            )
+        if not source_candidate_metric_rows and not l3_count_known:
             l3_candidate_count = sum(
                 1
                 for item in quarantine_items
@@ -3330,9 +3446,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 "reason_summary": reason_summary,
                 "detail_modal_enabled": True,
             })
+        defer_non_external_publishables = (
+            str(latest_summary.get("auto_quarantine_status") or "").upper() == "PARTIAL"
+            and int(_coerce_float(latest_summary.get("auto_quarantine_pending_count"), 0.0)) > 0
+        )
         publishable_factors = self._factor_factory_publishable_factors(
             source_mining_job_id=source_mining_job_id,
             fallback_items=[item for item in quarantine_items if isinstance(item, Mapping)],
+            defer_non_external=defer_non_external_publishables,
         )
         return {
             "task_summary": {
@@ -3588,6 +3709,86 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "defaults": default_operator_config(),
         }
 
+    @staticmethod
+    def _factor_factory_overview_mining_job_projection(job: Any) -> Any:
+        if not isinstance(job, Mapping):
+            return job
+        summary = dict(job.get("summary") or {}) if isinstance(job.get("summary"), Mapping) else {}
+        top_candidates = job.get("top_candidates") if isinstance(job.get("top_candidates"), list) else []
+        failed_samples = job.get("failed_samples") if isinstance(job.get("failed_samples"), list) else []
+        return {
+            "id": job.get("id"),
+            "status": job.get("status"),
+            "request": job.get("request") if isinstance(job.get("request"), Mapping) else {},
+            "progress": job.get("progress") if isinstance(job.get("progress"), Mapping) else {},
+            "summary": summary,
+            "top_candidates": [],
+            "top_candidate_count": len(top_candidates),
+            "top_preview_count": summary.get("top_preview_count") or len(top_candidates),
+            "failed_sample_count": len(failed_samples),
+            "created_at": job.get("created_at"),
+            "updated_at": job.get("updated_at"),
+            "completed_at": job.get("completed_at"),
+            "error_message": job.get("error_message"),
+        }
+
+    @classmethod
+    def _factor_factory_overview_run_projection(cls, run: Any, *, compact: bool = False) -> Any:
+        if not isinstance(run, Mapping):
+            return run
+        if compact:
+            summary = run.get("summary") if isinstance(run.get("summary"), Mapping) else {}
+            operator_engine = (
+                summary.get("operator_engine")
+                if isinstance(summary.get("operator_engine"), Mapping)
+                else {}
+            )
+            summary_projection = {
+                "generation_mode": summary.get("generation_mode"),
+                "mining_status": summary.get("mining_status"),
+                "auto_quarantine_status": summary.get("auto_quarantine_status"),
+                "auto_intake_count": summary.get("auto_intake_count"),
+                "auto_quarantine_count": summary.get("auto_quarantine_count"),
+                "auto_quarantine_pending_count": summary.get("auto_quarantine_pending_count"),
+                "operator_engine": {
+                    "backend": operator_engine.get("backend"),
+                    "source": operator_engine.get("source"),
+                    "deduped_formula_count": operator_engine.get("deduped_formula_count"),
+                    "generated_formula_count": operator_engine.get("generated_formula_count"),
+                    "raw_f2_batch_delivered_count": operator_engine.get("raw_f2_batch_delivered_count"),
+                    "refined_f2_batch_delivered_count": operator_engine.get("refined_f2_batch_delivered_count"),
+                    "f3_composition_candidate_count": operator_engine.get("f3_composition_candidate_count"),
+                    "top_preview_count": operator_engine.get("top_preview_count"),
+                },
+            }
+            return {
+                "id": run.get("id"),
+                "profile_id": run.get("profile_id"),
+                "run_date": run.get("run_date"),
+                "trigger": run.get("trigger"),
+                "status": run.get("status"),
+                "config_signature": run.get("config_signature"),
+                "mining_job_id": run.get("mining_job_id"),
+                "summary": summary_projection,
+                "started_at": run.get("started_at"),
+                "completed_at": run.get("completed_at"),
+                "created_at": run.get("created_at"),
+                "updated_at": run.get("updated_at"),
+                "error_message": run.get("error_message"),
+            }
+        projected = dict(run)
+        projected["mining_job"] = cls._factor_factory_overview_mining_job_projection(run.get("mining_job"))
+        return projected
+
+    @classmethod
+    def _factor_factory_overview_mining_projection(cls, mining: Any) -> Any:
+        if not isinstance(mining, Mapping):
+            return mining
+        projected = dict(mining)
+        items = mining.get("items") if isinstance(mining.get("items"), list) else []
+        projected["items"] = [cls._factor_factory_overview_mining_job_projection(item) for item in items]
+        return projected
+
     def save_factor_factory_operator_config(self, request: Any | None = None) -> dict[str, Any]:
         profile_row = self.storage.fetch_one("SELECT * FROM factor_factory_profiles WHERE id = 'default'")
         profile = self._decode_factor_factory_profile_row(profile_row)
@@ -3672,11 +3873,35 @@ class RealBacktestPlatformService(BacktestPlatformService):
             LIMIT 10
             """
         )
-        refreshed_rows = [self._refresh_factor_factory_run_row(row) for row in run_rows]
-        latest_run = self._decode_factor_factory_run_row(refreshed_rows[0]) if refreshed_rows else None
-        runs = [self._decode_factor_factory_run_row(row) for row in refreshed_rows]
-        mining = self.list_factor_mining_jobs()
-        latest_mining_job_id = str((latest_run or {}).get("mining_job_id") or "")
+        mining_full = self.list_factor_mining_jobs()
+        mining_items = mining_full.get("items") if isinstance(mining_full.get("items"), list) else []
+        mining_jobs_by_id = {
+            str(item.get("id")): item
+            for item in mining_items
+            if isinstance(item, Mapping) and item.get("id")
+        }
+        funnel_snapshot = self._factor_factory_funnel(mining_jobs=mining_full)
+        refreshed_rows = []
+        for index, row in enumerate(run_rows):
+            if self._factor_factory_overview_should_refresh_run_row(row, is_latest=index == 0):
+                mining_job_id = str(row.get("mining_job_id") or "")
+                refreshed_rows.append(self._refresh_factor_factory_run_row(
+                    row,
+                    mining_job=mining_jobs_by_id.get(mining_job_id),
+                    funnel_snapshot=funnel_snapshot,
+                ))
+            else:
+                refreshed_rows.append(row)
+        latest_run_full = (
+            self._decode_factor_factory_run_row(refreshed_rows[0], mining_jobs_by_id=mining_jobs_by_id)
+            if refreshed_rows
+            else None
+        )
+        runs_full = [
+            self._decode_factor_factory_run_row(row, mining_jobs_by_id=mining_jobs_by_id)
+            for row in refreshed_rows
+        ]
+        latest_mining_job_id = str((latest_run_full or {}).get("mining_job_id") or "")
         quarantine = self.list_factor_quarantine_candidates(
             source_job_id=latest_mining_job_id or None,
             page=1,
@@ -3684,20 +3909,26 @@ class RealBacktestPlatformService(BacktestPlatformService):
         )
         external_quarantine = factor_research_service.list_external_factor_import_quarantine_candidates(limit=12)
         quarantine = self._merge_factor_factory_quarantine_projection(quarantine, external_quarantine)
+        active_run_full = (
+            latest_run_full
+            if latest_run_full and latest_run_full.get("status") in {"QUEUED", "RUNNING"}
+            else None
+        )
         overview = {
             "profile": profile,
-            "active_run": latest_run if latest_run and latest_run.get("status") in {"QUEUED", "RUNNING"} else None,
-            "latest_run": latest_run,
-            "runs": runs,
-            "funnel": self._factor_factory_funnel(),
-            "mining": mining,
+            "active_run": self._factor_factory_overview_run_projection(active_run_full),
+            "latest_run": self._factor_factory_overview_run_projection(latest_run_full),
+            "runs": [self._factor_factory_overview_run_projection(run, compact=True) for run in runs_full],
+            "funnel": funnel_snapshot,
+            "mining": self._factor_factory_overview_mining_projection(mining_full),
             "quarantine": quarantine,
+            "external_import_precheck_jobs": factor_research_service.list_external_factor_import_precheck_jobs(limit=8),
             "external_import_review_queue": factor_research_service.list_external_factor_import_review_queue(limit=8),
             "external_import_quarantine": external_quarantine,
             "gate_policy": profile.get("gate_policy") or self._factor_factory_default_gate_policy(),
             "operator_config": self.get_factor_factory_operator_config(),
         }
-        latest_summary = latest_run.get("summary") if isinstance((latest_run or {}).get("summary"), Mapping) else {}
+        latest_summary = latest_run_full.get("summary") if isinstance((latest_run_full or {}).get("summary"), Mapping) else {}
         operator_engine_summary = latest_summary.get("operator_engine") if isinstance(latest_summary.get("operator_engine"), Mapping) else {}
         quarantine_items = quarantine.get("items") if isinstance(quarantine.get("items"), list) else []
         quarantine_summary = quarantine.get("summary") if isinstance(quarantine.get("summary"), Mapping) else {}
@@ -3741,9 +3972,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
         }
         overview.update(self._factor_factory_phase2_rows(
             profile=profile,
-            latest_run=latest_run,
-            runs=runs,
-            mining=mining,
+            latest_run=latest_run_full,
+            runs=runs_full,
+            mining=mining_full,
             quarantine=quarantine,
         ))
         return overview
@@ -5859,7 +6090,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "weight_100": abs(total_abs_weight - 100.0) <= 0.01 or abs(total_abs_weight - 1.0) <= 0.0001,
             "market_us": market == "US",
             "tier_l3": tier in {"F3", "L3"},
-            "grade_sa": level in {"S", "A"},
+            "grade_sab": level in {"S", "A", "B"},
             "diagnostic_completed": diagnostic_status == "COMPLETED",
             "wnzt_complete": required_ops.issubset(completed_ops),
         }
@@ -5868,7 +6099,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "weight_100": "Composite factor strategy requires the selected factor weight to be 100%.",
             "market_us": "Composite factor strategy currently supports US equity factors only.",
             "tier_l3": "Composite factor strategy only accepts L3/F3 factors.",
-            "grade_sa": "Composite factor strategy only accepts S/A grade factors.",
+            "grade_sab": "Composite factor strategy only accepts S/A/B grade factors.",
             "diagnostic_completed": "Composite factor strategy requires a completed diagnostic summary.",
             "wnzt_complete": "Composite factor strategy requires W/N/Z/T processing lights to be complete.",
         }

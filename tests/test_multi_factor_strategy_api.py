@@ -95,7 +95,12 @@ def _composite_payload(
     }
 
 
-def _patch_composite_factor_admission(client, monkeypatch, factor_id: str = "s_mom_12m1m_rank") -> None:
+def _patch_composite_factor_admission(
+    client,
+    monkeypatch,
+    factor_id: str = "s_mom_12m1m_rank",
+    factor_level: str = "S",
+) -> None:
     service = client.app.state.service
     original_list_factors = service.list_factors
 
@@ -110,8 +115,8 @@ def _patch_composite_factor_admission(client, monkeypatch, factor_id: str = "s_m
                         "market": "US",
                         "tier_level": "F3",
                         "tier_projection": {"key": "F3"},
-                        "factor_level": "S",
-                        "factor_level_projection": {"key": "S"},
+                        "factor_level": factor_level,
+                        "factor_level_projection": {"key": factor_level},
                         "diagnostic_status": "COMPLETED",
                         "op_status": {
                             "completed": ["W", "N", "Z", "T"],
@@ -481,6 +486,23 @@ def test_composite_factor_preview_reports_admission_diagnostic_sector_cap_and_co
     assert blocked["strategy_creation_risk"]["eligibility"]["can_create"] is False
     blocker_codes = {item["code"] for item in blocked["strategy_creation_risk"]["hard_blockers"]}
     assert "COMPOSITE_SINGLE_FACTOR" in blocker_codes
+
+
+def test_composite_factor_preview_accepts_b_grade_source_factor(tmp_path, monkeypatch) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    _seed_sp500_industry_pit_metadata(client)
+    _patch_composite_factor_admission(client, monkeypatch, factor_level="B")
+
+    preview = assert_ok(client.post("/factor-models/preview", json=_composite_payload()))
+
+    assert preview["strategy_type"] == "COMPOSITE_FACTOR"
+    assert preview["status"] == "READY"
+    risk = preview["strategy_creation_risk"]
+    assert risk["eligibility"]["can_create"] is True
+    assert risk["eligibility"]["factor_level"] == "B"
+    blocker_codes = {item["code"] for item in risk["hard_blockers"]}
+    assert "COMPOSITE_GRADE_SAB" not in blocker_codes
 
 
 def test_composite_factor_preview_accepts_wnzt_ffblend_seed(tmp_path) -> None:

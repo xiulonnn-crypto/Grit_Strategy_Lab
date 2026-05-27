@@ -88,6 +88,7 @@ Codex 对话默认先走 `scripts/runtime-supervisor.ps1` 查看状态或提交�
 - [scripts/codex-validate-full.ps1](./scripts/codex-validate-full.ps1)：大改、发版或合并前完整门禁，可并行跑后端与前端固定入口
 - [scripts/codex-test-backend.ps1](./scripts/codex-test-backend.ps1)：固定后端测试入口
 - [scripts/codex-test-frontend.ps1](./scripts/codex-test-frontend.ps1)：固定前端测试入口
+- [scripts/codex-clean-stale-local-artifacts.ps1](./scripts/codex-clean-stale-local-artifacts.ps1)：清理长期无效的本地产物，详见 [docs/local-artifact-cleanup.md](./docs/local-artifact-cleanup.md)
 - [scripts/run-recovery-tests.ps1](./scripts/run-recovery-tests.ps1)：前端测试恢复路径
 - [scripts/bootstrap-python-runtime.ps1](./scripts/bootstrap-python-runtime.ps1)：修复仓库本地 Python 运行时
 - [scripts/validate-quickstart-runtime.ps1](./scripts/validate-quickstart-runtime.ps1)：检查 QuickStart 运行环境

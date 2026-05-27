@@ -1479,6 +1479,12 @@ def test_factor_display_name_v4_backfill_dry_run_and_apply_preserves_identity(tm
             "SELECT expression FROM factor_versions WHERE factor_id = ? ORDER BY version DESC LIMIT 1",
             (factor_id,),
         ).fetchone()["expression"] == expression_before
+        latest_metadata = json.loads(
+            conn.execute(
+                "SELECT metadata_json FROM factor_versions WHERE factor_id = ? ORDER BY version DESC LIMIT 1",
+                (factor_id,),
+            ).fetchone()["metadata_json"]
+        )
         assert conn.execute(
             "SELECT COUNT(*) AS count FROM factor_lineage_edges WHERE target_id = ?",
             (factor_id,),
@@ -1496,6 +1502,9 @@ def test_factor_display_name_v4_backfill_dry_run_and_apply_preserves_identity(tm
     assert audit["new_display_name"] == expected_name
     assert audit["name_schema_version"] == "factor_display_name_v4"
     assert audit["rename_reason"] == "display_name_v4_backfill"
+    assert latest_metadata["publish_metadata"]["display_name_cn"] == expected_name
+    assert latest_metadata["publish_metadata"]["base_display_name_cn"] == expected_name
+    assert latest_metadata["publish_metadata"]["backfill_reason"] == "display_name_v4_backfill"
 
 
 def test_factor_display_name_raw_suffix_requires_wnzt_evidence_before_refined_suffix():
@@ -1518,6 +1527,54 @@ def test_factor_display_name_raw_suffix_requires_wnzt_evidence_before_refined_su
     )
     assert refined_projection["display_name_cn"] == "[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined]"
     assert refined_projection["name_audit"]["structured_components"]["governance_tag"] == "Refined"
+
+    middle_raw_projection = factor_display_name_projection_v4(
+        factor_id="s_f2_mom_raw_cur_f1_price_open",
+        source="AUTO_MINED",
+        expression='ZScore(Neutralize(Winsorize(TS_Rank(TS_Return(f1_price_open, 5), 3), method="MAD"), by="industry,market_cap"))',
+        tier_level="F2",
+        op_status={"completed": ["W", "N", "Z", "T"]},
+    )
+    assert middle_raw_projection["display_name_cn"] == "平滑收益率 (当前) [Refined]"
+    assert middle_raw_projection["name_audit"]["structured_components"]["governance_tag"] == "Refined"
+
+
+def test_default_factor_repair_uses_wnzt_display_projection_for_middle_raw_auto_factor(tmp_path):
+    client, db_path = create_test_client(tmp_path)
+    factor_id = "s_f2_mom_raw_cur_f1_price_open"
+    expression = 'ZScore(Neutralize(Winsorize(TS_Rank(TS_Return(f1_price_open, 5), 3), method="MAD"), by="industry,market_cap"))'
+    now = "2026-05-27T07:30:00Z"
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO factor_definitions (
+                id, name, market, universe, source, lifecycle_status, diagnostic_status,
+                direction, frequency, expression, tags_json, data_requirements_json,
+                institutional_note, created_by, created_at, updated_at
+            )
+            VALUES (?, 'Legacy Raw Name [Raw]', 'US', 'SP500', 'AUTO_MINED', 'VERIFIED',
+                    'COMPLETED', 'HIGH_IS_BETTER', 'DAILY', ?, '[]', '[]', '',
+                    'unit_test', ?, ?)
+            """,
+            (factor_id, expression, now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO factor_versions (id, factor_id, version, expression, status, metadata_json, created_at)
+            VALUES (?, ?, 1, ?, 'ACTIVE', '{}', ?)
+            """,
+            (f"{factor_id}-v1", factor_id, expression, now),
+        )
+
+    client.app.state.service._factor_research_service().ensure_default_factors()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT name FROM factor_definitions WHERE id = ?", (factor_id,)).fetchone()
+
+    assert "[Refined]" in row["name"]
+    assert "[Raw]" not in row["name"]
 
 
 def test_factor_display_name_financial_release_timing_uses_timing_semantic_and_window():
@@ -2474,9 +2531,68 @@ def test_factor_governance_prune_requires_measured_rankic_correlation(tmp_path):
     assert action["offline_detail"]["correlation"] > 0.9
     assert action["offline_detail"]["evidence_source"] == "MEASURED_DIAGNOSTIC_IC_SERIES"
     assert action["offline_detail"]["sample_count"] == len(keep_values)
+    assert action["offline_detail"]["operator_status_light"]["same"] is True
 
 
-def test_factor_governance_prune_uses_library_heatmap_when_publish_ic_series_is_synthetic(tmp_path):
+def test_factor_governance_prune_requires_same_operator_status_light(tmp_path):
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    raw_id = "m_mom_statuslight_21d_raw"
+    refined_id = "m_mom_statuslight_21d_rank"
+    for expected_id, name, expression, operator in [
+        (raw_id, "status light raw return", "Return(Close, 21)", "raw"),
+        (
+            refined_id,
+            "status light refined return",
+            "ZScore(Rank(Return(Close, 21)))",
+            "rank",
+        ),
+    ]:
+        created = assert_ok(
+            client.post(
+                "/factors",
+                json={
+                    "name": name,
+                    "market": "US",
+                    "universe": "SP500",
+                    "expression": expression,
+                    "frequency": "DAILY",
+                    "direction": "HIGH_IS_BETTER",
+                    "descriptor": manual_descriptor(metric="statuslight", window="21d", operator=operator),
+                    "tags": ["manual"],
+                },
+            )
+        )
+        assert created["id"] == expected_id
+    raw_values = [0.011, 0.013, 0.015, 0.018, 0.017, 0.021, 0.024, 0.026, 0.025, 0.029]
+    refined_values = [value * 0.94 + 0.001 for value in raw_values]
+    seed_factor_diagnostic_summary(
+        client,
+        raw_id,
+        governance_ready_summary_with_ic_series(rank_ic=0.034, ir=1.6, coverage=99.1, values=raw_values),
+        run_id="fdiag_status_light_raw",
+    )
+    seed_factor_diagnostic_summary(
+        client,
+        refined_id,
+        governance_ready_summary_with_ic_series(rank_ic=0.028, ir=1.1, coverage=98.4, values=refined_values),
+        run_id="fdiag_status_light_refined",
+    )
+
+    overview = assert_ok(client.get("/factor-governance/overview"))
+    assert all(
+        not (item["kind"] == "PRUNE" and set(item["factor_ids"]).intersection({raw_id, refined_id}))
+        for item in overview["actions"]
+    )
+    factor_service = client.app.state.service._factor_research_service()
+    raw_factor = assert_ok(client.get(f"/factors/{raw_id}"))
+    refined_factor = assert_ok(client.get(f"/factors/{refined_id}"))
+    evidence = factor_service._factor_pair_prune_correlation_evidence(refined_factor, raw_factor)  # noqa: SLF001
+    assert evidence["reason"] == "operator_status_light_mismatch"
+    assert evidence["operator_status_light"]["same"] is False
+
+
+def test_factor_governance_prune_rejects_library_heatmap_when_publish_ic_series_is_synthetic(tmp_path):
     client, _db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
     now = "2026-05-22T09:30:00Z"
@@ -2552,20 +2668,20 @@ def test_factor_governance_prune_uses_library_heatmap_when_publish_ic_series_is_
         for action in overview["actions"]
         if action["kind"] == "PRUNE" and set(action["factor_ids"]).intersection(published_ids)
     ]
-    prune_factor_ids = {factor_id for action in prune_actions for factor_id in action["factor_ids"]}
-    assert prune_factor_ids == {
-        "s_f2_mom_raw_cur_f1_price_close",
-        "s_f2_mom_raw_cur_f1_return_1d_base",
-    }
-    assert {action["keep_factor_id"] for action in prune_actions} == {"s_f2_mom_raw_cur_f1_return_21d_base"}
-    assert all(action["offline_detail"]["evidence_source"] == "FACTOR_LIBRARY_HEATMAP_PROXY" for action in prune_actions)
-    assert all(action["offline_detail"]["correlation"] > 0.9 for action in prune_actions)
+    assert prune_actions == []
 
     detail = assert_ok(client.get("/factors/s_f2_mom_raw_cur_f1_return_1d_base"))
     summary = detail["latest_diagnostic_summary"]
     assert summary["ic_series"]
     assert summary["ic_series_evidence_quality"] == "synthetic_projection"
     assert summary["ic_series_source"] == "auto_mined_rank_ic_projection"
+
+    factor_service = client.app.state.service._factor_research_service()
+    keep_factor = assert_ok(client.get("/factors/s_f2_mom_raw_cur_f1_return_21d_base"))
+    synthetic_peer = assert_ok(client.get("/factors/s_f2_mom_raw_cur_f1_price_close"))
+    evidence = factor_service._factor_pair_prune_correlation_evidence(synthetic_peer, keep_factor)  # noqa: SLF001
+    assert evidence["eligible"] is False
+    assert evidence["reason"] == "synthetic_rank_ic_series_not_prune_evidence"
 
 
 def test_factor_governance_optimizes_inverted_downside_factor_and_publishes_reverse(tmp_path):
@@ -3098,7 +3214,7 @@ def test_factor_governance_prune_uses_standard_style_categories(tmp_path):
     )
 
     keep_id = "s_vol_252d_rank"
-    prune_id = "s_beta_resid_252d_z"
+    prune_id = "s_vol_mdd_252d_rank"
     keep_values = [0.011, 0.014, 0.016, 0.017, 0.02, 0.022, 0.023, 0.027, 0.028, 0.03]
     prune_values = [value * 0.93 + 0.0008 for value in keep_values]
     seed_factor_diagnostic_summary(
@@ -3473,12 +3589,12 @@ def test_factor_governance_prune_execute_is_idempotent_for_stale_confirmation(tm
             "Correlation(Rank(Close), Rank(Volume), 10)",
             manual_descriptor(category="liq", metric="pvdiv", window="10d", operator="raw"),
         ),
-        (
-            "m_liq_vol_conc_21d_raw",
-            "量能汇聚因子",
-            "Correlation(Volume, Abs(Return(Close,1)),21)",
-            manual_descriptor(category="liq", metric="vol_conc", window="21d", operator="raw"),
-        ),
+            (
+                "m_liq_vol_conc_21d_raw",
+                "量能汇聚因子",
+                "Correlation(Rank(Volume), Rank(Abs(Return(Close,1))),21)",
+                manual_descriptor(category="liq", metric="vol_conc", window="21d", operator="raw"),
+            ),
     ]:
         created = assert_ok(
             client.post(
@@ -3618,7 +3734,7 @@ def test_factor_governance_prune_recovery_restores_heuristic_only_factor(tmp_pat
 def test_factor_governance_prune_recovery_keeps_factor_pruned_with_real_evidence(tmp_path):
     client, db_path = create_test_client(tmp_path)
     seed_ready_pit_data(client)
-    factor_id = "s_beta_resid_252d_z"
+    factor_id = "s_vol_mdd_252d_rank"
     keep_id = "s_vol_252d_rank"
     assert_ok(client.get("/factors"))
     now = "2026-05-20T00:00:00Z"
@@ -3703,6 +3819,95 @@ def test_factor_governance_prune_recovery_keeps_factor_pruned_with_real_evidence
     assert applied["recovered_count"] == 0
     still_pruned = assert_ok(client.get(f"/factors/{factor_id}"))
     assert still_pruned["lifecycle_status"] == "PRUNED"
+
+
+def test_factor_governance_prune_recovery_restores_different_operator_status_light(tmp_path):
+    client, db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    keep_id = "m_mom_recoverylight_21d_raw"
+    pruned_id = "m_mom_recoverylight_21d_rank"
+    for expected_id, name, expression, operator in [
+        (keep_id, "recovery light raw return", "Return(Close, 21)", "raw"),
+        (
+            pruned_id,
+            "recovery light refined return",
+            "ZScore(Rank(Return(Close, 21)))",
+            "rank",
+        ),
+    ]:
+        created = assert_ok(
+            client.post(
+                "/factors",
+                json={
+                    "name": name,
+                    "market": "US",
+                    "universe": "SP500",
+                    "expression": expression,
+                    "frequency": "DAILY",
+                    "direction": "HIGH_IS_BETTER",
+                    "descriptor": manual_descriptor(metric="recoverylight", window="21d", operator=operator),
+                    "tags": ["manual"],
+                },
+            )
+        )
+        assert created["id"] == expected_id
+    keep_values = [0.011, 0.013, 0.015, 0.018, 0.017, 0.021, 0.024, 0.026, 0.025, 0.029]
+    pruned_values = [value * 0.94 + 0.001 for value in keep_values]
+    seed_factor_diagnostic_summary(
+        client,
+        keep_id,
+        governance_ready_summary_with_ic_series(rank_ic=0.034, ir=1.6, coverage=99.1, values=keep_values),
+        run_id="fdiag_recovery_light_keep",
+    )
+    seed_factor_diagnostic_summary(
+        client,
+        pruned_id,
+        governance_ready_summary_with_ic_series(rank_ic=0.028, ir=1.1, coverage=98.4, values=pruned_values),
+        run_id="fdiag_recovery_light_pruned",
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE factor_definitions
+            SET lifecycle_status = 'PRUNED',
+                offline_reason = 'historical redundancy prune across status lights',
+                offline_at = '2026-05-20T00:00:00Z',
+                offline_command = 'PRUNE',
+                offline_detail_json = ?,
+                updated_at = '2026-05-20T00:00:00Z'
+            WHERE id = ?
+            """,
+            (
+                dumps(
+                    {
+                        "keep_factor_id": keep_id,
+                        "correlation": 0.94,
+                        "evidence_source": "MEASURED_DIAGNOSTIC_IC_SERIES",
+                    }
+                ),
+                pruned_id,
+            ),
+        )
+
+    preview = assert_ok(client.get("/factor-governance/prune-recovery/preview"))
+    item = next(entry for entry in preview["items"] if entry["factor_id"] == pruned_id)
+    assert item["recoverable"] is True
+    assert item["decision"] == "RESTORE"
+    assert item["reason"] == "operator_status_light_mismatch"
+    assert item["evidence"]["operator_status_light"]["same"] is False
+
+    applied = assert_ok(
+        client.post(
+            "/factor-governance/prune-recovery/apply",
+            json={"confirm": True, "factor_ids": [pruned_id], "reason": "unit-test status light recovery"},
+        )
+    )
+
+    assert applied["recovered_factor_ids"] == [pruned_id]
+    restored = assert_ok(client.get(f"/factors/{pruned_id}"))
+    assert restored["lifecycle_status"] == "VERIFIED"
+    assert restored["offline_reason"] is None
+    assert restored["offline_command"] is None
 
 
 def test_factor_governance_redundancy_restore_queue_restores_only_best_candidate(tmp_path):

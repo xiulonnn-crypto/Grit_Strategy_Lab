@@ -46,7 +46,7 @@ const CANONICAL_FACTOR_DISPLAY_NAMES: Record<string, string> = {
   s_liq_amihud_20d_rank: '非流动性排名 (20d) [Rank]',
   s_beta_market_252d_raw: '市场 Beta (252d) [Raw]',
   s_size_cur_log: '对数市值 (当前) [Raw]',
-  s_f2_mom_raw_cur_external_fama_french_us_research_factors_daily: '[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]',
+  s_f2_mom_raw_cur_external_fama_french_us_research_factors_daily: '[外部] - Fama-French 美股研究日频因子 (Daily) [Refined]',
   s_alpha_ffblend_resid_mkt_rank: '[综合] - FF3 风格复合基石 (等权) [Beta-Free]',
   s_alpha_valvol_blend_resid_std_rk: '[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined-Rank]',
   s_alpha_vol_downsiderev_std_rk: '[风险] - 反向下行风险 Alpha (252d) [Refined-Rank]',

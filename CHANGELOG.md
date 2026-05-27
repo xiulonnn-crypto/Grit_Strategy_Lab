@@ -9,6 +9,11 @@
 
 ## [Unreleased]
 
+### 优化 (Changed)
+
+- **推云 impact 封装**: 新增 impact 发布封装脚本，先检查 staged 内容、Trace Matrix 与外发高信号文件，再复用 WorkingTree impact 内容指纹完成提交、推送和元数据快照跟进。
+- **推云 full 封装**: 新增 full 发布封装脚本，并让 full gate 摘要带上 git head/base 与 step duration；pre-push 可复用匹配当前 push 的 full 证据，避免发版/合并型验证后仍被 fast not-fast 分支重复拦截。
+
 ## [0.1.1-026] - 2026-05-27 - 优化推云门禁复用
 
 ### 优化 (Changed)

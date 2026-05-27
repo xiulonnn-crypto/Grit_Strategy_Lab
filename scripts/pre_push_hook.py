@@ -326,6 +326,72 @@ def _impact_gate_allows_push(
     )
 
 
+def _full_gate_matches_push(
+    fields: dict[str, str],
+    *,
+    report_text: str,
+    expected_head_sha: str | None,
+    expected_base_sha: str | None,
+    metadata_child_reason: str | None = None,
+) -> tuple[bool, str]:
+    if fields.get("status") != "ok":
+        return False, f"latest full status is {fields.get('status', '<missing>')}, not ok"
+    if fields.get("target") != "all":
+        return False, f"latest full target is {fields.get('target', '<missing>')}, not all"
+    if expected_base_sha and fields.get("base_sha") != expected_base_sha:
+        return False, "latest full base_sha does not match the remote push base"
+    if "duration=" not in report_text or "elapsed_seconds" not in fields:
+        return False, "latest full summary is missing step duration evidence"
+    if not fields.get("head_sha") or fields.get("head_sha") == "<none>":
+        return False, "latest full summary is missing head_sha"
+    if expected_head_sha and fields.get("head_sha") != expected_head_sha:
+        if metadata_child_reason:
+            return True, f"latest full evidence matches validated parent; {metadata_child_reason}"
+        return False, "latest full head_sha does not match current HEAD"
+    return True, "latest full evidence matches current push"
+
+
+def _full_gate_allows_push(
+    repo_root: Path,
+    *,
+    expected_base_sha: str | None,
+    changelog_prepared: bool = False,
+) -> tuple[bool, str]:
+    summary_path = repo_root / "harness" / "reports" / "smoke" / "latest-full-gate.md"
+    if not summary_path.exists():
+        return False, f"latest full summary is missing: {summary_path}"
+
+    report_text = summary_path.read_text(encoding="utf-8")
+    fields = _parse_gate_summary_text(report_text)
+    head_sha = _git_stdout(repo_root, ["rev-parse", "HEAD"])
+    metadata_child_reason: str | None = None
+
+    metadata_child_ok, metadata_child_reason_candidate = _current_head_is_metadata_only_child(
+        repo_root,
+        validated_head_sha=fields.get("head_sha"),
+        current_head_sha=head_sha,
+    )
+    if metadata_child_ok:
+        extra_ok, extra_reason = _metadata_child_reuse_checks(
+            repo_root,
+            validated_head_sha=fields.get("head_sha"),
+            current_head_sha=head_sha,
+            changelog_prepared=changelog_prepared,
+        )
+        if extra_ok:
+            metadata_child_reason = f"{metadata_child_reason_candidate}; {extra_reason}"
+        else:
+            return False, extra_reason
+
+    return _full_gate_matches_push(
+        fields,
+        report_text=report_text,
+        expected_head_sha=head_sha,
+        expected_base_sha=expected_base_sha,
+        metadata_child_reason=metadata_child_reason,
+    )
+
+
 def _run_fast_gate(repo_root: Path, remote: str | None, push_updates: list[list[str]]) -> int:
     script_path = repo_root / "scripts" / "codex-validate-fast.ps1"
     if not script_path.exists():
@@ -362,6 +428,14 @@ def _run_fast_gate(repo_root: Path, remote: str | None, push_updates: list[list[
     if impact_ok:
         print(f"pre-push: {impact_reason}; allowing push without rerunning fast gate.", file=sys.stderr)
         return 0
+    full_ok, full_reason = _full_gate_allows_push(
+        repo_root,
+        expected_base_sha=base_ref,
+        changelog_prepared=True,
+    )
+    if full_ok:
+        print(f"pre-push: {full_reason}; allowing push without rerunning fast gate.", file=sys.stderr)
+        return 0
 
     completed = subprocess.run(command, cwd=repo_root, check=False)
     if completed.returncode == 2:
@@ -376,11 +450,23 @@ def _run_fast_gate(repo_root: Path, remote: str | None, push_updates: list[list[
                 file=sys.stderr,
             )
             return 0
+        full_ok, full_reason = _full_gate_allows_push(
+            repo_root,
+            expected_base_sha=base_ref,
+            changelog_prepared=True,
+        )
+        if full_ok:
+            print(
+                f"pre-push: fast gate returned not-fast, but {full_reason}; allowing push.",
+                file=sys.stderr,
+            )
+            return 0
         print(
             "pre-push: not fast eligible; fast gate did not run broad impacted tests automatically.",
             file=sys.stderr,
         )
         print(f"pre-push: latest impact evidence was not reusable: {impact_reason}", file=sys.stderr)
+        print(f"pre-push: latest full evidence was not reusable: {full_reason}", file=sys.stderr)
         print(
             "pre-push: run `powershell -ExecutionPolicy Bypass -File .\\scripts\\codex-validate-impact.ps1 -Scope Committed` "
             "for impacted validation, or `powershell -ExecutionPolicy Bypass -File .\\scripts\\codex-validate-full.ps1` "

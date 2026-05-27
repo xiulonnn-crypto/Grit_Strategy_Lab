@@ -377,15 +377,15 @@ describe('FactorFactoryPage', () => {
 
   it('shows submitted public factor imports as B3 quarantine results instead of a manual intake queue', async () => {
     const overview = factoryOverview();
-    const externalDisplayName = '[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]';
+    const externalDisplayName = '[外部] - Fama-French 美股研究日频因子 (Daily) [Refined]';
     const externalNameAudit = {
       structured_components: {
         style_family: '[外部]',
         style_family_reason: '来自学术公开因子库，作为外部 Beta 与风格暴露参照，不与自研 Alpha 混同。',
         core_semantic: 'Fama-French 美股研究日频因子',
         frequency_label: 'Daily',
-        governance_tag: 'Raw',
-        governance_reason: 'Raw_F2 证据显示尚未完成 Winsorize、Neutralize、Z-Score 或 Rank 全链路处理。',
+        governance_tag: 'Refined',
+        governance_reason: 'W/N/Z/T 算子灯已全部完成，作为 Refined_F2 展示。',
         benchmark_label: '学术 Beta / 风格暴露',
       },
       expert_review: {

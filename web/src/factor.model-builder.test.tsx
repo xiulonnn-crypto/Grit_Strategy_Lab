@@ -560,6 +560,57 @@ describe('FactorModelBuilderPage', () => {
     });
   });
 
+  it('maps composite candidates from the latest completed diagnostic status when the outer status is sandbox', async () => {
+    const composite = makeFactor({
+      id: 's_alpha_ffblend_resid_mkt_rank',
+      name: '[综合] - FF3 风格复合基石 (等权) [Beta-Free]',
+      diagnostic_status: 'SANDBOX_READY',
+      ui_state: 'needs_calibration',
+      market: 'US',
+      tier_level: 'F3',
+      tier_projection: { key: 'F3', label: 'F3 组合', description: '可组合因子' },
+      factor_level: 'B',
+      factor_level_label: 'B合格',
+      factor_level_projection: { key: 'B', label: 'B合格', description: '合格观察，允许进入组合候选' },
+      op_status: {
+        lights: ['W', 'N', 'Z', 'T'].map((code) => ({ code, key: code, label: code, active: true, status: 'done' })),
+        completed: ['W', 'N', 'Z', 'T'],
+        missing: [],
+        summary: 'WNZT 完成',
+      },
+      latest_diagnostic_summary: {
+        ...makeFactor().latest_diagnostic_summary!,
+        status: 'COMPLETED',
+        rank_ic: 0.0135,
+        ir: 0.5091,
+        coverage: 95.2,
+      },
+      batch_diagnostic_summary: {
+        status: 'COMPLETED',
+        rank_ic: 0.0135,
+        ir: 0.5091,
+        coverage: 95.2,
+      },
+    });
+    const api = {
+      listFactors: vi.fn().mockResolvedValue({ items: [composite], summary: {} }),
+      previewFactorDiagnostics: vi.fn(),
+    } as unknown as Parameters<typeof loadFactorModelOptions>[0];
+
+    const options = await loadFactorModelOptions(api);
+
+    expect(api.previewFactorDiagnostics).not.toHaveBeenCalled();
+    expect(options).toHaveLength(1);
+    expect(options[0]).toMatchObject({
+      id: 's_alpha_ffblend_resid_mkt_rank',
+      diagnosticStatus: 'COMPLETED',
+      factorLevel: 'B',
+      factorLevelLabel: 'B合格',
+      tierLevel: 'F3',
+      opCompleted: ['W', 'N', 'Z', 'T'],
+    });
+  });
+
   it('falls back to single-factor previews when the batch metrics preview fails', async () => {
     const first = makeFactor({
       id: 's_mom_6m_rank',
@@ -763,7 +814,8 @@ describe('FactorModelBuilderPage', () => {
       diagnosticStatus: 'COMPLETED',
       market: 'US',
       tierLevel: 'F3',
-      factorLevel: 'S',
+      factorLevel: 'B',
+      factorLevelLabel: 'B合格',
       opCompleted: ['W', 'N', 'Z', 'T'],
       pitCoveragePct: 100,
       defaultWeight: 100,
@@ -772,6 +824,26 @@ describe('FactorModelBuilderPage', () => {
       ir: 1.34,
       rankIcLabel: 'Rank IC 0.061',
       irLabel: 'IR 1.34',
+      isOnline: true,
+    }, {
+      id: 's_alpha_low_grade_rank',
+      displayName: '低等级组合因子',
+      family: '综合',
+      categoryLabel: '综合',
+      sourceLabel: '自动挖掘',
+      diagnosticStatus: 'COMPLETED',
+      market: 'US',
+      tierLevel: 'F3',
+      factorLevel: 'C',
+      factorLevelLabel: 'C微弱',
+      opCompleted: ['W', 'N', 'Z', 'T'],
+      pitCoveragePct: 100,
+      defaultWeight: 100,
+      defaultDirection: 'HIGH_IS_GOOD',
+      rankIc: 0.012,
+      ir: 0.31,
+      rankIcLabel: 'Rank IC 0.012',
+      irLabel: 'IR 0.31',
       isOnline: true,
     }];
 
@@ -792,6 +864,9 @@ describe('FactorModelBuilderPage', () => {
 
     await waitFor(() => expect(previewFactorModel).toHaveBeenCalled());
     expect(document.querySelector('.factor-model-builder-page--composite')).not.toBeNull();
+    expect(screen.getByText('B合格')).toBeInTheDocument();
+    expect(screen.getAllByText(/S\/A\/B/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText('低等级组合因子')).not.toBeInTheDocument();
     expect(document.querySelectorAll('.check-row label')).toHaveLength(4);
     expect(document.querySelectorAll('.control-grid--four input, .control-grid--four select').length).toBeGreaterThanOrEqual(8);
 

@@ -49,7 +49,7 @@ def _git(repo_root: Path, *args: str) -> str:
 
 
 def _write_repo_files(repo_root: Path, changelog: str, version: str = "0.1.1") -> None:
-    (repo_root / "src" / "grit_backtest_platform").mkdir(parents=True)
+    (repo_root / "src" / "grit_backtest_platform").mkdir(parents=True, exist_ok=True)
     (repo_root / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
     (repo_root / "src" / "grit_backtest_platform" / "_version.py").write_text(
         "from __future__ import annotations\n\n"
@@ -96,6 +96,35 @@ def _write_impact_summary(
         ]
     )
     (summary_dir / "latest-impact-gate.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_full_summary(
+    repo_root: Path,
+    *,
+    head_sha: str,
+    base_sha: str = "",
+    target: str = "all",
+    include_duration: bool = True,
+) -> None:
+    summary_dir = repo_root / "harness" / "reports" / "smoke"
+    summary_dir.mkdir(parents=True)
+    lines = [
+        "# Codex Full Gate",
+        "",
+        "- status: ok",
+        f"- target: {target}",
+        "- elapsed_seconds: 123.4",
+        f"- head_sha: {head_sha}",
+        f"- base_sha: {base_sha}",
+        "",
+        "## Steps",
+    ]
+    if include_duration:
+        lines.append("- [ok] backend fixed entry (duration=60.0s)")
+    else:
+        lines.append("- [ok] backend fixed entry")
+    lines.append("")
+    (summary_dir / "latest-full-gate.md").write_text("\n".join(lines), encoding="utf-8")
 
 
 def test_pre_push_hook_uses_single_remote_sha_as_fast_gate_base() -> None:
@@ -170,6 +199,93 @@ def test_pre_push_accepts_metadata_only_child_of_validated_impact_head() -> None
 
     assert ok is True
     assert "validated parent" in reason
+
+
+def test_pre_push_accepts_matching_full_gate_evidence() -> None:
+    fields = {
+        "status": "ok",
+        "target": "all",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "elapsed_seconds": "812.5",
+    }
+
+    ok, reason = pre_push_hook._full_gate_matches_push(
+        fields,
+        report_text="## Steps\n- [ok] backend fixed entry (duration=610.0s)\n",
+        expected_head_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        expected_base_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+
+    assert ok is True
+    assert "full evidence" in reason
+
+
+def test_pre_push_accepts_metadata_only_child_of_validated_full_head(tmp_path: Path) -> None:
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "config", "user.name", "Test User")
+    _write_repo_files(
+        tmp_path,
+        """# 更新日志
+
+## [Unreleased]
+
+### 修复 (Fixed)
+
+- **初始条目**: 用于测试发布元数据。
+""",
+    )
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "feat: validated full parent")
+    validated_head = _git(tmp_path, "rev-parse", "HEAD")
+    _write_full_summary(tmp_path, head_sha=validated_head)
+
+    _write_repo_files(
+        tmp_path,
+        """# 更新日志
+
+## [Unreleased]
+
+## [0.1.1-002] - 2026-04-15 - 修复
+
+### 修复 (Fixed)
+
+- **初始条目**: 用于测试发布元数据。
+""",
+    )
+    _git(tmp_path, "add", "CHANGELOG.md", "src/grit_backtest_platform/_version.py")
+    _git(tmp_path, "commit", "-m", "docs(changelog): snapshot 0.1.1-002")
+
+    ok, reason = pre_push_hook._full_gate_allows_push(
+        tmp_path,
+        expected_base_sha=None,
+        changelog_prepared=True,
+    )
+
+    assert ok is True
+    assert "validated parent" in reason
+    assert "whitespace" in reason
+
+
+def test_pre_push_rejects_full_gate_without_duration_evidence() -> None:
+    fields = {
+        "status": "ok",
+        "target": "all",
+        "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "elapsed_seconds": "812.5",
+    }
+
+    ok, reason = pre_push_hook._full_gate_matches_push(
+        fields,
+        report_text="## Steps\n- [ok] backend fixed entry\n",
+        expected_head_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        expected_base_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+
+    assert ok is False
+    assert "duration" in reason
 
 
 def test_pre_push_accepts_reusable_working_tree_impact_after_commit(tmp_path: Path) -> None:
@@ -278,6 +394,63 @@ def test_gate_self_test_plan_only_writes_non_latest_summary() -> None:
     assert "validation_content_fingerprint" in fast_script
     assert "Get-ValidationContentFingerprint" in fast_script
     assert "$parameters.SummaryPath = $SummaryPath" in impact_script
+
+
+def test_publish_impact_wrapper_codifies_single_working_tree_gate_flow() -> None:
+    script = (REPO_ROOT / "scripts" / "codex-publish-impact.ps1").read_text(encoding="utf-8")
+
+    assert "codex-validate-impact.ps1" in script
+    assert "'WorkingTree'" in script
+    assert "'Committed'" in script
+    assert "git $($Arguments -join ' ')" in script
+    assert "@('diff', '--cached', '--check', '--')" in script
+    assert "HEAD:$TargetBranch" in script
+    assert "latest-push-attestation.md" in script
+    assert "Invoke-GitCapture -Arguments @('status', '--porcelain')" in script
+    assert "Get-GitLines -Arguments @('status', '--porcelain')" not in script
+
+
+def test_publish_impact_wrapper_guards_trace_assets_and_external_push() -> None:
+    script = (REPO_ROOT / "scripts" / "codex-publish-impact.ps1").read_text(encoding="utf-8")
+
+    assert "ConfirmExternalPush" in script
+    assert "AllowTraceCandidates" in script
+    assert "FAIL|BLOCKED|NOT_CHECKED" in script
+    assert "output/ui-artifact-trace/" in script
+    assert "id-translation\\.csv" in script
+    assert "suggested commit message:" in script
+    assert "CHANGELOG.md" in script
+    assert "src/grit_backtest_platform/_version.py" in script
+
+
+def test_full_gate_summary_records_duration_and_git_context() -> None:
+    script = (REPO_ROOT / "scripts" / "codex-validate-full.ps1").read_text(encoding="utf-8")
+
+    assert "duration=$durationText" in script
+    assert "- elapsed_seconds:" in script
+    assert "- head_sha:" in script
+    assert "- base_sha:" in script
+    assert "git fetch" in script
+    assert "ahead/behind" in script
+    assert "SummaryPath must stay under" in script
+
+
+def test_publish_full_wrapper_codifies_release_publish_flow() -> None:
+    script = (REPO_ROOT / "scripts" / "codex-publish-full.ps1").read_text(encoding="utf-8")
+
+    assert "codex-validate-full.ps1" in script
+    assert "latest-full-push-attestation.md" in script
+    assert "ConfirmExternalPush" in script
+    assert "AllowTraceCandidates" in script
+    assert "HEAD:$TargetBranch" in script
+    assert "Invoke-PushWithMetadataLoop" in script
+    assert "Invoke-FullGate" in script
+    assert "'-Target', $Target" in script
+    assert "IncludeLiveAcceptance" in script
+    assert "StrictGlobalTypes" in script
+    assert "CHANGELOG.md" in script
+    assert "src/grit_backtest_platform/_version.py" in script
+    assert "codex-publish-full only pushes after -Target all" in script
 
 
 def test_pre_push_detects_single_generated_metadata_child(tmp_path: Path) -> None:

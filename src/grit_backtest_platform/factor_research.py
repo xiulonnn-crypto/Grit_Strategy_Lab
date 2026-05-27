@@ -1603,11 +1603,7 @@ def _factor_display_state(
         for key in ("category", "metric", "operator", "canonical_id")
     )
     combined_text = f"{descriptor_text} {expression_lower}"
-    completed = {
-        str(item).strip().upper()
-        for item in ((op_status or {}).get("completed") or [])
-        if str(item).strip()
-    }
+    completed = _factor_display_completed_ops(op_status)
     badges: list[str] = []
     if "winsor" in expression_lower or "W" in completed:
         badges.append("WNZT")
@@ -1721,6 +1717,24 @@ def _factor_display_completed_ops(op_status: Mapping[str, Any] | None = None) ->
     return completed
 
 
+def _factor_display_has_complete_wnzt(op_status: Mapping[str, Any] | None = None) -> bool:
+    return {"W", "N", "Z", "T"}.issubset(_factor_display_completed_ops(op_status))
+
+
+def _factor_display_has_raw_stage_marker(
+    *,
+    canonical: str,
+    descriptor: Mapping[str, Any],
+) -> bool:
+    operator = str(descriptor.get("operator") or "").strip().lower()
+    tokens = {
+        token
+        for token in re.split(r"[^a-z0-9]+", str(canonical or "").strip().lower())
+        if token
+    }
+    return operator == "raw" or "raw" in tokens
+
+
 def _factor_display_structured_governance(
     *,
     badges: Sequence[str],
@@ -1735,7 +1749,11 @@ def _factor_display_structured_governance(
     operator = str(descriptor.get("operator") or "").strip().lower()
     canonical = str(factor_id or descriptor.get("canonical_id") or "").strip().lower()
     completed_ops = _factor_display_completed_ops(op_status)
-    if canonical.endswith("_raw"):
+    raw_stage_marker = _factor_display_has_raw_stage_marker(
+        canonical=canonical,
+        descriptor=descriptor,
+    )
+    if raw_stage_marker:
         return "Refined" if {"W", "N", "Z", "T"}.issubset(completed_ops) else "Raw"
     if _factor_display_is_beta_free(expression=expression, residual_control=residual_control):
         return "Beta-Free"
@@ -2077,6 +2095,54 @@ def _factor_display_stable_sha8(
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8]
 
 
+def _factor_display_replace_governance_suffix(name: Any, governance_level: str) -> str:
+    text = str(name or "").strip()
+    if not text:
+        return text
+    pattern = r"\[(?:Raw|Refined)\]"
+    if re.search(pattern, text):
+        return re.sub(pattern, f"[{governance_level}]", text, count=1)
+    return f"{text} [{governance_level}]"
+
+
+def _factor_display_apply_completed_external_governance(
+    projection: Mapping[str, Any],
+    *,
+    op_status: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    updated = dict(projection)
+    if not _factor_display_has_complete_wnzt(op_status):
+        return updated
+    for key in ("display_name_cn", "base_display_name_cn", "compact_display_name_cn"):
+        if updated.get(key):
+            updated[key] = _factor_display_replace_governance_suffix(updated.get(key), "Refined")
+    badges = [
+        str(item)
+        for item in (updated.get("governance_badges") or [])
+        if str(item).strip() and str(item).strip() != "Raw"
+    ]
+    if "WNZT" not in badges:
+        badges.append("WNZT")
+    updated["governance_badges"] = list(dict.fromkeys(badges))
+    audit = dict(updated.get("name_audit") or {})
+    components = dict(audit.get("structured_components") or {})
+    components.update(
+        {
+            "governance_tag": "Refined",
+            "governance_level": "Refined",
+            "governance_reason": "W/N/Z/T 算子灯已全部完成，作为 Refined_F2 展示。",
+            "audit_gaps": [],
+        }
+    )
+    audit["structured_components"] = components
+    if updated.get("display_name_cn"):
+        audit["new_display_name"] = updated["display_name_cn"]
+    if updated.get("base_display_name_cn"):
+        audit["base_display_name_cn"] = updated["base_display_name_cn"]
+    updated["name_audit"] = audit
+    return updated
+
+
 def factor_display_name_projection_v4(
     *,
     factor_id: str,
@@ -2263,14 +2329,16 @@ def external_factor_import_display_projection_v1(
     factor_name: Any = None,
     metrics: Mapping[str, Any] | None = None,
     previous_display_name: Any = None,
+    op_status: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_key = str(source_id or "").strip().lower()
     dataset = str(dataset_key or factor_id or "").strip()
     dataset_lower = dataset.lower()
     frequency_text = str(frequency or "").strip().upper()
     metric_map = metrics if isinstance(metrics, Mapping) else {}
+    governance_level = "Refined" if _factor_display_has_complete_wnzt(op_status) else "Raw"
     if source_key == "fama_french" and dataset_lower == "fama_french_us_research_factors_daily":
-        display_name = "[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]"
+        display_name = f"[外部] - Fama-French 美股研究日频因子 (Daily) [{governance_level}]"
         short_name = "Fama-French 美股日频因子"
         style_family = "[外部]"
         core_semantic = "Fama-French 美股研究日频因子"
@@ -2284,14 +2352,21 @@ def external_factor_import_display_projection_v1(
         frequency_label = "Daily" if frequency_text == "DAILY" else ("Monthly" if frequency_text == "MONTHLY" else (frequency_text.title() or "当前"))
         source_label = str(source_name or source_id or "外部来源").strip()
         core_semantic = str(factor_name or dataset or factor_id or "外部公开因子").strip()
-        display_name = f"[外部] - {core_semantic} ({frequency_label}) [Raw]"
+        display_name = f"[外部] - {core_semantic} ({frequency_label}) [{governance_level}]"
         short_name = _factor_display_short_name(display_name)
         style_family = "[外部]"
         source_dataset = f"external:{dataset or factor_id or source_key or 'unknown'}"
         style_reason = "来自外部公开或上传源，需与自研 Alpha 展示区分。"
         semantic_reason = "沿用来源数据集或字段名称，便于回溯 manifest 与 parser。"
         frequency_reason = "使用导入作业声明的频率作为窗口标签。"
-    governance_reason = "Raw_F2 证据显示尚未完成 Winsorize、Neutralize、Z-Score 或 Rank 全链路处理。"
+    if governance_level == "Refined":
+        governance_reason = "W/N/Z/T 算子灯已全部完成，作为 Refined_F2 展示。"
+        governance_badges = ["外部", "B3 检疫", "WNZT"]
+        audit_gaps: list[str] = []
+    else:
+        governance_reason = "Raw_F2 证据显示尚未完成 Winsorize、Neutralize、Z-Score 或 Rank 全链路处理。"
+        governance_badges = ["外部", "B3 检疫", "Raw"]
+        audit_gaps = ["Winsorize 未完成", "Neutralize 未完成", "Z-Score 未完成", "Rank 未完成"]
     rank_ic = _safe_round(_coerce_float(metric_map.get("rank_ic")), 4)
     ir = _safe_round(_coerce_float(metric_map.get("ir") if metric_map.get("ir") is not None else metric_map.get("rank_icir")), 4)
     style_corr = _safe_round(abs(_coerce_float(metric_map.get("max_style_correlation"))), 4)
@@ -2303,15 +2378,15 @@ def external_factor_import_display_projection_v1(
         "core_semantic_reason": semantic_reason,
         "frequency_label": frequency_label,
         "frequency_reason": frequency_reason,
-        "governance_tag": "Raw",
+        "governance_tag": governance_level,
         "governance_reason": governance_reason,
         "source_label": source_label,
         "source_dataset": source_dataset,
         "tier_label": "F2",
         "parameter_label": frequency_label,
-        "governance_level": "Raw",
+        "governance_level": governance_level,
         "benchmark_label": "学术 Beta / 风格暴露",
-        "audit_gaps": ["Winsorize 未完成", "Neutralize 未完成", "Z-Score 未完成", "Rank 未完成"],
+        "audit_gaps": audit_gaps,
     }
     expert_review = {
         "summary": "高 IC、低 IR、高换手的外部学术风格因子，更适合作为剥离工具或平滑后的参考信号，不建议直接作为 F3 权重项。",
@@ -2333,7 +2408,7 @@ def external_factor_import_display_projection_v1(
         "display_name_cn": display_name,
         "short_name_cn": short_name,
         "semantic_key": re.sub(r"[^a-z0-9]+", "_", collision_key.lower()).strip("_"),
-        "governance_badges": ["外部", "B3 检疫", "Raw"],
+        "governance_badges": governance_badges,
         "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
         "naming_protocol_version": FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
         "naming_standard_version": FACTOR_DISPLAY_NAME_STANDARD_VERSION,
@@ -2390,7 +2465,7 @@ def _external_import_publish_metadata_projection(
             )
             if item and item != display_name
         ]
-        return {
+        projection = {
             "display_name_cn": display_name,
             "short_name_cn": _factor_display_short_name(display_name),
             "semantic_key": re.sub(
@@ -2414,6 +2489,8 @@ def _external_import_publish_metadata_projection(
             "legacy_name_aliases": list(dict.fromkeys(aliases)),
             "name_audit": dict(name_audit or {}),
         }
+        op_status = factor.get("op_status") if isinstance(factor.get("op_status"), Mapping) else None
+        return _factor_display_apply_completed_external_governance(projection, op_status=op_status)
     return None
 
 
@@ -2438,6 +2515,7 @@ def _external_import_factor_display_projection(
         factor_id=factor_id,
         factor_name=factor.get("stored_name") or factor.get("name") or factor_id,
         previous_display_name=factor.get("stored_name") or factor.get("name"),
+        op_status=factor.get("op_status") if isinstance(factor.get("op_status"), Mapping) else None,
     )
 
 
@@ -7582,6 +7660,9 @@ class FactorResearchService:
         frequency = self._external_frequency(dataset.get("frequency"), fallback=payload.get("frequency"))
         risk_flags = self._external_import_risk_flags(source, manifest, mapping_rows)
         next_actions = self._external_import_next_actions(review_status)
+        if import_mode == "SOURCE_MANIFEST":
+            review_status = "PENDING_REVIEW"
+            next_actions = ["upload_source_file", "inspect_manifest"]
         artifact_paths = {
             "uploaded_file_id": file_id or None,
             "raw_file_ref": f"external_factor_uploaded_files/{file_id}" if file_id else None,
@@ -7880,6 +7961,49 @@ class FactorResearchService:
             },
         }
 
+    def list_external_factor_import_precheck_jobs(self, *, limit: int = 20) -> dict[str, Any]:
+        limit = max(1, min(int(limit or 20), 50))
+        rows = self.storage.fetch_all(
+            """
+            SELECT job.*
+            FROM external_factor_import_jobs AS job
+            WHERE job.status = 'REVIEW_GATED'
+              AND job.review_status IN ('PENDING_REVIEW', 'NEEDS_MAPPING', 'READY_FOR_REVIEW')
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM factor_quarantine_candidates AS candidate
+                  WHERE candidate.source_mining_job_id = job.id
+              )
+            ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        count_row = self.storage.fetch_one(
+            """
+            SELECT COUNT(*) AS total
+            FROM external_factor_import_jobs AS job
+            WHERE job.status = 'REVIEW_GATED'
+              AND job.review_status IN ('PENDING_REVIEW', 'NEEDS_MAPPING', 'READY_FOR_REVIEW')
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM factor_quarantine_candidates AS candidate
+                  WHERE candidate.source_mining_job_id = job.id
+              )
+            """
+        )
+        items = [self._external_import_review_queue_item(row) for row in rows]
+        return {
+            "items": items,
+            "summary": {
+                "total": int((count_row or {}).get("total") or 0),
+                "items_returned": len(items),
+                "review_boundary": "SOURCE_MANIFEST_PRECHECK",
+                "queue_state": "AWAITING_PRECHECK_REVIEW",
+                "direct_publish_allowed": False,
+            },
+        }
+
     def list_external_factor_import_quarantine_candidates(self, *, limit: int = 20) -> dict[str, Any]:
         limit = max(1, min(int(limit or 20), 100))
         rows = self.storage.fetch_all(
@@ -7926,12 +8050,23 @@ class FactorResearchService:
         manifest = metrics.get("manifest") if isinstance(metrics.get("manifest"), Mapping) else {}
         warnings = {str(item).upper() for item in manifest.get("warnings") or []}
         rejected_reason = str(row.get("rejected_reason") or "")
+        is_external_import = str(row.get("source_mining_job_id") or "").startswith("extimp_")
+        display_name = str(metrics.get("external_import_display_name") or "")
         return (
             "SOURCE_FILE_NOT_MATERIALIZED" in warnings
             or "源文件尚未物化" in rejected_reason
             or (
-                str(row.get("source_mining_job_id") or "").startswith("extimp_")
+                is_external_import
                 and int(manifest.get("row_count") or 0) <= 0
+            )
+            or (
+                is_external_import
+                and str(row.get("status") or "").upper() == "PASSED"
+                and int(manifest.get("row_count") or 0) > 0
+                and (
+                    not str(row.get("target_factor_id") or "").strip()
+                    or "[Raw]" in display_name
+                )
             )
         )
 
@@ -8303,6 +8438,58 @@ class FactorResearchService:
         source_ready = row_count > 0 and date_count > 0 and factor_count > 0
         status = "PASSED" if source_ready else "REJECTED"
         publish_status = "ELIGIBLE" if source_ready else "BLOCKED"
+        updated_metrics = dict(metrics)
+        target_factor_id: str | None = None
+        if source_ready:
+            expression = self._external_import_expression(
+                row,
+                str(updated_metrics.get("external_factor_id") or row.get("dataset_key") or "external_factor"),
+            )
+            updated_metrics.update(
+                {
+                    "target_layer": "L2",
+                    "refined_f2": True,
+                    "wnzt_complete": True,
+                    "wnzt_missing": [],
+                    "wnzt_evidence": {
+                        "complete": True,
+                        "source": "PUBLIC_FACTOR_IMPORT_B3",
+                        "reason": "外部来源已通过 manifest、字段映射与时间序列完整性检疫。",
+                    },
+                    "operator_chain": list(PHASE2_L2_OPERATOR_CHAIN),
+                    "processing_status": "WNZT_PROCESSED",
+                    "processing_status_label": "WNZT 已处理",
+                }
+            )
+            published_identity = _published_factor_identity(expression, target_layer="L2", metrics=updated_metrics)
+            target_factor_id = published_identity.factor_id
+            candidate_op_status = self._factor_processing_ops(
+                {
+                    "id": target_factor_id,
+                    "source": "PUBLIC_FACTOR_IMPORT",
+                    "expression": expression,
+                    "descriptor": published_identity.descriptor,
+                    "latest_diagnostic_summary": {
+                        "operator_chain": updated_metrics.get("operator_chain"),
+                        "wnzt_complete": updated_metrics.get("wnzt_complete"),
+                        "wnzt_evidence": updated_metrics.get("wnzt_evidence"),
+                        "scoring_detail": updated_metrics.get("scoring_detail"),
+                    },
+                }
+            )
+            display_projection = external_factor_import_display_projection_v1(
+                source_id=updated_metrics.get("external_source_id"),
+                dataset_key=updated_metrics.get("external_dataset_key"),
+                frequency=updated_metrics.get("external_frequency"),
+                source_name=row.get("source_name"),
+                factor_id=updated_metrics.get("external_factor_id") or target_factor_id,
+                factor_name=updated_metrics.get("external_factor_name"),
+                metrics=updated_metrics,
+                previous_display_name=updated_metrics.get("external_import_display_name"),
+                op_status=candidate_op_status,
+            )
+            updated_metrics["external_import_display_name"] = display_projection["display_name_cn"]
+            updated_metrics["external_import_name_audit"] = display_projection.get("name_audit")
         reason = (
             "外部公开因子源文件已物化并完成 B3 源数据检疫；已进入可上线发布候选，正式发布仍需通过发布准入与历史重复过滤。"
             if source_ready
@@ -8397,7 +8584,7 @@ class FactorResearchService:
                 status,
                 publish_status,
                 dumps(gate_summary),
-                dumps(dict(metrics)),
+                dumps(updated_metrics),
                 dumps({"status": publish_status, "reason": reason, "rule_version": FACTOR_QUARANTINE_RULE_VERSION}),
                 dumps({"status": "DIAGNOSTIC_ONLY", "source": "PUBLIC_FACTOR_IMPORT"}),
                 now,
@@ -8405,6 +8592,11 @@ class FactorResearchService:
                 candidate_id,
             ),
         )
+        if target_factor_id:
+            self.storage.execute(
+                "UPDATE factor_quarantine_candidates SET target_factor_id = ?, updated_at = ? WHERE id = ?",
+                (target_factor_id, now, candidate_id),
+            )
         return self.get_factor_quarantine_candidate(candidate_id)
 
     def _mark_external_import_candidate_quarantine_blocked(
@@ -8556,6 +8748,8 @@ class FactorResearchService:
     def _external_factor_source_to_api(self, source: Mapping[str, Any]) -> dict[str, Any]:
         access_policy = self._external_source_access_policy(source)
         supported_import_modes = ["REFERENCE_ONLY"] if access_policy == "REFERENCE_ONLY" else ["LOCAL_FILE"]
+        if access_policy in {"PUBLIC_DOWNLOAD", "MANUAL_UPLOAD", "LICENSE_REQUIRED"}:
+            supported_import_modes.insert(0, "SOURCE_MANIFEST")
         if access_policy == "PUBLIC_DOWNLOAD":
             supported_import_modes.insert(0, "AUTO_DOWNLOAD")
         return {
@@ -8902,6 +9096,21 @@ class FactorResearchService:
     def ensure_default_factors(self) -> None:
         now = iso_now()
         with self.storage.connection() as conn:
+            def auto_mined_display_name_for_repair(factor_id: str, expression: str) -> str:
+                op_status = self._factor_processing_ops(
+                    {
+                        "id": factor_id,
+                        "source": "AUTO_MINED",
+                        "expression": expression,
+                    }
+                )
+                return factor_display_name_projection_v4(
+                    factor_id=factor_id,
+                    source="AUTO_MINED",
+                    expression=expression,
+                    op_status=op_status,
+                )["display_name_cn"]
+
             for seed in DEFAULT_SEED_FACTORS:
                 seed_display_name = factor_display_name_projection_v4(
                     factor_id=seed.id,
@@ -9066,7 +9275,7 @@ class FactorResearchService:
                 expression = str(row.get("expression") or "")
                 desired_id = _auto_mined_factor_id_from_expression(expression)
                 if _is_legacy_auto_mined_factor_id(old_id, expression):
-                    repaired_name = _auto_mined_factor_name(desired_id, expression)
+                    repaired_name = auto_mined_display_name_for_repair(desired_id, expression)
                     collision = conn.execute(
                         "SELECT id FROM factor_definitions WHERE id = ? AND id <> ? AND deleted_at IS NULL",
                         (desired_id, old_id),
@@ -9186,7 +9395,7 @@ class FactorResearchService:
                         )
                         conn.execute("DELETE FROM factor_definitions WHERE id = ?", (old_id,))
                     continue
-                repaired_name = _auto_mined_factor_name(old_id, expression)
+                repaired_name = auto_mined_display_name_for_repair(old_id, expression)
                 if repaired_name != str(row.get("name") or ""):
                     conn.execute(
                         """
@@ -10344,24 +10553,19 @@ class FactorResearchService:
         left: Mapping[str, Any],
         right: Mapping[str, Any],
     ) -> dict[str, Any]:
+        if not self._factor_same_operator_status_lights(left, right):
+            return {
+                "eligible": False,
+                "reason": "operator_status_light_mismatch",
+                "operator_status_light": {
+                    "candidate": self._factor_operator_status_light_context(left),
+                    "peer": self._factor_operator_status_light_context(right),
+                    "same": False,
+                },
+            }
         measured = self._factor_measured_pair_correlation(left, right)
         if _coerce_float(measured.get("correlation")) > FACTOR_PRUNE_CORRELATION_THRESHOLD:
             return measured
-        left_source = str(left.get("source") or "").upper()
-        right_source = str(right.get("source") or "").upper()
-        if left_source == "AUTO_MINED" and right_source == "AUTO_MINED" and self._factor_same_prune_cluster(left, right):
-            correlation = self._factor_pair_correlation(left, right)
-            if correlation > FACTOR_PRUNE_CORRELATION_THRESHOLD:
-                return {
-                    "eligible": True,
-                    "correlation": _safe_round(correlation, 4) or 0.0,
-                    "evidence_source": "FACTOR_LIBRARY_HEATMAP_PROXY",
-                    "evidence_quality": "library_projection",
-                    "method": "factor_library_cluster_projection",
-                    "sample_count": measured.get("sample_count"),
-                    "as_of": measured.get("as_of"),
-                    "measured_pair": dict(measured),
-                }
         return measured
 
     @staticmethod
@@ -10446,6 +10650,35 @@ class FactorResearchService:
         right_key = self._factor_prune_cluster_key(right)
         return bool(left_key and right_key and left_key == right_key)
 
+    @classmethod
+    def _factor_operator_status_light_signature(cls, factor: Mapping[str, Any]) -> tuple[str, ...]:
+        op_status = factor.get("op_status") if isinstance(factor.get("op_status"), Mapping) else None
+        if op_status is None:
+            op_status = cls._factor_processing_ops(factor)
+        return tuple(sorted(_factor_display_completed_ops(op_status)))
+
+    @classmethod
+    def _factor_operator_status_light_key(cls, factor: Mapping[str, Any]) -> str:
+        signature = cls._factor_operator_status_light_signature(factor)
+        return "".join(signature) if signature else "NONE"
+
+    @classmethod
+    def _factor_operator_status_light_context(cls, factor: Mapping[str, Any]) -> dict[str, Any]:
+        op_status = factor.get("op_status") if isinstance(factor.get("op_status"), Mapping) else None
+        if op_status is None:
+            op_status = cls._factor_processing_ops(factor)
+        signature = cls._factor_operator_status_light_signature({**dict(factor), "op_status": op_status})
+        return {
+            "completed": list(signature),
+            "missing": [code for code, _key, _label in FACTOR_OP_LIGHTS if code not in signature],
+            "summary": op_status.get("summary") if isinstance(op_status, Mapping) else None,
+            "key": "".join(signature) if signature else "NONE",
+        }
+
+    @classmethod
+    def _factor_same_operator_status_lights(cls, left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+        return cls._factor_operator_status_light_signature(left) == cls._factor_operator_status_light_signature(right)
+
     def _factor_prune_evidence(
         self,
         factor: Mapping[str, Any],
@@ -10503,6 +10736,8 @@ class FactorResearchService:
                 continue
             if not self._factor_same_prune_cluster(factor, peer):
                 continue
+            if not self._factor_same_operator_status_lights(factor, peer):
+                continue
             if not self._latest_diagnostic_summary(peer):
                 continue
             peer_score = self._factor_mvp_score(peer)
@@ -10515,6 +10750,8 @@ class FactorResearchService:
                         if not contender_factor_id or contender_factor_id in {factor_id, peer_id}:
                             continue
                         if self._factor_is_offline(contender) or not self._factor_same_prune_cluster(peer, contender):
+                            continue
+                        if not self._factor_same_operator_status_lights(peer, contender):
                             continue
                         if not self._latest_diagnostic_summary(contender):
                             continue
@@ -10553,6 +10790,11 @@ class FactorResearchService:
                 "method": node.get("method") or "aligned_rank_ic_series_pearson",
                 "sample_count": node.get("sample_count"),
                 "as_of": node.get("as_of"),
+                "operator_status_light": {
+                    "candidate": self._factor_operator_status_light_context(factor),
+                    "mvp": self._factor_operator_status_light_context(peer),
+                    "same": True,
+                },
                 "comparison": {
                     "candidate": {
                         "factor_id": factor_id,
@@ -12327,6 +12569,20 @@ class FactorResearchService:
         target_layer = str(candidate.get("target_layer") or metrics.get("target_layer") or "L2").upper()
         published_identity = _published_factor_identity(expression, target_layer=target_layer, metrics=metrics)
         factor_id = str(candidate.get("target_factor_id") or published_identity.factor_id)
+        candidate_op_status = self._factor_processing_ops(
+            {
+                "id": factor_id,
+                "source": "PUBLIC_FACTOR_IMPORT" if str(metrics.get("source") or "").upper() == "PUBLIC_FACTOR_IMPORT" else "AUTO_MINED",
+                "expression": expression,
+                "descriptor": published_identity.descriptor,
+                "latest_diagnostic_summary": {
+                    "operator_chain": candidate.get("operator_chain") or metrics.get("operator_chain"),
+                    "wnzt_complete": candidate.get("wnzt_complete") if candidate.get("wnzt_complete") is not None else metrics.get("wnzt_complete"),
+                    "wnzt_evidence": candidate.get("wnzt_evidence") or metrics.get("wnzt_evidence"),
+                    "scoring_detail": candidate.get("scoring_detail") or metrics.get("scoring_detail"),
+                },
+            }
+        )
         naming_projection = factor_display_name_projection_v4(
             factor_id=factor_id,
             name=candidate.get("factor_name") or candidate.get("name"),
@@ -12334,6 +12590,7 @@ class FactorResearchService:
             expression=expression,
             descriptor=published_identity.descriptor,
             tier_level=published_identity.tier,
+            op_status=candidate_op_status,
             neutralization_scope=metrics.get("neutralization_scope") or metrics.get("orthogonality_intent"),
             residual_control=metrics.get("residual_control") or ("market_beta" if "beta" in expression.lower() else None),
         )
@@ -12351,6 +12608,7 @@ class FactorResearchService:
                 factor_name=metrics.get("external_factor_name"),
                 metrics=metrics,
                 previous_display_name=metrics.get("external_import_display_name") or candidate.get("factor_name") or candidate.get("name"),
+                op_status=candidate_op_status,
             )
             metrics = dict(metrics)
             metrics["external_import_display_name"] = external_projection["display_name_cn"]
@@ -12369,6 +12627,7 @@ class FactorResearchService:
         name_audit["compact_display_name_cn"] = naming_projection.get("display_name_cn")
         name_audit["new_display_name"] = structured_display_name
         candidate.update(naming_projection)
+        candidate["op_status"] = candidate_op_status
         candidate["compact_display_name_cn"] = naming_projection.get("display_name_cn")
         candidate["display_name_cn"] = structured_display_name
         candidate["factor_name"] = structured_display_name
@@ -13846,6 +14105,22 @@ class FactorResearchService:
         composition_methods = candidate.get("composition_methods") or candidate_metrics.get("composition_methods") or []
         investment_logic = str(candidate.get("investment_logic") or candidate_metrics.get("investment_logic") or "").strip()
         pit_evidence = run_summary.get("pit_evidence") if isinstance(run_summary.get("pit_evidence"), Mapping) else {}
+        candidate_op_status = self._factor_processing_ops(
+            {
+                "id": factor_id,
+                "source": "PUBLIC_FACTOR_IMPORT" if is_external_import else "AUTO_MINED",
+                "expression": expression,
+                "descriptor": published_identity.descriptor,
+                "latest_diagnostic_summary": {
+                    "operator_chain": operator_chain,
+                    "wnzt_complete": candidate.get("wnzt_complete")
+                    if candidate.get("wnzt_complete") is not None
+                    else candidate_metrics.get("wnzt_complete"),
+                    "wnzt_evidence": candidate.get("wnzt_evidence") or candidate_metrics.get("wnzt_evidence"),
+                    "scoring_detail": candidate.get("scoring_detail") or candidate_metrics.get("scoring_detail"),
+                },
+            }
+        )
         if is_external_import:
             naming_projection = external_factor_import_display_projection_v1(
                 source_id=candidate_metrics.get("external_source_id"),
@@ -13855,6 +14130,7 @@ class FactorResearchService:
                 factor_name=candidate_metrics.get("external_factor_name"),
                 metrics=candidate_metrics,
                 previous_display_name=candidate_metrics.get("external_import_display_name") or candidate.get("display_name_cn"),
+                op_status=candidate_op_status,
             )
         else:
             naming_projection = factor_display_name_projection_v4(
@@ -13864,6 +14140,7 @@ class FactorResearchService:
                 expression=expression,
                 descriptor=published_identity.descriptor,
                 tier_level=published_identity.tier,
+                op_status=candidate_op_status,
                 neutralization_scope=candidate_metrics.get("neutralization_scope") or candidate_metrics.get("orthogonality_intent"),
                 residual_control=candidate_metrics.get("residual_control") or ("market_beta" if "beta" in expression.lower() else None),
             )
@@ -13878,6 +14155,7 @@ class FactorResearchService:
                     "descriptor": published_identity.descriptor,
                     "parent_factor_ids": candidate_metrics.get("source_factor_ids") or [],
                     "operator_chain": operator_chain,
+                    "op_status": candidate_op_status,
                     **naming_projection,
                 }
             )
@@ -14247,7 +14525,7 @@ class FactorResearchService:
                     "command": "PRUNE",
                     "label": "冗余裁剪",
                     "title": f"{factor.get('name') or factor_id} 标记为冗余挂起",
-                    "detail": "同簇相关性超过 0.90，保留 IR/覆盖率更优的 MVP 因子，其余因子不参与多因子合成权重分配。",
+                    "detail": "同簇、同算子状态灯且相关性超过 0.90，保留 IR/覆盖率更优的 MVP 因子，其余因子不参与多因子合成权重分配。",
                     "factor_ids": [factor_id],
                     "affected_factor_ids": [factor_id],
                     "keep_factor_id": prune_evidence.get("keep_factor_id"),
@@ -14260,7 +14538,8 @@ class FactorResearchService:
                         "evidence_quality": prune_evidence.get("evidence_quality"),
                         "sample_count": prune_evidence.get("sample_count"),
                         "method": prune_evidence.get("method"),
-                        "selection": "keep_higher_ir_then_coverage",
+                        "operator_status_light": prune_evidence.get("operator_status_light"),
+                        "selection": "same_cluster_same_operator_status_keep_higher_ir_then_coverage",
                     },
                     "severity": "warning",
                 }
@@ -15394,6 +15673,7 @@ class FactorResearchService:
                     "sample_count": evidence.get("sample_count"),
                     "method": evidence.get("method"),
                     "as_of": evidence.get("as_of"),
+                    "operator_status_light": evidence.get("operator_status_light"),
                     "comparison": evidence.get("comparison") or {},
                     "request_detail": dict(detail_payload),
                 }
@@ -15479,20 +15759,34 @@ class FactorResearchService:
         offline_corr = _coerce_float(offline_detail.get("correlation"), 0.0)
         quarantine_evidence = self._quarantine_redundancy_evidence(factor_id)
         measured_evidence: dict[str, Any] = {}
+        operator_status_light: dict[str, Any] = {}
+        operator_status_mismatch = False
         if keep_factor_id:
             try:
                 keep_factor = factor_lookup.get(keep_factor_id) if factor_lookup else None
                 if keep_factor is None:
                     keep_factor = self.get_factor(keep_factor_id)
+                operator_status_mismatch = not self._factor_same_operator_status_lights(factor, keep_factor)
+                operator_status_light = {
+                    "candidate": self._factor_operator_status_light_context(factor),
+                    "mvp": self._factor_operator_status_light_context(keep_factor),
+                    "same": not operator_status_mismatch,
+                }
                 measured_evidence = self._factor_measured_pair_correlation(factor, keep_factor)
             except KeyError:
                 measured_evidence = {"eligible": False, "reason": "keep_factor_missing"}
         measured_corr = _coerce_float(measured_evidence.get("correlation"), 0.0)
         quarantine_corr = _coerce_float(quarantine_evidence.get("correlation"), 0.0)
         real_corr = max(measured_corr, quarantine_corr)
-        has_blocking_real_evidence = real_corr > FACTOR_PRUNE_CORRELATION_THRESHOLD
+        has_blocking_real_evidence = (
+            real_corr > FACTOR_PRUNE_CORRELATION_THRESHOLD
+            and not operator_status_mismatch
+        )
         recoverable = not has_blocking_real_evidence
         reason = (
+            "operator_status_light_mismatch"
+            if operator_status_mismatch
+            else
             "measured_redundancy_still_above_threshold"
             if has_blocking_real_evidence
             else "pruned_without_measured_redundancy_evidence"
@@ -15515,6 +15809,7 @@ class FactorResearchService:
                 "stored_offline_detail": dict(offline_detail),
                 "measured_pair": dict(measured_evidence),
                 "quarantine": dict(quarantine_evidence),
+                "operator_status_light": dict(operator_status_light),
             },
         }
 
@@ -17023,6 +17318,15 @@ class FactorResearchService:
             for item in resolved_factors
             if str(item.get("id") or "").strip()
         }
+
+        def _audit_governance_tag(audit: Any) -> str:
+            if not isinstance(audit, Mapping):
+                return ""
+            components = audit.get("structured_components")
+            if not isinstance(components, Mapping):
+                return ""
+            return str(components.get("governance_tag") or "").strip()
+
         for row, original_factor in pending:
             factor = resolved_by_id.get(str(original_factor.get("id") or ""), original_factor)
             previous_name = str(row.get("name") or "").strip()
@@ -17031,6 +17335,32 @@ class FactorResearchService:
                 skipped_count += 1
                 continue
             changed = previous_name != new_name
+            latest_version = self.storage.fetch_one(
+                """
+                SELECT metadata_json
+                FROM factor_versions
+                WHERE factor_id = ?
+                ORDER BY version DESC
+                LIMIT 1
+                """,
+                (row.get("id"),),
+            )
+            latest_metadata = loads((latest_version or {}).get("metadata_json"), {})
+            latest_publish_metadata = (
+                latest_metadata.get("publish_metadata")
+                if isinstance(latest_metadata, Mapping)
+                else {}
+            )
+            if not isinstance(latest_publish_metadata, Mapping):
+                latest_publish_metadata = {}
+            latest_governance_tag = _audit_governance_tag(latest_publish_metadata.get("name_audit"))
+            next_governance_tag = _audit_governance_tag(factor.get("name_audit"))
+            metadata_changed = (
+                str(latest_publish_metadata.get("display_name_cn") or "").strip() != new_name
+                or str(latest_publish_metadata.get("base_display_name_cn") or "").strip()
+                != str(factor.get("base_display_name_cn") or new_name).strip()
+                or latest_governance_tag != next_governance_tag
+            )
             item = {
                 "factor_id": row.get("id"),
                 "canonical_id": factor.get("descriptor", {}).get("canonical_id") if isinstance(factor.get("descriptor"), Mapping) else row.get("id"),
@@ -17050,8 +17380,9 @@ class FactorResearchService:
                 "rename_reason": "display_name_v4_backfill",
                 "legacy_name_aliases": factor.get("legacy_name_aliases") or [],
                 "would_change": changed,
+                "publish_metadata_would_change": metadata_changed,
             }
-            if changed:
+            if changed or metadata_changed:
                 items.append(item)
         if not dry_run and items:
             with self.storage.connection() as conn:
@@ -17065,6 +17396,57 @@ class FactorResearchService:
                         """,
                         (item["new_display_name"], now, factor_id),
                     )
+                    version_row = conn.execute(
+                        """
+                        SELECT id, metadata_json
+                        FROM factor_versions
+                        WHERE factor_id = ?
+                        ORDER BY version DESC
+                        LIMIT 1
+                        """,
+                        (factor_id,),
+                    ).fetchone()
+                    if version_row is not None:
+                        version_metadata = loads(version_row["metadata_json"], {})
+                        if not isinstance(version_metadata, dict):
+                            version_metadata = {}
+                        publish_metadata = version_metadata.get("publish_metadata")
+                        if not isinstance(publish_metadata, dict):
+                            publish_metadata = {}
+                        name_audit = item.get("name_audit") if isinstance(item.get("name_audit"), Mapping) else {}
+                        publish_metadata.update(
+                            {
+                                "naming_rule_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
+                                "naming_protocol_version": FACTOR_DISPLAY_NAME_PROTOCOL_VERSION,
+                                "naming_standard_version": FACTOR_DISPLAY_NAME_STANDARD_VERSION,
+                                "dedupe_strategy": FACTOR_DISPLAY_NAME_DEDUPE_STRATEGY,
+                                "display_name_cn": item["new_display_name"],
+                                "base_display_name_cn": item.get("base_display_name_cn") or item["new_display_name"],
+                                "name_collision_key": item.get("name_collision_key") or "",
+                                "name_dedupe_suffix": item.get("name_dedupe_suffix") or "",
+                                "name_collision_group": item.get("name_collision_group") or [],
+                                "governance_badges": item.get("governance_badges") or [],
+                                "name_audit": name_audit,
+                                "name_schema_version": FACTOR_DISPLAY_NAME_SCHEMA_VERSION,
+                                "backfilled_at": now,
+                                "backfill_reason": "display_name_v4_backfill",
+                            }
+                        )
+                        version_metadata["publish_metadata"] = publish_metadata
+                        version_metadata["publish_naming_rule"] = (
+                            version_metadata.get("publish_naming_rule")
+                            or publish_metadata.get("naming_rule_version")
+                            or FACTOR_DISPLAY_NAME_SCHEMA_VERSION
+                        )
+                        version_metadata["name_schema_version"] = FACTOR_DISPLAY_NAME_SCHEMA_VERSION
+                        conn.execute(
+                            """
+                            UPDATE factor_versions
+                            SET metadata_json = ?
+                            WHERE id = ?
+                            """,
+                            (dumps(version_metadata), version_row["id"]),
+                        )
                     conn.execute(
                         """
                         INSERT INTO factor_display_name_renames (

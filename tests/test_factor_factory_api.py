@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
+from grit_backtest_platform._real_service_rebuilt import FACTOR_FACTORY_SYNC_QUARANTINE_LIMIT
 from grit_backtest_platform.factor_research import FactorResearchService
 from grit_backtest_platform.storage import dumps
 from tests.api_test_support import assert_ok, create_test_client
@@ -286,6 +287,181 @@ def test_factor_factory_run_auto_intakes_and_executes_quarantine() -> None:
     second_page = assert_ok(client.get(f"/factor-quarantine/candidates?source_job_id={mining_job_id}&page=2&page_size=50"))
     assert second_page["summary"]["page"] == 2
     assert second_page["summary"]["total"] == quarantine["summary"]["total"]
+
+
+def test_factor_factory_overview_does_not_sync_large_existing_quarantine_batch() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-factory-large-existing-quarantine"))
+    service = client.app.state.service
+    now = "2099-01-01T00:00:00Z"
+    run_id = "ffr_large_existing_quarantine"
+    mining_job_id = "mine_op_large_existing_quarantine"
+    operator_engine = {
+        "backend": "pandas_bottleneck",
+        "deduped_formula_count": 60,
+        "generated_formula_count": 60,
+        "raw_f2_batch_delivered_count": 60,
+        "refined_f2_batch_delivered_count": 60,
+        "top_preview_count": 50,
+        "artifact_refs": {},
+    }
+    service.storage.insert_json_row(
+        "factor_mining_jobs",
+        {
+            "id": mining_job_id,
+            "status": "COMPLETED",
+            "request_json": dumps({"operator_engine": operator_engine}),
+            "progress_json": dumps({"current": 60, "total": 60}),
+            "summary_json": dumps({"generation_mode": "OPERATOR_ENGINE", "operator_engine": operator_engine}),
+            "top_candidates_json": dumps([]),
+            "failed_samples_json": dumps([]),
+            "created_at": now,
+            "updated_at": now,
+            "completed_at": now,
+            "error_message": None,
+        },
+    )
+    service.storage.insert_json_row(
+        "factor_factory_runs",
+        {
+            "id": run_id,
+            "profile_id": "default",
+            "run_date": "2099-01-01",
+            "trigger": "MANUAL",
+            "status": "COMPLETED",
+            "request_json": dumps({"generation_mode": "OPERATOR_ENGINE"}),
+            "gate_policy_json": dumps({"pit_gate_mode": "DIAGNOSTIC_ONLY"}),
+            "config_signature": "large-existing",
+            "mining_job_id": mining_job_id,
+            "summary_json": dumps({"operator_engine": operator_engine}),
+            "started_at": now,
+            "completed_at": now,
+            "created_at": now,
+            "updated_at": now,
+            "error_message": None,
+        },
+    )
+    old_run_id = "ffr_large_existing_quarantine_old"
+    service.storage.insert_json_row(
+        "factor_factory_runs",
+        {
+            "id": old_run_id,
+            "profile_id": "default",
+            "run_date": "2098-12-31",
+            "trigger": "MANUAL",
+            "status": "COMPLETED",
+            "request_json": dumps({"generation_mode": "OPERATOR_ENGINE"}),
+            "gate_policy_json": dumps({"pit_gate_mode": "DIAGNOSTIC_ONLY"}),
+            "config_signature": "large-existing-old",
+            "mining_job_id": mining_job_id,
+            "summary_json": dumps({
+                "operator_engine": operator_engine,
+                "mining_status": "COMPLETED",
+                "top_candidate_count": 0,
+                "failed_sample_count": 0,
+                "auto_quarantine_status": "COMPLETED",
+                "funnel": {
+                    "mined_candidates": 60,
+                    "quarantine_candidates": 0,
+                    "passed": 0,
+                    "review_or_observation": 0,
+                    "rejected": 0,
+                    "published": 0,
+                },
+            }),
+            "started_at": "2098-12-31T00:00:00Z",
+            "completed_at": "2098-12-31T00:00:00Z",
+            "created_at": "2098-12-31T00:00:00Z",
+            "updated_at": "2098-12-31T00:00:00Z",
+            "error_message": None,
+        },
+    )
+    for index in range(FACTOR_FACTORY_SYNC_QUARANTINE_LIMIT + 1):
+        service.storage.insert_json_row(
+            "factor_quarantine_candidates",
+            {
+                "id": f"fq_large_existing_{index:03d}",
+                "mining_candidate_id": f"cand_large_existing_{index:03d}",
+                "source_mining_job_id": mining_job_id,
+                "expression": f"ZScore(Neutralize(Winsorize(TS_Rank(TS_Return(Close, {index + 1}), 3), method=\"MAD\"), by=\"industry\"))",
+                "status": "PASSED" if index == 0 else "PENDING",
+                "publish_status": "ELIGIBLE" if index == 0 else "BLOCKED",
+                "gate_summary_json": dumps({"target_layer": "L2", "redundancy_pruning": "PASSED"}),
+                "cluster_id": f"large_existing_{index:03d}",
+                "candidate_metrics_json": dumps({
+                    "rank_ic": 0.04,
+                    "ir": 0.2,
+                    "coverage": 95.0,
+                    "target_layer": "L2",
+                    "raw_f2": True,
+                    "refined_f2": True,
+                    "wnzt_complete": True,
+                    "pipeline_version": "raw_refined_f2_v2",
+                }),
+                "failure_samples_json": dumps([]),
+                "pit_evidence_json": dumps({"status": "DIAGNOSTIC_ONLY"}),
+                "publish_eligibility_json": dumps({"status": "BLOCKED", "reason": "等待有界检疫"}),
+                "target_factor_id": None,
+                "created_at": now,
+                "updated_at": now,
+                "published_at": None,
+                "rejected_reason": None,
+            },
+        )
+
+    original_intake = service.factor_quarantine_intake
+    original_blockers = service._factor_factory_library_publish_blockers  # noqa: SLF001
+    original_refresh = service._refresh_factor_factory_run_row  # noqa: SLF001
+    original_list_mining_jobs = service.list_factor_mining_jobs
+    original_get_mining_job = service.get_factor_mining_job
+    refresh_calls = []
+    list_mining_job_calls = 0
+    get_mining_job_calls = 0
+
+    def fail_if_sync_intake(_request):
+        raise AssertionError("overview must not synchronously re-intake large existing quarantine batches")
+
+    def fail_if_sync_blockers():
+        raise AssertionError("overview must not synchronously build library blockers for partial large batches")
+
+    def counted_refresh(row, **kwargs):
+        refresh_calls.append(row.get("id"))
+        return original_refresh(row, **kwargs)
+
+    def counted_list_mining_jobs():
+        nonlocal list_mining_job_calls
+        list_mining_job_calls += 1
+        return original_list_mining_jobs()
+
+    def counted_get_mining_job(job_id):
+        nonlocal get_mining_job_calls
+        get_mining_job_calls += 1
+        return original_get_mining_job(job_id)
+
+    service.factor_quarantine_intake = fail_if_sync_intake
+    service._factor_factory_library_publish_blockers = fail_if_sync_blockers  # noqa: SLF001
+    service._refresh_factor_factory_run_row = counted_refresh  # noqa: SLF001
+    service.list_factor_mining_jobs = counted_list_mining_jobs
+    service.get_factor_mining_job = counted_get_mining_job
+    try:
+        overview = assert_ok(client.get("/factor-factory/overview"))
+    finally:
+        service.factor_quarantine_intake = original_intake
+        service._factor_factory_library_publish_blockers = original_blockers  # noqa: SLF001
+        service._refresh_factor_factory_run_row = original_refresh  # noqa: SLF001
+        service.list_factor_mining_jobs = original_list_mining_jobs
+        service.get_factor_mining_job = original_get_mining_job
+
+    summary = overview["latest_run"]["summary"]
+    assert summary["auto_quarantine_status"] == "PARTIAL"
+    assert summary["auto_intake_count"] == FACTOR_FACTORY_SYNC_QUARANTINE_LIMIT + 1
+    assert summary["auto_quarantine_count"] == 1
+    assert summary["auto_quarantine_pending_count"] == FACTOR_FACTORY_SYNC_QUARANTINE_LIMIT
+    assert summary["redundancy_pruning"]["status"] == "DEFERRED"
+    assert summary["redundancy_pruning"]["reason"] == "existing_quarantine_exceeds_sync_limit"
+    assert overview["publishable_factors"] == []
+    assert refresh_calls == [run_id]
+    assert list_mining_job_calls == 1
+    assert get_mining_job_calls == 0
 
 
 def test_factor_factory_refines_online_raw_f2_library_factors_to_quarantine() -> None:
@@ -696,9 +872,15 @@ def test_factor_factory_publishable_applies_online_prune_evidence_to_semantic_du
                     "criteria": {
                         "correlation": 0.94,
                         "threshold": 0.9,
-                        "evidence_source": "FACTOR_LIBRARY_HEATMAP_PROXY",
+                        "evidence_source": "MEASURED_DIAGNOSTIC_IC_SERIES",
+                        "sample_count": 12,
                     },
                     "offline_detail": {
+                        "operator_status_light": {
+                            "candidate": {"key": "NTWZ", "completed": ["N", "T", "W", "Z"]},
+                            "mvp": {"key": "NTWZ", "completed": ["N", "T", "W", "Z"]},
+                            "same": True,
+                        },
                         "comparison": {
                             "candidate": {
                                 "factor_id": "s_f2_mom_ret_21d_px",
@@ -716,12 +898,17 @@ def test_factor_factory_publishable_applies_online_prune_evidence_to_semantic_du
                     "command": "PRUNE",
                     "factor_ids": ["s_f2_mom_raw_cur_m_mom_longdra_126d_rank"],
                     "criteria": {
-                        "correlation": 0.9,
+                        "correlation": 0.94,
                         "threshold": 0.9,
-                        "evidence_source": "MEASURED_DIAGNOSTIC_IC_SERIES",
-                        "sample_count": 12,
+                        "evidence_source": "FACTOR_LIBRARY_HEATMAP_PROXY",
+                        "sample_count": 0,
                     },
                     "offline_detail": {
+                        "operator_status_light": {
+                            "candidate": {"key": "NTWZ", "completed": ["N", "T", "W", "Z"]},
+                            "mvp": {"key": "NTWZ", "completed": ["N", "T", "W", "Z"]},
+                            "same": True,
+                        },
                         "comparison": {
                             "candidate": {
                                 "factor_id": "s_f2_mom_raw_cur_m_mom_longdra_126d_rank",
@@ -766,7 +953,111 @@ def test_factor_factory_publishable_applies_online_prune_evidence_to_semantic_du
     assert by_status["fq_threshold_survivor"]["publish_status"] == "ELIGIBLE"
 
 
-def test_factor_factory_publishable_prunes_same_cluster_heatmap_group() -> None:
+def test_factor_factory_publishable_ignores_prune_action_with_different_operator_status_light(monkeypatch) -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-factory-publishable-status-light"))
+    service = client.app.state.service
+    storage = service.storage
+    source_job_id = "mine_publishable_status_light"
+    now = "2026-05-22T09:30:00Z"
+    expression = (
+        'ZScore(Neutralize(Winsorize(TS_Rank(TS_Return(f1_return_21d_base, 3), 3), '
+        'method="MAD"), by="industry,market_cap"))'
+    )
+    metrics = {
+        "rank_ic": 0.05,
+        "ir": 0.5,
+        "score": 0.061,
+        "fitness_score": 0.061,
+        "target_layer": "L2",
+        "source_factor_ids": ["f1_return_21d_base"],
+        "raw_f2": True,
+        "refined_f2": True,
+        "wnzt_complete": True,
+        "pipeline_version": "raw_refined_f2_v2",
+        "raw_expression": expression,
+        "refined_expression": expression,
+    }
+    storage.insert_json_row(
+        "factor_quarantine_candidates",
+        {
+            "id": "fq_status_light_candidate",
+            "mining_candidate_id": "rawf2_status_light_candidate",
+            "source_mining_job_id": source_job_id,
+            "expression": expression,
+            "status": "PASSED",
+            "publish_status": "ELIGIBLE",
+            "gate_summary_json": dumps({"redundancy_pruning": "PASSED"}),
+            "cluster_id": "cluster_status_light",
+            "candidate_metrics_json": dumps(metrics),
+            "failure_samples_json": dumps([]),
+            "pit_evidence_json": dumps({"status": "READY"}),
+            "publish_eligibility_json": dumps({"status": "ELIGIBLE"}),
+            "target_factor_id": None,
+            "created_at": now,
+            "updated_at": now,
+            "published_at": None,
+            "rejected_reason": None,
+        },
+    )
+
+    factor_service = service._factor_research_service()  # noqa: SLF001
+
+    def governance_overview_stub() -> dict:
+        return {
+            "actions": [
+                {
+                    "id": "gq_prune_status_light_mismatch",
+                    "kind": "PRUNE",
+                    "command": "PRUNE",
+                    "factor_ids": ["s_f2_mom_ret_21d_px"],
+                    "criteria": {
+                        "correlation": 0.94,
+                        "threshold": 0.9,
+                        "evidence_source": "MEASURED_DIAGNOSTIC_IC_SERIES",
+                        "operator_status_light": {
+                            "candidate": {"key": "NTWZ", "completed": ["N", "T", "W", "Z"]},
+                            "mvp": {"key": "NONE", "completed": []},
+                            "same": False,
+                        },
+                    },
+                    "offline_detail": {
+                        "comparison": {
+                            "candidate": {
+                                "factor_id": "s_f2_mom_ret_21d_px",
+                                "factor_name": "平滑收益率 (21d) [Refined-Rank]",
+                            },
+                            "mvp": {
+                                "factor_id": "s_f2_mom_raw_cur_px",
+                                "factor_name": "平滑收益率 (当前) [Raw]",
+                            },
+                        },
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(factor_service, "get_factor_governance_overview", governance_overview_stub)
+
+    publishable = service._factor_factory_publishable_factors(  # noqa: SLF001
+        source_mining_job_id=source_job_id,
+        fallback_items=[],
+    )
+    assert [row["candidate_id"] for row in publishable] == ["fq_status_light_candidate"]
+
+    pruning = service._apply_factor_factory_redundancy_pruning(source_mining_job_id=source_job_id)  # noqa: SLF001
+    assert pruning["library_pruned"] == 0
+    current = storage.fetch_one(
+        """
+        SELECT status, publish_status
+        FROM factor_quarantine_candidates
+        WHERE id = 'fq_status_light_candidate'
+        """
+    )
+    assert current["status"] == "PASSED"
+    assert current["publish_status"] == "ELIGIBLE"
+
+
+def test_factor_factory_publishable_keeps_same_cluster_heatmap_group_without_identity_evidence() -> None:
     client, _db_path = create_test_client(_runtime_dir("factor-factory-publishable-heatmap-group"))
     service = client.app.state.service
     storage = service.storage
@@ -835,11 +1126,15 @@ def test_factor_factory_publishable_prunes_same_cluster_heatmap_group() -> None:
         fallback_items=[],
     )
 
-    assert [row["candidate_id"] for row in publishable] == ["fq_smooth_return_21d"]
+    assert [row["candidate_id"] for row in publishable] == [
+        "fq_smooth_return_21d",
+        "fq_smooth_return_current",
+        "fq_smooth_return_1d",
+    ]
 
     pruning = service._apply_factor_factory_redundancy_pruning(source_mining_job_id=source_job_id)  # noqa: SLF001
-    assert pruning["kept"] == 1
-    assert pruning["pruned"] == 2
+    assert pruning["kept"] == 3
+    assert pruning["pruned"] == 0
 
     rows = storage.fetch_all(
         """
@@ -851,11 +1146,11 @@ def test_factor_factory_publishable_prunes_same_cluster_heatmap_group() -> None:
     )
     by_status = {row["id"]: row for row in rows}
     assert by_status["fq_smooth_return_21d"]["status"] == "PASSED"
-    assert by_status["fq_smooth_return_current"]["status"] == "REJECTED"
-    assert by_status["fq_smooth_return_1d"]["publish_status"] == "BLOCKED"
+    assert by_status["fq_smooth_return_current"]["status"] == "PASSED"
+    assert by_status["fq_smooth_return_1d"]["publish_status"] == "ELIGIBLE"
     current_gate = json.loads(by_status["fq_smooth_return_current"]["gate_summary_json"])
-    assert current_gate["redundancy_pruning"] == "FAILED"
-    assert current_gate["redundancy_kept_candidate_id"] == "fq_smooth_return_21d"
+    assert current_gate["redundancy_pruning"] == "PASSED"
+    assert "redundancy_kept_candidate_id" not in current_gate
 
 
 def test_factor_factory_run_now_does_not_enable_daily_automation() -> None:

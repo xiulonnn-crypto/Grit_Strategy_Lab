@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type MouseEvent } from 'react';
 import './public-factor-import-center-page.css';
 
 type SourceKind = 'auto' | 'manual' | 'reference';
@@ -6,7 +6,16 @@ type SourceTone = 'ready' | 'warning' | 'reference';
 type DatasetStatus = 'importable' | 'review' | 'reference';
 type ModalKind = 'precheck' | 'local-file' | null;
 type EntryMode = 'precheck' | 'local-file';
-type DatasetFilter = 'all' | DatasetStatus;
+type DatasetFilter = 'all' | 'pending-precheck' | 'pending-review' | 'submitted';
+type ViewModelLoadState = 'idle' | 'loading' | 'ready' | 'error';
+type DatasetActionKind = 'audit' | 'precheck' | 'submit-review';
+type PrecheckImportMode = 'AUTO_DOWNLOAD' | 'SOURCE_MANIFEST';
+
+const DATASET_STATUS_LABELS = {
+  precheck: '待预检',
+  review: '待送检',
+  submitted: '已送检',
+} as const;
 
 export type PublicFactorImportSource = {
   id: string;
@@ -53,6 +62,13 @@ export type PublicFactorImportManifest = {
   reviewStatus?: string;
   nextActions?: string[];
   submitReady?: boolean;
+  reviewOutcome?: string;
+  quarantineResult?: string;
+  publishStatus?: string;
+  factorStatus?: string;
+  factorName?: string;
+  quarantineCandidateId?: string;
+  targetFactorId?: string;
 };
 
 export type PublicFactorImportViewModel = {
@@ -60,6 +76,7 @@ export type PublicFactorImportViewModel = {
   datasets: PublicFactorImportDataset[];
   mappings: PublicFactorImportMapping[];
   mappingsByDataset?: Record<string, PublicFactorImportMapping[]>;
+  manifestsByDataset?: Record<string, PublicFactorImportManifest>;
   manifest: PublicFactorImportManifest;
   activeSourceId: string;
   activeDatasetId: string;
@@ -71,6 +88,7 @@ export type PublicFactorImportApi = {
   createPrecheck?: (payload: {
     sourceId: string;
     datasetId: string;
+    importMode: PrecheckImportMode;
     frequency: string;
     usage: string;
     parserMode: string;
@@ -150,7 +168,6 @@ const FALLBACK_VIEW_MODEL: PublicFactorImportViewModel = {
       coverage: '1963-07 至今',
       status: 'importable',
       fieldCount: 6,
-      statusLabel: '候选模板',
       actionLabel: '查看 manifest',
     },
     {
@@ -162,7 +179,6 @@ const FALLBACK_VIEW_MODEL: PublicFactorImportViewModel = {
       coverage: '1926-11 至今',
       status: 'importable',
       fieldCount: 2,
-      statusLabel: '可生成模板',
       actionLabel: '生成模板',
     },
     {
@@ -174,7 +190,6 @@ const FALLBACK_VIEW_MODEL: PublicFactorImportViewModel = {
       coverage: '许可待核',
       status: 'review',
       fieldCount: 4,
-      statusLabel: '需许可确认',
       actionLabel: '送入复核',
     },
     {
@@ -186,7 +201,6 @@ const FALLBACK_VIEW_MODEL: PublicFactorImportViewModel = {
       coverage: '许可待核',
       status: 'reference',
       fieldCount: 3,
-      statusLabel: '手动上传',
       actionLabel: '重新解析',
     },
   ],
@@ -346,9 +360,9 @@ const ENTRY_OPTIONS: Array<{
 
 const DATASET_FILTERS: Array<{ key: DatasetFilter; label: string }> = [
   { key: 'all', label: '全部' },
-  { key: 'importable', label: '可导入' },
-  { key: 'review', label: '待复核' },
-  { key: 'reference', label: '参考' },
+  { key: 'submitted', label: DATASET_STATUS_LABELS.submitted },
+  { key: 'pending-precheck', label: DATASET_STATUS_LABELS.precheck },
+  { key: 'pending-review', label: DATASET_STATUS_LABELS.review },
 ];
 
 const TEMPLATE_LINKS = [
@@ -389,7 +403,14 @@ function mergeViewModel(
     sources: incoming.sources?.length ? incoming.sources : base.sources,
     datasets: incoming.datasets?.length ? incoming.datasets : base.datasets,
     mappings: incoming.mappings?.length ? incoming.mappings : base.mappings,
-    mappingsByDataset: incoming.mappingsByDataset || base.mappingsByDataset,
+    mappingsByDataset: {
+      ...(base.mappingsByDataset ?? {}),
+      ...(incoming.mappingsByDataset ?? {}),
+    },
+    manifestsByDataset: {
+      ...(base.manifestsByDataset ?? {}),
+      ...(incoming.manifestsByDataset ?? {}),
+    },
     manifest: incoming.manifest || base.manifest,
   };
 }
@@ -421,6 +442,7 @@ function isViewModelPatch(value: unknown): value is Partial<PublicFactorImportVi
     patch.datasets ||
     patch.mappings ||
     patch.mappingsByDataset ||
+    patch.manifestsByDataset ||
     patch.manifest ||
     patch.activeSourceId ||
     patch.activeDatasetId
@@ -434,6 +456,30 @@ function manifestReviewStatus(manifest: PublicFactorImportManifest): string {
 function manifestIsSubmitted(manifest: PublicFactorImportManifest): boolean {
   const status = manifestReviewStatus(manifest);
   return status === 'SUBMITTED' || (manifest.nextActions || []).some((action) => action.includes('b3_quarantine'));
+}
+
+function manifestIsReadyForReview(manifest: PublicFactorImportManifest): boolean {
+  return manifestReviewStatus(manifest) === 'READY_FOR_REVIEW';
+}
+
+function manifestCanSubmitReview(manifest: PublicFactorImportManifest): boolean {
+  if (!manifest.jobId.trim() || manifestIsSubmitted(manifest)) {
+    return false;
+  }
+  if (manifestIsReadyForReview(manifest) && manifest.submitReady) {
+    return true;
+  }
+  const nextActions = (manifest.nextActions || []).map((action) => action.toLowerCase());
+  return (
+    manifestReviewStatus(manifest) === 'PENDING_REVIEW' &&
+    nextActions.includes('inspect_manifest') &&
+    !nextActions.includes('complete_semantic_mapping')
+  );
+}
+
+function manifestIsInReviewPreparation(manifest: PublicFactorImportManifest): boolean {
+  const status = manifestReviewStatus(manifest);
+  return status === 'PENDING_REVIEW' || status === 'NEEDS_MAPPING' || status === 'READY_FOR_REVIEW';
 }
 
 function manifestRailStatusLabel(manifest: PublicFactorImportManifest): string {
@@ -463,6 +509,120 @@ function submitReviewButtonLabel(manifest: PublicFactorImportManifest): string {
   return '送入复核';
 }
 
+function datasetManifestKeys(dataset: PublicFactorImportDataset | undefined): string[] {
+  const keys = [dataset?.id, dataset?.key].filter(Boolean) as string[];
+  const haystack = `${dataset?.id || ''} ${dataset?.key || ''} ${dataset?.name || ''} ${dataset?.sourceName || ''}`.toLowerCase();
+  if (haystack.includes('ff5') || haystack.includes('ff_us_5f') || haystack.includes('5 factors') || haystack.includes('research_factors_daily')) {
+    keys.push('fama_french_us_research_factors_daily');
+  }
+  if (
+    haystack.includes('ff_us_mom') ||
+    haystack.includes('research_factors_monthly') ||
+    ((haystack.includes('fama') || haystack.includes('french')) && haystack.includes('mom'))
+  ) {
+    keys.push('fama_french_us_research_factors_monthly');
+  }
+  if (haystack.includes('aqr_public_style_factors') || haystack.includes('qmj')) {
+    keys.push('aqr_public_style_factors');
+  }
+  return Array.from(new Set(keys));
+}
+
+function manifestMatchesDataset(
+  manifest: PublicFactorImportManifest | undefined,
+  dataset: PublicFactorImportDataset | undefined,
+): boolean {
+  if (!manifest || !dataset) {
+    return false;
+  }
+  const manifestKey = manifest.datasetKey.trim();
+  return datasetManifestKeys(dataset).includes(manifestKey);
+}
+
+function pendingManifestForSelection(
+  source: PublicFactorImportSource | undefined,
+  dataset: PublicFactorImportDataset | undefined,
+  templateManifest: PublicFactorImportManifest,
+): PublicFactorImportManifest {
+  return {
+    jobId: '',
+    sourceName: safeText(source?.name, safeText(dataset?.sourceName, '待选择公开源')),
+    datasetKey: safeText(dataset?.key || dataset?.id, '待创建预检'),
+    asOfDate: '',
+    parserVersion: safeText(templateManifest.parserVersion, 'public_us_factor_template_v1'),
+    rawFileHash: '等待文件 hash',
+    rowCount: 0,
+    artifactPath: '请先新建预检或导入本地文件',
+    reviewNote: '当前数据集尚未生成可送检 manifest，请先完成预检、语义映射与 manifest 确认。',
+    reviewStatus: 'NOT_STARTED',
+    nextActions: ['create_precheck', 'semantic_mapping', 'inspect_manifest'],
+    submitReady: false,
+  };
+}
+
+function manifestForDataset(
+  model: PublicFactorImportViewModel,
+  dataset: PublicFactorImportDataset | undefined,
+  source: PublicFactorImportSource | undefined,
+): PublicFactorImportManifest {
+  for (const key of datasetManifestKeys(dataset)) {
+    const datasetManifest = model.manifestsByDataset?.[key];
+    if (datasetManifest) {
+      return datasetManifest;
+    }
+  }
+  if (manifestMatchesDataset(model.manifest, dataset)) {
+    return model.manifest;
+  }
+  return pendingManifestForSelection(source, dataset, model.manifest);
+}
+
+function datasetHasSubmittedManifest(
+  model: PublicFactorImportViewModel,
+  dataset: PublicFactorImportDataset,
+): boolean {
+  return manifestIsSubmitted(manifestForDataset(model, dataset, sourceForDataset(model.sources, dataset)));
+}
+
+function sourceSubmittedDatasetCount(
+  model: PublicFactorImportViewModel,
+  source: PublicFactorImportSource,
+): number {
+  return model.datasets.filter((dataset) => sourceMatchesDataset(source, dataset) && datasetHasSubmittedManifest(model, dataset)).length;
+}
+
+function datasetDisplayStatusLabel(
+  _dataset: PublicFactorImportDataset,
+  manifest: PublicFactorImportManifest,
+): string {
+  if (manifestIsSubmitted(manifest)) {
+    return DATASET_STATUS_LABELS.submitted;
+  }
+  if (manifestIsInReviewPreparation(manifest)) {
+    return DATASET_STATUS_LABELS.review;
+  }
+  return DATASET_STATUS_LABELS.precheck;
+}
+
+function datasetDisplayAction(
+  dataset: PublicFactorImportDataset,
+  manifest: PublicFactorImportManifest,
+): { label: string; kind: DatasetActionKind } | null {
+  if (manifestIsSubmitted(manifest)) {
+    return { label: '查看审计', kind: 'audit' };
+  }
+  if (manifestIsReadyForReview(manifest) && manifest.submitReady && manifest.jobId.trim()) {
+    return { label: '送入复核', kind: 'submit-review' };
+  }
+  if (manifest.jobId.trim() && manifestIsInReviewPreparation(manifest)) {
+    return { label: '查看 manifest', kind: 'audit' };
+  }
+  if (datasetDisplayStatusLabel(dataset, manifest) === DATASET_STATUS_LABELS.precheck) {
+    return { label: '新建预检', kind: 'precheck' };
+  }
+  return null;
+}
+
 function sourceToneLabel(source: PublicFactorImportSource): string {
   if (source.tone === 'ready') {
     return source.kind === 'auto' ? '可自动导入' : '已准备';
@@ -473,24 +633,8 @@ function sourceToneLabel(source: PublicFactorImportSource): string {
   return '参考源';
 }
 
-function datasetStatusLabel(status: DatasetStatus): string {
-  if (status === 'importable') {
-    return '可生成模板';
-  }
-  if (status === 'review') {
-    return '需许可确认';
-  }
-  return '手动上传';
-}
-
-function datasetActionLabel(status: DatasetStatus): string {
-  if (status === 'importable') {
-    return '查看 manifest';
-  }
-  if (status === 'review') {
-    return '送入复核';
-  }
-  return '重新解析';
+function datasetStatusLabel(_status: DatasetStatus): string {
+  return DATASET_STATUS_LABELS.precheck;
 }
 
 function sourceMatchesDataset(
@@ -508,8 +652,23 @@ function sourceMatchesDataset(
   return false;
 }
 
-function datasetMatchesFilter(dataset: PublicFactorImportDataset, filter: DatasetFilter): boolean {
-  return filter === 'all' || dataset.status === filter;
+function datasetMatchesFilter(
+  model: PublicFactorImportViewModel,
+  dataset: PublicFactorImportDataset,
+  filter: DatasetFilter,
+): boolean {
+  if (filter === 'all') {
+    return true;
+  }
+  const manifest = manifestForDataset(model, dataset, sourceForDataset(model.sources, dataset));
+  const statusText = datasetDisplayStatusLabel(dataset, manifest);
+  if (filter === 'submitted') {
+    return statusText === DATASET_STATUS_LABELS.submitted;
+  }
+  if (filter === 'pending-review') {
+    return statusText === DATASET_STATUS_LABELS.review;
+  }
+  return statusText === DATASET_STATUS_LABELS.precheck;
 }
 
 function sourceForDataset(
@@ -549,6 +708,9 @@ export function PublicFactorImportCenterPage({
 }: PublicFactorImportCenterPageProps): JSX.Element {
   const [remoteViewModel, setRemoteViewModel] =
     useState<Partial<PublicFactorImportViewModel> | null>(null);
+  const [viewModelLoadState, setViewModelLoadState] = useState<ViewModelLoadState>(
+    api?.loadViewModel ? 'loading' : 'idle',
+  );
   const [entryMode, setEntryMode] = useState<EntryMode>('precheck');
   const [datasetFilter, setDatasetFilter] = useState<DatasetFilter>('all');
   const [activeSourceId, setActiveSourceId] = useState<string | null>(null);
@@ -560,20 +722,24 @@ export function PublicFactorImportCenterPage({
   useEffect(() => {
     let alive = true;
     if (!api?.loadViewModel) {
+      setViewModelLoadState('idle');
       return () => {
         alive = false;
       };
     }
+    setViewModelLoadState('loading');
     api
       .loadViewModel()
       .then((next) => {
         if (alive) {
           setRemoteViewModel(next || null);
+          setViewModelLoadState('ready');
         }
       })
       .catch(() => {
         if (alive) {
-          setActionMessage('API 暂不可用，已切换到本地安全预览。');
+          setRemoteViewModel(null);
+          setViewModelLoadState('error');
         }
       });
     return () => {
@@ -593,9 +759,16 @@ export function PublicFactorImportCenterPage({
   const activeDataset =
     model.datasets.find((dataset) => dataset.id === selectedDatasetId) || model.datasets[0];
   const activeMappings = mappingsForDataset(model, activeDataset);
-  const visibleDatasets = model.datasets.filter((dataset) => datasetMatchesFilter(dataset, datasetFilter));
-  const submittedManifest = manifestIsSubmitted(model.manifest);
-  const canSubmitReview = Boolean(model.manifest.submitReady && model.manifest.jobId.trim() && !submittedManifest);
+  const activeManifest = manifestForDataset(model, activeDataset, activeSource);
+  const visibleDatasets = model.datasets.filter((dataset) => datasetMatchesFilter(model, dataset, datasetFilter));
+  const submittedManifest = manifestIsSubmitted(activeManifest);
+  const canSubmitReview = manifestCanSubmitReview(activeManifest);
+  const waitingForInitialViewModel = Boolean(
+    api?.loadViewModel && !viewModel && !remoteViewModel && viewModelLoadState === 'loading',
+  );
+  const initialViewModelFailed = Boolean(
+    api?.loadViewModel && !viewModel && !remoteViewModel && viewModelLoadState === 'error',
+  );
 
   const metrics = [
     model.sources.filter((source) => source.kind === 'auto').length + 1,
@@ -637,7 +810,7 @@ export function PublicFactorImportCenterPage({
 
   function selectDatasetFilter(filter: DatasetFilter): void {
     setDatasetFilter(filter);
-    const firstDataset = model.datasets.find((dataset) => datasetMatchesFilter(dataset, filter));
+    const firstDataset = model.datasets.find((dataset) => datasetMatchesFilter(model, dataset, filter));
     if (firstDataset) {
       selectDataset(firstDataset);
     }
@@ -656,12 +829,15 @@ export function PublicFactorImportCenterPage({
   }
 
   async function submitPrecheck(): Promise<void> {
+    const sourceKind = activeSource?.kind ?? 'auto';
+    const importMode: PrecheckImportMode = sourceKind === 'auto' ? 'AUTO_DOWNLOAD' : 'SOURCE_MANIFEST';
     const payload = {
       sourceId: activeSource?.id || model.activeSourceId,
       datasetId: activeDataset?.id || model.activeDatasetId,
-        frequency: activeDataset?.frequency || '日频',
+      importMode,
+      frequency: activeDataset?.frequency || '日频',
       usage: '基准模板与风格暴露解释',
-      parserMode: '公开下载后解析',
+      parserMode: importMode === 'AUTO_DOWNLOAD' ? '公开下载后解析' : '来源 manifest 预检',
       boundary: '候选模板，不直接发布',
       note: '生成 manifest 后进入语义映射与复核链路。',
     };
@@ -695,16 +871,20 @@ export function PublicFactorImportCenterPage({
   }
 
   async function submitReview(): Promise<void> {
-    if (submittedManifest) {
+    await submitReviewForManifest(activeManifest);
+  }
+
+  async function submitReviewForManifest(manifest: PublicFactorImportManifest): Promise<void> {
+    if (manifestIsSubmitted(manifest)) {
       setActionMessage('该导入作业已送检并进入 B3 检疫结果链路，无需重复提交。');
       return;
     }
-    if (!canSubmitReview) {
+    if (!manifestCanSubmitReview(manifest)) {
       setActionMessage('请先新建预检，并确认语义映射与 manifest 状态为 READY_FOR_REVIEW。');
       return;
     }
     try {
-      const result = await api?.submitReview?.({ jobId: model.manifest.jobId });
+      const result = await api?.submitReview?.({ jobId: manifest.jobId });
       applyApiResult(result);
       setActionMessage('已进入 B3 检疫，系统会直接给出检疫结果；通过后仍需发布准入控制。');
     } catch {
@@ -713,11 +893,57 @@ export function PublicFactorImportCenterPage({
   }
 
   function handleDownloadManifest(): void {
-    setActionMessage(`manifest 下载已准备：${model.manifest.jobId}`);
+    setActionMessage(`manifest 下载已准备：${activeManifest.jobId}`);
   }
 
   function handleOpenArtifact(): void {
-    setActionMessage(`artifact 路径已确认：${model.manifest.artifactPath}`);
+    setActionMessage(`artifact 路径已确认：${activeManifest.artifactPath}`);
+  }
+
+  function handleDatasetAction(
+    dataset: PublicFactorImportDataset,
+    manifest: PublicFactorImportManifest,
+    action: { label: string; kind: DatasetActionKind },
+    event: MouseEvent<HTMLButtonElement>,
+  ): void {
+    event.stopPropagation();
+    selectDataset(dataset);
+    if (action.kind === 'precheck') {
+      openModal('precheck');
+      return;
+    }
+    if (action.kind === 'submit-review') {
+      void submitReviewForManifest(manifest);
+      return;
+    }
+    const auditSummary = [
+      manifest.reviewOutcome,
+      manifest.factorName,
+      manifest.factorStatus || manifest.publishStatus,
+    ].filter(Boolean).join(' · ');
+    setActionMessage(`已打开送检审计：${safeText(manifest.jobId)}${auditSummary ? ` · ${auditSummary}` : ''}`);
+  }
+
+  if (waitingForInitialViewModel) {
+    return (
+      <main className="pfic-page" data-testid="public-factor-import-center">
+        <section className="pfic-loading-state" role="status" aria-live="polite">
+          <strong>正在同步公开源与送检状态</strong>
+          <span>请稍候...</span>
+        </section>
+      </main>
+    );
+  }
+
+  if (initialViewModelFailed) {
+    return (
+      <main className="pfic-page" data-testid="public-factor-import-center">
+        <section className="pfic-loading-state pfic-loading-state-error" role="alert">
+          <strong>公开源状态同步失败</strong>
+          <span>请刷新页面或检查本地服务。</span>
+        </section>
+      </main>
+    );
   }
 
   return (
@@ -757,14 +983,6 @@ export function PublicFactorImportCenterPage({
           >
             导入本地文件
           </button>
-          <button
-            type="button"
-            className="pfic-button pfic-button-primary pfic-action-create-precheck"
-            data-open-modal="precheck"
-            onClick={() => openModal('precheck')}
-          >
-            新建预检
-          </button>
         </div>
       </section>
 
@@ -790,7 +1008,10 @@ export function PublicFactorImportCenterPage({
             <span>{formatCount(model.sources.length)} 个源</span>
           </div>
           <div className="pfic-source-list">
-            {model.sources.map((source) => (
+            {model.sources.map((source) => {
+              const submittedCount = sourceSubmittedDatasetCount(model, source);
+              const sourceBadges = submittedCount > 0 ? [...source.badges, '已送检'] : source.badges;
+              return (
               <button
                 type="button"
                 key={source.id}
@@ -807,9 +1028,9 @@ export function PublicFactorImportCenterPage({
                   </em>
                 </span>
                 <span className="pfic-source-badges">
-                  {source.badges.map((badge) => (
+                  {sourceBadges.map((badge) => (
                     <i
-                      className={badge.includes('自动') ? 'pfic-chip-green' : 'pfic-chip-amber'}
+                      className={badge.includes('自动') || badge === '已送检' ? 'pfic-chip-green' : 'pfic-chip-amber'}
                       key={badge}
                     >
                       {badge}
@@ -819,7 +1040,8 @@ export function PublicFactorImportCenterPage({
                 </span>
                 <span className="pfic-source-description">{safeText(source.description)}</span>
               </button>
-            ))}
+              );
+            })}
           </div>
         </aside>
 
@@ -829,7 +1051,7 @@ export function PublicFactorImportCenterPage({
               <h2>入库流程</h2>
               <p>公开源和本地文件汇入同一套预检、映射与复核链路</p>
             </div>
-            <span>{manifestFlowStatusLabel(model.manifest)}</span>
+            <span>{manifestFlowStatusLabel(activeManifest)}</span>
           </div>
           <div className="pfic-flow-grid flow-steps">
             {FLOW_STEPS.map((step, index) => (
@@ -877,11 +1099,15 @@ export function PublicFactorImportCenterPage({
                 </thead>
                 <tbody>
                   {visibleDatasets.map((dataset) => {
-                    const statusText = safeText(dataset.statusLabel, datasetStatusLabel(dataset.status));
-                    const actionText = safeText(dataset.actionLabel, datasetActionLabel(dataset.status));
+                    const datasetSource = sourceForDataset(model.sources, dataset);
+                    const datasetManifest = manifestForDataset(model, dataset, datasetSource);
+                    const datasetSubmitted = manifestIsSubmitted(datasetManifest);
+                    const statusText = datasetDisplayStatusLabel(dataset, datasetManifest);
+                    const action = datasetDisplayAction(dataset, datasetManifest);
                     return (
                       <tr
                         className={dataset.id === selectedDatasetId ? 'pfic-dataset-row pfic-dataset-row-selected' : 'pfic-dataset-row'}
+                        data-manifest-job-id={datasetManifest.jobId || undefined}
                         key={dataset.id}
                         onClick={() => selectDataset(dataset)}
                       >
@@ -894,14 +1120,22 @@ export function PublicFactorImportCenterPage({
                         <td>{safeText(dataset.coverage)}</td>
                         <td>{formatCount(dataset.fieldCount)}</td>
                         <td>
-                          <em className={dataset.status === 'review' || dataset.status === 'reference' ? 'pfic-chip-amber' : 'pfic-chip-green'}>
+                          <em className={datasetSubmitted || dataset.status === 'importable' ? 'pfic-chip-green' : 'pfic-chip-amber'}>
                             {statusText}
                           </em>
                         </td>
                         <td>
-                          <button type="button" className="pfic-text-action" onClick={() => selectDataset(dataset)}>
-                            {actionText}
-                          </button>
+                          {action ? (
+                            <button
+                              type="button"
+                              className="pfic-text-action"
+                              onClick={(event) => handleDatasetAction(dataset, datasetManifest, action, event)}
+                            >
+                              {action.label}
+                            </button>
+                          ) : (
+                            <span className="pfic-muted-action">等待 manifest</span>
+                          )}
                         </td>
                       </tr>
                     );
@@ -959,26 +1193,26 @@ export function PublicFactorImportCenterPage({
               <h2>Manifest 审计</h2>
               <p>作业、hash 与 artifact 证据</p>
             </div>
-            <span>{manifestRailStatusLabel(model.manifest)}</span>
+            <span>{manifestRailStatusLabel(activeManifest)}</span>
           </div>
           <section className="pfic-manifest-card">
             <h3>导入作业</h3>
             <dl>
               <div>
                 <dt>作业 ID</dt>
-                <dd>{safeText(model.manifest.jobId)}</dd>
+                <dd>{safeText(activeManifest.jobId)}</dd>
               </div>
               <div>
                 <dt>来源</dt>
-                <dd>{safeText(model.manifest.sourceName)}</dd>
+                <dd>{safeText(activeManifest.sourceName)}</dd>
               </div>
               <div>
                 <dt>数据集</dt>
-                <dd>{safeText(model.manifest.datasetKey)}</dd>
+                <dd>{safeText(activeManifest.datasetKey)}</dd>
               </div>
               <div>
                 <dt>日期</dt>
-                <dd>{safeText(model.manifest.asOfDate)}</dd>
+                <dd>{safeText(activeManifest.asOfDate)}</dd>
               </div>
             </dl>
           </section>
@@ -987,30 +1221,53 @@ export function PublicFactorImportCenterPage({
             <dl>
               <div>
                 <dt>parser</dt>
-                <dd>{safeText(model.manifest.parserVersion)}</dd>
+                <dd>{safeText(activeManifest.parserVersion)}</dd>
               </div>
               <div>
                 <dt>raw hash</dt>
-                <dd>{safeText(model.manifest.rawFileHash)}</dd>
+                <dd>{safeText(activeManifest.rawFileHash)}</dd>
               </div>
               <div>
                 <dt>行数</dt>
-                <dd>{formatCount(model.manifest.rowCount)}</dd>
+                <dd>{formatCount(activeManifest.rowCount)}</dd>
               </div>
               <div>
                 <dt>artifact</dt>
-                <dd>{safeText(model.manifest.artifactPath)}</dd>
+                <dd>{safeText(activeManifest.artifactPath)}</dd>
               </div>
             </dl>
           </section>
-          <p className="pfic-review-note">{safeText(model.manifest.reviewNote)}</p>
+          <p className="pfic-review-note">{safeText(activeManifest.reviewNote)}</p>
+          {manifestIsSubmitted(activeManifest) ? (
+            <section className="pfic-manifest-card pfic-manifest-card-audit">
+              <h3>送检结果</h3>
+              <dl>
+                <div>
+                  <dt>结果</dt>
+                  <dd>{safeText(activeManifest.reviewOutcome, manifestRailStatusLabel(activeManifest))}</dd>
+                </div>
+                <div>
+                  <dt>对应因子</dt>
+                  <dd>{safeText(activeManifest.factorName || activeManifest.targetFactorId)}</dd>
+                </div>
+                <div>
+                  <dt>因子状态</dt>
+                  <dd>{safeText(activeManifest.factorStatus || activeManifest.publishStatus)}</dd>
+                </div>
+                <div>
+                  <dt>候选 ID</dt>
+                  <dd>{safeText(activeManifest.quarantineCandidateId)}</dd>
+                </div>
+              </dl>
+            </section>
+          ) : null}
           <button
             type="button"
             className="pfic-button pfic-button-primary"
             disabled={!canSubmitReview}
             onClick={() => void submitReview()}
           >
-            {submitReviewButtonLabel(model.manifest)}
+            {submitReviewButtonLabel(activeManifest)}
           </button>
           <button type="button" className="pfic-button pfic-button-secondary" onClick={handleDownloadManifest}>下载 manifest</button>
           <button type="button" className="pfic-button pfic-button-secondary" onClick={handleOpenArtifact}>打开 artifact</button>

@@ -117,7 +117,7 @@ ExternalFactorAccessPolicy = Literal[
 ]
 ExternalFactorFrequency = Literal['DAILY', 'MONTHLY', 'QUARTERLY', 'ANNUAL', 'MIXED']
 ExternalFactorDatasetStatus = Literal['READY', 'MANUAL_REQUIRED', 'REFERENCE_ONLY']
-ExternalFactorImportMode = Literal['AUTO_DOWNLOAD', 'LOCAL_FILE', 'REFERENCE_ONLY']
+ExternalFactorImportMode = Literal['AUTO_DOWNLOAD', 'LOCAL_FILE', 'SOURCE_MANIFEST', 'REFERENCE_ONLY']
 ExternalFactorImportJobStatus = Literal[
     'DRAFT',
     'FILE_STAGED',

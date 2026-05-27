@@ -197,6 +197,30 @@
   color: #8a520b;
 }
 
+.pfic-loading-state {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  min-height: 320px;
+  border: 1px solid var(--pfic-border);
+  border-radius: 12px;
+  background: var(--pfic-surface);
+  box-shadow: var(--pfic-shadow);
+  color: var(--pfic-text-sub);
+}
+
+.pfic-loading-state strong {
+  color: var(--pfic-text-title);
+  font-size: 18px;
+}
+
+.pfic-loading-state-error {
+  border-color: #f0c37b;
+  background: #fff6e8;
+  color: #8a520b;
+}
+
 .pfic-kpi-strip {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -550,6 +574,12 @@
   cursor: pointer;
 }
 
+.pfic-muted-action {
+  color: var(--pfic-text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .pfic-mapping-grid {
   display: grid;
   grid-auto-flow: column;
@@ -610,6 +640,11 @@
   border: 1px solid var(--pfic-border-soft);
   border-radius: 8px;
   background: var(--pfic-surface-soft);
+}
+
+.pfic-manifest-card-audit {
+  border-color: rgba(31, 135, 123, 0.22);
+  background: var(--pfic-primary-soft);
 }
 
 .pfic-manifest-card h3 {

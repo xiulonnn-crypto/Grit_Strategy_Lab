@@ -304,6 +304,20 @@ function Get-NodeExecutable {
     return $nodeCommand.Source
 }
 
+function Normalize-ProcessPathEnvironment {
+    $pathValue = [System.Environment]::GetEnvironmentVariable('Path', 'Process')
+    if ([string]::IsNullOrEmpty($pathValue)) {
+        $pathValue = [System.Environment]::GetEnvironmentVariable('PATH', 'Process')
+    }
+    if ([string]::IsNullOrEmpty($pathValue)) {
+        return
+    }
+
+    [System.Environment]::SetEnvironmentVariable('Path', $null, 'Process')
+    [System.Environment]::SetEnvironmentVariable('PATH', $null, 'Process')
+    [System.Environment]::SetEnvironmentVariable('Path', $pathValue, 'Process')
+}
+
 function Stop-ProcessTree {
     param(
         [int]$ProcessId
@@ -391,6 +405,7 @@ function Invoke-TrackedProcess {
         $powershellExe = $powershellCommand.Source
     }
 
+    Normalize-ProcessPathEnvironment
     $process = Start-Process `
         -FilePath $powershellExe `
         -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapperPath) `

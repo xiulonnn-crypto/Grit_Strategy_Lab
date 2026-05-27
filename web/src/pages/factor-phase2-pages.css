@@ -2612,6 +2612,16 @@
     justify-content: flex-start;
   }
 
+  .factor-model-builder-page .factor-phase2-hero,
+  .factor-model-builder-page--composite .factor-phase2-hero {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .factor-model-builder-page .factor-phase2-hero > div {
+    min-width: 0;
+  }
+
   .factor-phase2-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -2628,6 +2638,32 @@
 
   .factor-phase2-hero h1 {
     font-size: 25px;
+  }
+
+  .factor-model-builder-page .factor-phase2-hero {
+    min-height: 0;
+    padding: 18px;
+  }
+
+  .factor-model-builder-page .factor-phase2-hero h1 {
+    font-size: 26px;
+    line-height: 1.2;
+    overflow-wrap: normal;
+  }
+
+  .factor-model-builder-page .factor-phase2-hero p {
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  .factor-model-builder-page .factor-phase2-actions {
+    width: 100%;
+  }
+
+  .factor-model-builder-page .factor-phase2-actions .factor-phase2-button {
+    flex: 1 1 104px;
+    min-width: 0;
+    padding: 0 10px;
   }
 
   .factor-phase2-metrics,

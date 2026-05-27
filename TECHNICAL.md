@@ -3,6 +3,7 @@
 ## Factor display naming and dedupe gate
 
 - Before changing factor Chinese display names, `display_name_cn`, `short_name_cn`, `base_display_name_cn`, `name_collision_*`, aliases, search keywords, backfill, quarantine publish, governance publish, factor factory publishable lists, factor detail, model builder, or run-detail factor projection, build a read-only duplicate-name fact table for online-visible F2/F3 factors. The table must include `factor_id`, `stored_name`, `projected_name`, `base_display_name_cn`, `tier_level`, `lifecycle_status`, `expression`, `parent_factor_ids`, `op_status`, `benchmark` or `residual_control`, and collision group.
+- For factor naming review loops, prefer the aggregate harness first: `powershell -ExecutionPolicy Bypass -File .\scripts\codex-probe-factor-display-naming.ps1 -FactorId <id> -RejectName <bad-name> -Strict -Json`. It writes runtime preflight, per-factor probe JSON, trace matrices, optional display-name-v4 backfill dry-run/apply output, and the online F2/F3 duplicate-name fact table under `output/logs/grit-coder/<task-slug>/`; use `-SkipApi` only for DB-only triage when localhost is blocked.
 - For route-specific naming incidents, run `python scripts/factor_naming_probe.py --factor-id <id> --expected-name <name> --reject-name <bad-name> --strict` before browser work. The probe compares DB publish metadata, `GET /factor-factory/overview`, `GET /factors?lifecycle=all`, and `GET /factors/{factor_id}` so the failing surface is visible before patching.
 - Treat naming as a deterministic projection contract. Pure parser tests must cover `Return`, `Std(Return)`, `DownsideStd(Return)`, `Residual`, `FFBlend`, cashflow/volatility ratios, window or parameter extraction, missing benchmark metadata, and the rule that the system must not fabricate `SP500` or any benchmark when the metadata is absent.
 - All read and write paths must call the same naming resolver: `GET /factors`, `GET /factors/{factor_id}`, `display-name-v4-backfill` dry-run/apply, quarantine publish, and governance optimized-factor publish. The protocol version is `factor_display_name_v4_structured`; the dedupe strategy is `parameter_first_then_sha8`.
@@ -21,6 +22,13 @@
 - Debug with a small-budget red repro first: use a 20-50 formula operator snapshot to prove `Raw_F2 -> Refined_F2 -> Quarantine -> UI` count alignment and failure behavior, then run the 1470+ full budget once for acceptance.
 - Factor factory read models should converge on one current-batch resolver contract: `current_batch_id`, `source_job_id`, `artifact_id`, `is_preview`, `total_candidates`, and `page_count`. Task cards, quarantine pagination, publishable factors, and detail evidence must read from that contract or fields explicitly derived from it.
 - Live route evidence should be scripted where possible: open the cache-busted `#/factors/factory` route, capture task-card counts, pagination such as `1-50/1470`, publishable-factor duplicate groups, and the detail modal's Raw/Refined/WNZT evidence, then compare those values with API and manifest output. Screenshots remain required but should not be the only proof.
+
+## Factor governance PRUNE recovery closeout gate
+
+- When changing PRUNE, redundancy grouping, operator-status-light semantics, correlation thresholds, factor-library blockers, factor-quarantine blockers, or historical `PRUNED` recovery, close the work in this order: read-only lineage/preflight evidence -> code/tests -> runtime preflight -> prune-recovery preview -> optional apply -> compact API summaries -> final live route verification.
+- Use `powershell -ExecutionPolicy Bypass -File .\scripts\recovery\codex-apply-prune-recovery.ps1 -PreviewOnly -TaskSlug <task-slug>` before final live acceptance. The helper saves runtime preflight and compact preview/overview summaries under `output/logs/grit-coder/<task-slug>/`.
+- If the user request includes historical recovery or state replay, use the same helper with `-Apply` only after confirming the active runtime DB. The helper backs up `.grit_backtest_platform.sqlite3` under `artifacts/recovery/` before calling `/factor-governance/prune-recovery/apply`.
+- Closeout reports should cite compact counts (`recovered_count`, `skipped_count`, remaining `recoverable_count`, remaining `keep_pruned_count`, governance `prune_count`, and factor-factory `redundancy_pruning`) instead of dumping full factor payloads. Full raw JSON is reserved for debugging and should not be the default evidence artifact.
 
 ## Factor Factory multi-agent kickoff package
 
@@ -64,9 +72,11 @@ Cross-stack factor-factory work that touches backend contracts, execution, UI, t
 
 - `git-fast` 对应 `scripts/codex-validate-fast.ps1`，也是 pre-push 默认门禁；它只做日常精准增量验证，目标 5 分钟内完成，不会自动升级到长跑影响面测试。
 - `git-impact` 对应 `scripts/codex-validate-impact.ps1`，用于 fast 返回 `not-fast` 后手动运行；它过滤证据资产后按 owner map 加影响面 fanout 运行 backend/frontend targeted checks，并运行前端 `tsc --noEmit`。
-- `git-full` 对应 `scripts/codex-validate-full.ps1`，用于大版本、发版、合并主线或 fixture/live acceptance 前的完整验证。
+- 全量推送优先使用 `scripts/codex-publish-impact.ps1` 封装路径：先要求待发布文件已经 staged 且无 unstaged/untracked，执行 staged whitespace、Trace Matrix 闭环和外发高信号文件摘要，再跑一次 `WorkingTree` impact、提交、显式 `HEAD:<target>` 推送，并自动承接 pre-push 生成的 `CHANGELOG.md`/`_version.py` 元数据子提交。这样可复用 WorkingTree 内容指纹，避免在内容未变时重复跑 `Committed` impact。
+- `git-full` 对应 `scripts/codex-validate-full.ps1`，用于大版本、发版、合并主线或 fixture/live acceptance 前的完整验证；full gate 摘要必须记录 `elapsed_seconds`、`head_sha`、`base_sha` 和每个步骤的 `duration=...`，这样 pre-push 能确认 full 证据确实对应当前 push。
+- 发版/合并型全量推送优先使用 `scripts/codex-publish-full.ps1`：它先检查精确 staged 集、staged whitespace、Trace Matrix 闭环和外发高信号文件，再提交、运行 `Target=all` full gate、显式 `HEAD:<target>` 推送，并自动承接 pre-push 生成的 `CHANGELOG.md`/`_version.py` 元数据子提交。`Target=backend/frontend` 只允许配合 `-SkipPush` 做局部 full 验证。
 - 证据资产不参与 fast 的文件数、domain 判定或测试选择，包括 `output/ui-artifact-trace/**`、`output/logs/grit-coder/**`、`harness/reports/**`、项目内 `designs/**`，以及证据型 `artifacts/**` 文件。
-- pre-push 只调用 fast；当 fast 返回 `not-fast` 时阻止 push 并提示运行 impact/full，紧急推送必须由操作者显式选择 `git push --no-verify`。
+- pre-push 先尝试复用匹配当前 push 的 impact/full 证据；不可复用时才调用 fast。当 fast 返回 `not-fast` 且 impact/full 证据仍不可复用时阻止 push，并提示运行 impact/full；紧急推送必须由操作者显式选择 `git push --no-verify`。
 
 - 本文件统一以 UTF-8 保存。
 - 本文件不替代代码，也不替代 `ARCHITECTURE.md`。
@@ -200,7 +210,8 @@ Codex 在本仓库的默认阅读顺序固定如下：
 | `codex-test-frontend.ps1 -IncludeLiveAcceptance` | 支持 `LIVE_FIXTURE_MANIFEST` 与 `LIVE_API_BASE`，会启动 `8010` fixture backend 并运行 live real-api smoke | 当前固定验证入口 |
 | `codex-smoke.ps1` | 当前会先执行 fixture reset，再跑 backend/frontend 固定入口 | fixture 资产存在；失败时应报告具体 reset/API/UI 断言 |
 | `codex-validate-fast.ps1` | 日常推云默认入口，保留 fetch/merge-base/ahead-behind、diff check 与按改动范围选择后端/前端校验 | pre-push 会在 CHANGELOG/版本快照无待提交后调用 committed scope |
-| `codex-validate-full.ps1` | 大改、发版或合并前入口，复用固定 backend/frontend 脚本并默认并行执行 | 需要串行排障时传 `-Sequential` |
+| `codex-validate-full.ps1` | 大改、发版或合并前入口，复用固定 backend/frontend 脚本并默认并行执行，摘要记录 git base/head 与每步 duration | 需要串行排障时传 `-Sequential` |
+| `codex-publish-full.ps1` | 发版/合并型全量推送封装：精确 staged 检查、full gate、显式 refspec push、metadata 子提交跟进 | 推送时要求 `-Target all`；局部 target 只能 `-SkipPush` |
 | `README.md` 中的 Codex smoke 描述 | 仍偏旧 | 若与脚本行为冲突，以 `scripts/codex-*.ps1` 和本文件为准 |
 
 ### 1.5.1 Phase 0 F1 与算子配置当前真相
@@ -290,7 +301,8 @@ Phase 0 这类同时触及合同、执行、UI、测试和文档的任务，默�
 | --- | --- | --- |
 | `scripts/codex-reset-fixture.ps1` | 把 committed fixture 复制到 `.tmp/codex-fixture/`，并生成 reset 报告 | 已可用，输出 staged workspace DB 路径 |
 | `scripts/codex-validate-fast.ps1` | 日常推云快速门禁：git fetch/merge-base/ahead-behind、cached/working/committed diff check、按改动范围运行 targeted backend 或 frontend 校验 | pre-push 默认调用 `-Scope Committed -SkipFetch`，手工日常推云可直接运行默认入口 |
-| `scripts/codex-validate-full.ps1` | 大改、发版或合并前完整门禁，默认并行执行 backend 与 frontend 固定入口并写入 full gate 摘要 | 如需复现旧串行行为，传 `-Sequential` |
+| `scripts/codex-validate-full.ps1` | 大改、发版或合并前完整门禁，默认并行执行 backend 与 frontend 固定入口并写入含 git head/base 与 duration 的 full gate 摘要 | 如需复现旧串行行为，传 `-Sequential` |
+| `scripts/codex-publish-full.ps1` | 发版/合并型 full publish 封装，提交后跑 `Target=all` full gate，再显式 `HEAD:<target>` 推送并处理 hook 元数据子提交 | 不用于日常 fast；局部 backend/frontend 目标需 `-SkipPush` |
 | `scripts/codex-test-backend.ps1` | 跑固定 backend pytest 切片，并写入 `latest-backend.txt` | 当前可直接使用 |
 | `scripts/codex-test-frontend.ps1` | 跑固定 frontend focused tests，始终输出全局 TypeScript 报告，可选 strict/live acceptance | `-IncludeLiveAcceptance` 会使用 committed seed fixture 启动真实 API smoke |
 | `scripts/codex-smoke.ps1` | 纯 orchestrator，先 reset fixture，再跑 backend/frontend 固定入口 | fixture 资产存在；不再按缺失 fixture 预判阻塞 |

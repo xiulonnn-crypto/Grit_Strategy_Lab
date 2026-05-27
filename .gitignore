@@ -38,6 +38,8 @@ logs/
 artifacts/
 .codex-logs/
 output/logs/
+output/ui-artifact-trace/**/*.json
+output/ui-artifact-trace/factor-import-candidate-actions/trace-matrix.md
 artifacts/browser-acceptance-*/
 artifacts/visual-checks/
 artifacts/*.bundle.lock
