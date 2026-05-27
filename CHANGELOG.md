@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [0.1.1-026] - 2026-05-27 - 优化推云门禁复用
+
 ### 优化 (Changed)
 
 - **推云门禁复用**: impact 报告新增 Git blob 内容指纹，pre-push 可在提交内容与已验证 WorkingTree 完全一致时复用门禁证据，避免重复跑完整 impact。
