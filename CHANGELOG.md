@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [0.1.1-027] - 2026-05-27 - 优化推云 impact 封装、推云 full 封装
+
 ### 优化 (Changed)
 
 - **推云 impact 封装**: 新增 impact 发布封装脚本，先检查 staged 内容、Trace Matrix 与外发高信号文件，再复用 WorkingTree impact 内容指纹完成提交、推送和元数据快照跟进。
