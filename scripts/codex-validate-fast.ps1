@@ -819,6 +819,51 @@ function Invoke-GateSelfTest {
     Add-StepResult -Label 'gate self-test' -Status 'ok' -Details 'impact PlanOnly passed; fast PlanOnly produced a valid plan/not-fast decision'
 }
 
+function Invoke-TrackedProcessSmoke {
+    if (-not [bool]$script:Plan.validation_self_test_required) {
+        Add-StepResult -Label 'tracked process smoke' -Status 'skip' -Details 'validation tooling unchanged'
+        return
+    }
+
+    $powerShellCommand = Get-Command powershell.exe -ErrorAction SilentlyContinue
+    if ($null -eq $powerShellCommand) {
+        $powerShellCommand = Get-Command powershell -ErrorAction SilentlyContinue
+    }
+    if ($null -eq $powerShellCommand) {
+        $powerShellCommand = Get-Command pwsh -ErrorAction SilentlyContinue
+    }
+    if ($null -eq $powerShellCommand) {
+        throw 'PowerShell executable not found for tracked process smoke.'
+    }
+
+    $pathValue = [System.Environment]::GetEnvironmentVariable('Path', 'Process')
+    if ([string]::IsNullOrEmpty($pathValue)) {
+        $pathValue = [System.Environment]::GetEnvironmentVariable('PATH', 'Process')
+    }
+
+    try {
+        if (-not [string]::IsNullOrEmpty($pathValue)) {
+            [System.Environment]::SetEnvironmentVariable('PATH', $pathValue, 'Process')
+        }
+
+        $result = Invoke-TrackedProcess `
+            -FilePath $powerShellCommand.Source `
+            -Arguments @('-NoProfile', '-Command', 'exit 0') `
+            -WorkingDirectory $repoRoot `
+            -Label 'tracked-process-smoke'
+        if ($result.ExitCode -ne 0) {
+            throw "Tracked process smoke failed with exit code $($result.ExitCode)."
+        }
+        Add-StepResult -Label 'tracked process smoke' -Status 'ok' -Details 'validation tooling tracked-process launch path'
+    } finally {
+        if (-not [string]::IsNullOrEmpty($pathValue)) {
+            [System.Environment]::SetEnvironmentVariable('Path', $null, 'Process')
+            [System.Environment]::SetEnvironmentVariable('PATH', $null, 'Process')
+            [System.Environment]::SetEnvironmentVariable('Path', $pathValue, 'Process')
+        }
+    }
+}
+
 function Invoke-FrontendTypes {
     if ($GateMode -ne 'impact') {
         Add-StepResult -Label 'frontend TypeScript' -Status 'skip' -Details 'fast gate skips global tsc'
@@ -999,10 +1044,11 @@ try {
     }
 
     Invoke-PowerShellSyntax
+    Invoke-TrackedProcessSmoke
     Invoke-PythonCompile
+    Invoke-FrontendTypes
     Invoke-BackendTests
     Invoke-AsyncLifecycleRepeat
-    Invoke-FrontendTypes
     Invoke-FrontendTests
 
     Assert-FastBudget -Step 'summary'

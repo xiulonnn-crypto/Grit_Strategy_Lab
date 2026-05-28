@@ -12,6 +12,8 @@ param(
     [int]$TimeoutSec = 10,
     [switch]$SkipPreflight,
     [switch]$SkipApi,
+    [ValidateSet('all', 'factory')]
+    [string]$AcceptanceSurface = 'all',
     [switch]$DryRunBackfill,
     [switch]$ApplyBackfill,
     [switch]$Strict,
@@ -205,6 +207,7 @@ function Invoke-FactorProbeSet {
             '--db', $DbPath,
             '--api-base', $BackendBaseUrl,
             '--timeout', ([string]$TimeoutSec),
+            '--acceptance-surface', $AcceptanceSurface,
             '--out', $outPath,
             '--trace-matrix', $tracePath
         )
@@ -399,6 +402,7 @@ $summary = [pscustomobject][ordered]@{
         db_path = $DbPath
         skip_preflight = [bool]$SkipPreflight
         skip_api = [bool]$SkipApi
+        acceptance_surface = $AcceptanceSurface
         dry_run_backfill = [bool]$DryRunBackfill
         apply_backfill = [bool]$ApplyBackfill
     }

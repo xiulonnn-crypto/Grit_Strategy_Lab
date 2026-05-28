@@ -3,6 +3,7 @@
   --snapshots-global-dashboard-min-height: 200px;
   --snapshots-global-dashboard-card-height: 150px;
   font-family: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Segoe UI", sans-serif;
+  width: min(100%, 1664px);
   max-width: 1664px;
   margin-inline: auto;
 }
@@ -3535,7 +3536,9 @@
   --ops-text-main: #1f2937;
   --ops-text-sub: #64748b;
   --ops-shadow-card: 0 1px 3px rgba(15, 23, 42, 0.05), 0 1px 2px rgba(15, 23, 42, 0.04);
+  width: min(100%, 1664px);
   max-width: 1664px;
+  margin-inline: auto;
   gap: 16px;
   color: var(--ops-text-main);
   font-size: 14px;
@@ -3700,6 +3703,79 @@
   border-radius: 14px;
   background: #fbfcfd;
   box-shadow: none;
+}
+
+.snapshots-loading-state .snapshots-ops-health-card {
+  min-height: 250px;
+  align-content: start;
+}
+
+.snapshots-loading-panel {
+  min-height: 176px;
+}
+
+.snapshots-loading-panel__body {
+  display: grid;
+  gap: 12px;
+}
+
+.snapshots-loading-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid #d7e1e5;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: var(--ops-primary-strong);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.snapshots-loading-label {
+  display: inline-flex;
+  width: fit-content;
+  min-height: 24px;
+  align-items: center;
+  padding: 0 10px;
+  border: 1px solid var(--ops-border);
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--ops-text-sub);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.snapshots-loading-line {
+  display: block;
+  height: 12px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #eef2f4 0%, #f8fafc 45%, #eef2f4 100%);
+}
+
+.snapshots-loading-line--title {
+  width: 64%;
+  height: 24px;
+  margin-top: 2px;
+}
+
+.snapshots-loading-line--caption {
+  width: min(360px, 72%);
+  height: 12px;
+  margin-top: 8px;
+}
+
+.snapshots-loading-line--wide {
+  width: 88%;
+}
+
+.snapshots-loading-line--medium {
+  width: 72%;
+}
+
+.snapshots-loading-line--short {
+  width: 46%;
 }
 
 .snapshots-ops-health-card--ready {

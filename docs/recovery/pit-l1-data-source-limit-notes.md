@@ -1,23 +1,23 @@
 # PIT L1 数据源限制复用备注
 
-最后更新：2026-05-27
+最后更新：2026-05-28
 
 范围：本备注只记录本轮已经验证过的 PIT L1 日频价格修复数据源限制。L2 基本面、因子队列、全市场发现不在本备注范围内。
 
 ## 当前修复状态
 
-- 最新已验证 L1 调整价覆盖：`1175 / 1224`。
-- 最新剩余 PIT L1 价格缺口：`49` 个 symbol。
-- 最新缺口清单证据：`output/logs/grit-coder/l1-free-source-next-20260527/pit-data-after-public-news-single-import-direct-builder-20260527.json`。
+- 最新已验证 L1 调整价覆盖：`1207 / 1224`。
+- 最新剩余 PIT L1 价格缺口：`17` 个 symbol。
+- 最新缺口清单证据：`output/logs/grit-coder/l1-free-source-next-20260527/pit-data-after-public-news-single-batch14-api-20260528.json`、`output/logs/grit-coder/l1-free-source-next-20260527/current-l1-price-queue-symbols-after-public-news-batch14-20260528.txt`。
 - 后续所有价格修复调用必须以 `/pit-data.full_ready_repair_plan.queue_price_symbols` 为准。
 - `#/snapshots` 或 snapshot overview 可能使用更宽的分母，不能直接当作 L1 价格缺口调用清单。
 
 ## `#/snapshots` L1 行情卡片口径
 
-- `#/snapshots` L1 行情卡片里的 `股票 1314/1482` 来自 `/data-snapshots/overview.dataset_snapshots[id=ds-price].metadata.covered_symbol_count / total_symbol_count`；前端 `getDatasetCoverage(price)` 当前直接读取这组 snapshot overview 元数据。
+- `#/snapshots` L1 行情卡片曾显示的 `股票 1314/1482`，以及后续 snapshot overview 当前读到的更宽口径数值，来自 `/data-snapshots/overview.dataset_snapshots[id=ds-price].metadata.covered_symbol_count / total_symbol_count`；前端 `getDatasetCoverage(price)` 当前直接读取这组 snapshot overview 元数据。
 - `/pit-data` 的 L1 修复口径来自 `pit.coverage.covered_symbol_count / total_symbol_count`，实际补数清单来自 `full_ready_repair_plan.queue_price_symbols`；当前值见本文顶部“当前修复状态”。
 - 两个接口共用同一批价格 bar 事实表证据（2026-05-26 口径排查时 `ds-price.row_count = pit.coverage.price_bar_rows = 6607159`），但目标集合不同：`/data-snapshots/overview` 是 snapshot 库存/全局覆盖读模型，`/pit-data` 是 PIT Full Ready 修复与准入口径。
-- 进一步拆分：`/data-snapshots/overview` 会用当前 `dataset_symbol_coverage` 与 `universe_membership_snapshots`/策略额外标的重算进度；本次为 `1479` 个历史 universe symbol 加 `SPY/QQQ/TLT` 共 `1482`，其中 `1314` 个在当前覆盖表中有记录。`/pit-data` 当前仍读持久化 `dataset_snapshots.metadata_json` 里的 `covered_symbol_count=1154`、`total_symbol_count=1224`、`missing_symbols=70`。
+- 进一步拆分：`/data-snapshots/overview` 会用当前 `dataset_symbol_coverage` 与 `universe_membership_snapshots`/策略额外标的重算进度；此前排查时为 `1479` 个历史 universe symbol 加 `SPY/QQQ/TLT` 共 `1482`，其中 `1314` 个在当时覆盖表中有记录，batch14 后 snapshot overview 当前读数为 `1367/1482`。`/pit-data` 的当前补数口径见本文顶部，不应从 snapshot overview 分子/分母反推。
 - 2026-05-26 缺口集合不是简单包含关系：overview missing `168` 个，PIT price queue `70` 个；交集 `68` 个，overview-only missing `100` 个，PIT-only missing `2` 个（`LDW`、`SGPPRB`）。因此不要用二者的分子/分母互相推导补数队列。
 - 后续免费源、Xfinlink、Quantiacs、GitHub 公开数据补 L1 时，只能使用 `/pit-data.full_ready_repair_plan.queue_price_symbols` 作为查询清单；当前 symbol 数见本文顶部“当前修复状态”。不要按 `1314/1482` 的 snapshot 分母扩大发起价格查询。
 - 产品/UI 已落地：`#/snapshots` L1 健康卡片的股票主指标优先显示 `PIT <covered>/<total> + ETF 3/3`，不再把 snapshot 库存读模型的 `1314/1482` 当作 PIT L1 补数进度；若 PIT 指标缺失，前端才回退到 `快照 <dataset coverage>`。
@@ -27,10 +27,10 @@
 
 - 只查当前 PIT L1 价格缺口名单，不用免费或限额源做全市场扫描。
 - 对 Xfinlink、Tiingo、Alpha Vantage 等限额源，调用前后都要记录剩余额度。
-- 任何导入 market-data DB 前，必须先 dry-run、保存原始证据，并备份 `.grit_backtest_platform.sqlite3` 与 `.grit_backtest_platform_market_data.sqlite3`。
+- 任何导入 market-data DB 前，必须先 dry-run、保存原始证据，并使用 `scripts/recovery/sqlite_backup_policy.py pit-price-preimage` 备份目标 symbol 的 `ds-price` preimage；不得为小批 L1/PIT 修复默认复制完整 market-data DB。
 - 不得伪造缺失字段：没有 `open`、`volume`、`adj_close` 就按缺失字段入库并写 metadata，不要用 close 硬补成完整 OHLCV。
 - 区分“价格覆盖”与“完整 OHLCV 覆盖”。公司 PDF 可以关闭 L1 price gate，但不等于已经具备完整行情质量。
-- 外部价格和额度会变，本表是 2026-05-26 至 2026-05-27 的已验证状态；再次大规模调用前应重新核对 provider 说明。
+- 外部价格和额度会变，本表是 2026-05-26 至 2026-05-28 的已验证状态；再次大规模调用前应重新核对 provider 说明。
 
 ## 已验证数据源限制表
 
@@ -257,3 +257,33 @@
 - `artifacts/recovery/l1-wayback-pixr-import-20260526-161500/manifest.json`
 - `artifacts/recovery/l1-wayback-sebl-import-20260526-162000/manifest.json`
 - `artifacts/recovery/l1-wayback-ivgn-import-20260526-162500/manifest.json`
+
+## 2026-05-28 备份机制瘦身规则
+
+- L1/PIT 小批补数默认使用 `scripts/recovery/sqlite_backup_policy.py pit-price-preimage`，只保存目标 symbol 的 `ds-price` 快照元数据、价格行、coverage 行和 `backup-manifest.json`。
+- 默认禁止每个小批次复制完整 `.grit_backtest_platform_market_data.sqlite3`。该库当前约 14GB，连续批次整库备份会直接打满磁盘。
+- `full-pair` 只用于结构性迁移、批量未知影响或用户明确要求全量恢复点，并且必须满足 `--min-free-after-gb 25` 或更高空间门禁。
+- 清理旧备份时必须保留当前活动根目录 DB、最新一组全量备份 pair、最新 targeted preimage、manifest、source notes 和 `output/logs/grit-coder/` 证据日志。
+- `artifacts/recovery` 是恢复/审计区，不是系统运行热路径；运行路径仍以根目录主库和 companion market-data 库为准。
+
+## 2026-05-28 batch14 公开单点 close 续更
+
+- 本批只使用当前 `/pit-data.full_ready_repair_plan.queue_price_symbols` 缺口名单，未调用 Xfinlink、Tiingo、Alpha Vantage 等限额源。
+- 新增导入 `GNCI`、`USHC` 各 1 条 close-only PIT 价格行；`open/high/low/volume=NULL`，metadata 标记 `not_daily_ohlcv=true` 与 `membership_window_rule=min_max_membership_window`。
+- `GNCI` 来源为 Asensio 1996-01-19 公开研究报告，报告标注 `GNCI` 与 `Price: $20.625`；导入日期 `1996-01-19`、close `20.625`。
+- `USHC` 来源为 Bloomberg 1996-07-11 market movers 公开新闻，正文说明价格为收盘价，`US Healthcare Inc. (USHC)` 收于 `50 5/8`；导入日期 `1996-07-11`、close `50.625`。
+- 覆盖结果：`/pit-data.coverage.covered_symbol_count` 从 `1205` 提升到 `1207`，`queue_price_symbols` 从 `19` 降到 `17`，活动 market DB `ds-price.row_count=6614572`。
+- targeted preimage：`artifacts/recovery/l1-public-news-single-close-batch14-20260528-apply/backup-manifest.json`；本批 preimage 的目标 symbols 是 `GNCI`、`USHC`，没有复制完整 DB。
+- 证据：`public-news-single-close-batch14-current-l1-dry-run-20260528.json`、`public-news-single-close-batch14-preimage-20260528.json`、`public-news-single-close-batch14-current-l1-import-report-20260528.json`、`public-news-single-close-batch14-post-apply-db-check-20260528.json`、`pit-data-after-public-news-single-batch14-api-20260528.json`、`runtime-preflight-after-batch14-final-ready-20260528.json`。
+
+## 2026-05-28 batch15 公开单点 close 续更
+
+- 本批继续只使用当前 L1 价格缺口名单，未调用 Xfinlink；导入前使用 `pit-price-preimage` 生成 targeted preimage，没有复制完整 DB。
+- 新增导入 `IFMX`、`OSSI`、`NLI` 各 1 条 close-only PIT 价格行；`open/high/low/volume=NULL`，metadata 标记 `not_daily_ohlcv=true`。
+- `IFMX` 来源为 SFGate 1997-09-26 公开新闻，报道 Informix stock closed yesterday at `$6.53`；导入日期 `1997-09-25`、close `6.53`，成员窗口依据项目本地 Nasdaq-100 historical seed 的 1997 anchor。
+- `OSSI` 来源为 TheStreet 1997-03-21 after-close market report，报道 Outback Steakhouse `(OSSI)` 收于 `19 1/8`；导入日期 `1997-03-21`、close `19.125`，成员窗口依据项目本地 Nasdaq-100 historical seed 的 1997 anchor。
+- `NLI` 来源为 Motley Fool 1999-01-25 market close report，报道 NTL Inc. `(Nasdaq: NTLI)` 收于 `$79 3/4`；活动 PIT universe 以 `NLI` 保存该 NTL 成分，metadata 保留 `reported_symbol=NTLI` 与映射说明。
+- 覆盖结果：`/pit-data.coverage.covered_symbol_count` 从 `1207` 提升到 `1210`，`queue_price_symbols` 从 `17` 降到 `14`，活动 market DB `ds-price.row_count=6614575`。
+- targeted preimage：`artifacts/recovery/l1-public-news-single-close-batch15-20260528-apply/backup-manifest.json`；本批 preimage 的目标 symbols 是 `IFMX`、`OSSI`、`NLI`。
+- 剩余价格缺口：`AGREA`、`DZB`、`FDLNB`、`GMSTE`、`INFOQUOTE`、`LDW`、`MTEL`、`MUEI`、`NLTI`、`RPOW`、`SGPPRB`、`SYBS`、`VCELA`、`WMTT`。其中 `INFOQUOTE` 已确认是历史 Nasdaq activity 页面工具链接解析伪码；解析器已修复为不再新增该伪码，但现有 DB 元数据清理需另走 targeted metadata preimage。
+- 证据：`public-news-single-close-batch15-current-l1-dry-run-20260528.json`、`public-news-single-close-batch15-import-report-20260528.json`、`public-news-single-close-batch15-post-apply-db-check-20260528.json`、`pit-data-after-public-news-single-batch15-api-20260528.json`、`data-snapshots-overview-after-batch15-20260528.json`、`pit-data-during-quickstart-batch15-api-20260528.json`、`data-snapshots-overview-during-quickstart-batch15-20260528.json`、`current-l1-price-queue-symbols-after-public-news-batch15-20260528.txt`、`runtime-preflight-during-quickstart-batch15-20260528.json`。

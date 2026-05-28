@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
+from .factor_factory_lineage import build_factor_factory_artifact_manifest
+
 
 DEFAULT_COMPUTE_BACKEND = "pandas_bottleneck"
 DEFAULT_DAILY_FORMULA_BUDGET = 10_000
@@ -440,36 +442,31 @@ def materialize_operator_engine_result(
     raw_f2_matrix_rel = f"artifacts/factor-factory/operator-engine/{run_id}/raw-f2-matrix.json"
     formula_count = result.deduped_formula_count
     manifest_refined_count = formula_count if refined_count is None else int(refined_count)
-    manifest_hash = hashlib.sha256(
-        json.dumps(
-            {
-                "run_id": run_id,
-                "job_id": job_id,
-                "source_job_id": source_job_id,
-                "formula_count": formula_count,
-                "refined_count": manifest_refined_count,
-                "candidate_ids": [candidate["candidate_id"] for candidate in manifest_candidates],
-                "expressions": [candidate["normalized_expression"] for candidate in manifest_candidates],
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        ).encode("utf-8")
-    ).hexdigest()
-    manifest_payload = {
-        "run_id": run_id,
-        "job_id": job_id,
-        "source_job_id": source_job_id,
-        "backend": result.backend,
-        "requested_budget": result.requested_budget,
-        "generated_formula_count": result.generated_formula_count,
-        "deduped_formula_count": result.deduped_formula_count,
-        "formula_count": formula_count,
-        "refined_count": manifest_refined_count,
-        "hash": manifest_hash,
-        "created_at": created_at,
-        "truncated": result.truncated,
-        "candidates": manifest_candidates,
-    }
+    manifest_payload = build_factor_factory_artifact_manifest(
+        run_id=run_id,
+        job_id=job_id,
+        source_job_id=source_job_id,
+        formula_count=formula_count,
+        refined_count=manifest_refined_count,
+        created_at=created_at,
+        hash_payload={
+            "run_id": run_id,
+            "job_id": job_id,
+            "source_job_id": source_job_id,
+            "formula_count": formula_count,
+            "refined_count": manifest_refined_count,
+            "candidate_ids": [candidate["candidate_id"] for candidate in manifest_candidates],
+            "expressions": [candidate["normalized_expression"] for candidate in manifest_candidates],
+        },
+        extra={
+            "backend": result.backend,
+            "requested_budget": result.requested_budget,
+            "generated_formula_count": result.generated_formula_count,
+            "deduped_formula_count": result.deduped_formula_count,
+            "truncated": result.truncated,
+            "candidates": manifest_candidates,
+        },
+    )
     matrix_payload = {
         "run_id": run_id,
         "format": "cluster_correlation_v1",

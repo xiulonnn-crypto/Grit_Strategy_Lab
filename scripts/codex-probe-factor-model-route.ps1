@@ -13,6 +13,11 @@ param(
     [double]$Weight = 100,
     [int]$TopN = 50,
     [int]$TimeoutSec = 30,
+    [string]$SelectAriaLabel = '',
+    [string[]]$ExpectedSelectValues = @(),
+    [string]$SelectValue = '',
+    [string]$ExpectedSelectedLabel = '',
+    [switch]$AllowDisabledCreate,
     [switch]$SkipPreflight,
     [switch]$SkipBrowser,
     [switch]$Strict,
@@ -385,6 +390,44 @@ async function runViewport(viewportName, viewport) {
     { timeout: input.timeoutMs },
   ).catch(() => {});
   await page.waitForTimeout(1000);
+  let selectProbe = {
+    requested: Boolean(input.selectAriaLabel),
+    present: false,
+    options: [],
+    selected: null,
+    valuesMatch: true,
+    selectedValueMatch: true,
+    selectedLabelMatch: true,
+  };
+  if (input.selectAriaLabel) {
+    const select = page.locator(`select[aria-label=${JSON.stringify(input.selectAriaLabel)}]`).first();
+    await select.waitFor({ state: 'attached', timeout: input.timeoutMs });
+    selectProbe.present = await select.count() > 0;
+    if (selectProbe.present) {
+      selectProbe.options = await select.locator('option').evaluateAll((items) =>
+        items.map((item) => ({ value: item.value, label: item.textContent?.trim() || '' })),
+      );
+      if (input.selectValue) {
+        await select.selectOption(input.selectValue);
+      }
+      selectProbe.selected = await select.evaluate((item) => ({
+        value: item.value,
+        label: item.selectedOptions[0]?.textContent?.trim() || '',
+      }));
+      if (Array.isArray(input.expectedSelectValues) && input.expectedSelectValues.length > 0) {
+        const actualValues = selectProbe.options.map((item) => item.value);
+        selectProbe.valuesMatch =
+          actualValues.length === input.expectedSelectValues.length &&
+          actualValues.every((value, index) => value === input.expectedSelectValues[index]);
+      }
+      if (input.selectValue) {
+        selectProbe.selectedValueMatch = selectProbe.selected?.value === input.selectValue;
+      }
+      if (input.expectedSelectedLabel) {
+        selectProbe.selectedLabelMatch = selectProbe.selected?.label === input.expectedSelectedLabel;
+      }
+    }
+  }
   const bodyText = await page.locator('body').innerText();
   const sourceCards = await page.locator('.composite-factor-list .factor-pick, .factor-model-selector-list .factor-pick').evaluateAll((cards) =>
     cards.map((card) => card.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
@@ -436,6 +479,7 @@ async function runViewport(viewportName, viewport) {
     previewOk,
     sourceCards,
     createButtons,
+    selectProbe,
     apiResponses,
     failedRequests,
     consoleErrors,
@@ -459,7 +503,12 @@ async function runViewport(viewportName, viewport) {
     item.sourceCardCount >= 1 &&
     item.checkedCount >= 1 &&
     !item.emptyVisible &&
-    item.createEnabled &&
+    (input.allowDisabledCreate || item.createEnabled) &&
+    (!item.selectProbe.requested ||
+      (item.selectProbe.present &&
+        item.selectProbe.valuesMatch &&
+        item.selectProbe.selectedValueMatch &&
+        item.selectProbe.selectedLabelMatch)) &&
     item.previewOk &&
     item.failedRequests.length === 0 &&
     item.consoleErrors.length === 0 &&
@@ -494,6 +543,15 @@ function Invoke-BrowserEvidence {
         }
     }
     Write-BrowserProbeScript
+    $normalizedExpectedSelectValues = @()
+    foreach ($rawValue in @($ExpectedSelectValues)) {
+        foreach ($part in ([string]$rawValue -split ',')) {
+            $trimmed = $part.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($trimmed)) {
+                $normalizedExpectedSelectValues += $trimmed
+            }
+        }
+    }
     $inputPayload = [pscustomobject][ordered]@{
         repoRoot = $repoRoot
         taskDir = $taskDir
@@ -501,6 +559,11 @@ function Invoke-BrowserEvidence {
         factorId = $FactorId
         expectedLevelLabel = $ExpectedLevelLabel
         requiredCopy = 'S/A/B'
+        selectAriaLabel = $SelectAriaLabel
+        expectedSelectValues = @($normalizedExpectedSelectValues)
+        selectValue = $SelectValue
+        expectedSelectedLabel = $ExpectedSelectedLabel
+        allowDisabledCreate = [bool]$AllowDisabledCreate
         timeoutMs = [Math]::Max(5000, $TimeoutSec * 1000)
     }
     Write-JsonFile -Path $browserInputPath -Value $inputPayload -Depth 8
@@ -521,7 +584,13 @@ function Invoke-BrowserEvidence {
         Pop-Location
     }
     if (Test-Path $errPath) {
-        $stderr = Get-Content -Path $errPath -Raw -Encoding UTF8
+        $capturedStderr = Get-Content -Path $errPath -Raw -Encoding UTF8
+        if (-not [string]::IsNullOrWhiteSpace($capturedStderr)) {
+            $stderr = $capturedStderr
+        }
+    }
+    if ($exitCode -ne 0 -and -not [string]::IsNullOrWhiteSpace($stderr)) {
+        Write-Utf8Text -Path $errPath -Text $stderr
     }
     Write-Utf8Text -Path $outPath -Text $stdout
     $summary = ConvertTo-JsonObject $stdout

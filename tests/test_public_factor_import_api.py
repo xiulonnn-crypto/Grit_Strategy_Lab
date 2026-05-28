@@ -15,6 +15,8 @@ from grit_backtest_platform.external_factor_imports import (
     list_public_factor_source_registry,
     normalize_fama_french_dataset_zip,
 )
+from grit_backtest_platform.factor_research import external_factor_import_display_projection_v1
+from grit_backtest_platform.storage import dumps
 from tests.api_test_support import assert_ok, create_test_client
 
 
@@ -53,6 +55,83 @@ def _install_fama_french_download_fixture(client) -> None:
         }
 
     service._external_auto_download_file_payload = _fixture_download
+
+
+def _insert_completed_factory_run(service, artifact_dir) -> str:
+    now = "2099-01-01T00:00:00Z"
+    mining_job_id = "mine_op_public_import_publishable_control"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = artifact_dir / "formula-manifest.json"
+    ledger_path = artifact_dir / "refined-f2-candidates.json"
+    manifest_payload = {
+        "job_id": mining_job_id,
+        "source_job_id": mining_job_id,
+        "formula_count": 1,
+        "refined_count": 1,
+        "hash": "public-import-publishable-control",
+        "created_at": now,
+    }
+    ledger_payload = {
+        "job_id": mining_job_id,
+        "source_job_id": mining_job_id,
+        "formula_count": 1,
+        "refined_count": 1,
+        "candidate_count": 1,
+        "hash": "public-import-publishable-control",
+        "created_at": now,
+        "candidates": [],
+    }
+    manifest_path.write_text(json.dumps(manifest_payload, ensure_ascii=False), encoding="utf-8")
+    ledger_path.write_text(json.dumps(ledger_payload, ensure_ascii=False), encoding="utf-8")
+    operator_engine = {
+        "backend": "pandas_bottleneck",
+        "deduped_formula_count": 1,
+        "generated_formula_count": 1,
+        "raw_f2_batch_delivered_count": 1,
+        "refined_f2_batch_delivered_count": 1,
+        "top_preview_count": 0,
+        "artifact_refs": {
+            "formula_manifest": str(manifest_path),
+            "refined_f2_candidate_ledger": str(ledger_path),
+        },
+    }
+    service.storage.insert_json_row(
+        "factor_mining_jobs",
+        {
+            "id": mining_job_id,
+            "status": "COMPLETED",
+            "request_json": dumps({"operator_engine": operator_engine}),
+            "progress_json": dumps({"current": 1, "total": 1}),
+            "summary_json": dumps({"generation_mode": "OPERATOR_ENGINE", "operator_engine": operator_engine}),
+            "top_candidates_json": dumps([]),
+            "failed_samples_json": dumps([]),
+            "created_at": now,
+            "updated_at": now,
+            "completed_at": now,
+            "error_message": None,
+        },
+    )
+    service.storage.insert_json_row(
+        "factor_factory_runs",
+        {
+            "id": "ffr_public_import_publishable_control",
+            "profile_id": "default",
+            "run_date": "2099-01-01",
+            "trigger": "MANUAL",
+            "status": "COMPLETED",
+            "request_json": dumps({"generation_mode": "OPERATOR_ENGINE"}),
+            "gate_policy_json": dumps({"pit_gate_mode": "DIAGNOSTIC_ONLY"}),
+            "config_signature": "public-import-publishable-control",
+            "mining_job_id": mining_job_id,
+            "summary_json": dumps({"operator_engine": operator_engine, "mining_job_id": mining_job_id}),
+            "started_at": now,
+            "completed_at": now,
+            "created_at": now,
+            "updated_at": now,
+            "error_message": None,
+        },
+    )
+    return mining_job_id
 
 
 def test_public_factor_source_registry_marks_intake_policies() -> None:
@@ -141,6 +220,30 @@ def test_fama_french_zip_parser_materializes_public_template_rows() -> None:
     assert rows[0]["value"] == "0.001"
     assert rows[0]["source_dataset"] == "fama_french_us_research_factors_daily"
     assert len(rows) == 18
+
+
+def test_fama_french_monthly_external_import_display_projection_is_chinese_refined() -> None:
+    previous_name = "[外部] - US research factors monthly (Monthly) [Refined]"
+
+    projection = external_factor_import_display_projection_v1(
+        source_id="fama_french",
+        dataset_key="fama_french_us_research_factors_monthly",
+        frequency="MONTHLY",
+        factor_id="s_f2_mom_raw_cur_external_fama_french_us_research_factors_monthly",
+        factor_name="US research factors monthly",
+        previous_display_name=previous_name,
+        op_status={"completed": ["W", "N", "Z", "T"]},
+    )
+
+    expected = "[外部] - Fama-French 美股研究月频因子 (Monthly) [Refined]"
+    assert projection["display_name_cn"] == expected
+    assert projection["base_display_name_cn"] == expected
+    assert previous_name in projection["legacy_name_aliases"]
+    components = projection["name_audit"]["structured_components"]
+    assert components["style_family"] == "[外部]"
+    assert components["core_semantic"] == "Fama-French 美股研究月频因子"
+    assert components["frequency_label"] == "Monthly"
+    assert components["governance_tag"] == "Refined"
 
 
 def test_import_job_projection_is_review_gated_and_has_submit_review_flow() -> None:
@@ -245,6 +348,94 @@ def test_license_required_source_manifest_precheck_does_not_auto_download(tmp_pa
     assert precheck_jobs["items"][0]["next_actions"] == ["upload_source_file", "inspect_manifest"]
     assert overview["external_import_review_queue"]["summary"]["total"] == 0
 
+    blocked = client.post(f"/factor-sources/import-jobs/{job['id']}/submit-review")
+    assert blocked.status_code == 400
+    assert "源文件" in blocked.json()["message"]
+    overview_after = assert_ok(client.get("/factor-factory/overview"))
+    assert overview_after["external_import_precheck_jobs"]["summary"]["total"] == 1
+    assert overview_after["external_import_review_queue"]["summary"]["total"] == 0
+    assert overview_after["external_import_quarantine"]["summary"]["total"] == 0
+
+
+def test_materialization_blocked_source_manifest_submission_projects_back_to_precheck(tmp_path) -> None:
+    client, _db_path = create_test_client(tmp_path)
+
+    job = assert_ok(
+        client.post(
+            "/factor-sources/import-jobs",
+            json={
+                "source_id": "aqr",
+                "dataset_key": "aqr_public_style_factors",
+                "import_mode": "SOURCE_MANIFEST",
+                "frequency": "DAILY",
+            },
+        )
+    )
+    now = "2026-05-28T09:05:22Z"
+    with client.app.state.service.storage.connection() as conn:
+        conn.execute(
+            """
+            UPDATE external_factor_import_jobs
+            SET status = 'REVIEW_SUBMITTED',
+                review_status = 'SUBMITTED',
+                submitted_at = ?,
+                updated_at = ?,
+                next_actions_json = ?
+            WHERE id = ?
+            """,
+            (now, now, dumps(["b3_quarantine_completed"]), job["id"]),
+        )
+        conn.execute(
+            """
+            INSERT INTO factor_quarantine_candidates (
+                id, mining_candidate_id, source_mining_job_id, expression, status,
+                publish_status, gate_summary_json, cluster_id, candidate_metrics_json,
+                failure_samples_json, pit_evidence_json, publish_eligibility_json,
+                target_factor_id, created_at, updated_at, published_at, rejected_reason
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "fq_ext_legacy_blocked",
+                "extcand_legacy_blocked",
+                job["id"],
+                "ExternalFactor(aqr_public_style_factors)",
+                "REJECTED",
+                "BLOCKED",
+                dumps({"external_import": "FAILED", "manifest_row_count": 0}),
+                f"external_import_{job['id']}",
+                dumps({
+                    "pipeline_version": "external_factor_import_v1",
+                    "external_import_job_id": job["id"],
+                    "manifest": {"row_count": 0, "warnings": ["source_file_not_materialized"]},
+                }),
+                dumps([]),
+                dumps({"status": "DIAGNOSTIC_ONLY", "source": "PUBLIC_FACTOR_IMPORT"}),
+                dumps({"status": "BLOCKED", "reason": "source file missing"}),
+                None,
+                now,
+                now,
+                None,
+                "source file missing",
+            ),
+        )
+
+    overview = assert_ok(client.get("/factor-factory/overview"))
+    precheck_jobs = overview["external_import_precheck_jobs"]
+    assert precheck_jobs["summary"]["total"] == 1
+    assert precheck_jobs["items"][0]["id"] == job["id"]
+    assert precheck_jobs["items"][0]["status"] == "REVIEW_GATED"
+    assert precheck_jobs["items"][0]["review_status"] == "PENDING_REVIEW"
+    assert precheck_jobs["items"][0]["next_actions"] == ["upload_source_file", "inspect_manifest"]
+    assert overview["external_import_review_queue"]["summary"]["total"] == 0
+    assert overview["external_import_quarantine"]["summary"]["total"] == 0
+
+    detail = assert_ok(client.get(f"/factor-sources/import-jobs/{job['id']}"))
+    assert detail["status"] == "REVIEW_GATED"
+    assert detail["review_status"] == "PENDING_REVIEW"
+    assert detail["submitted_at"] is None
+    assert detail["next_actions"] == ["upload_source_file", "inspect_manifest"]
+
 
 def test_submitted_public_factor_import_enters_b3_quarantine(tmp_path) -> None:
     client, _db_path = create_test_client(tmp_path)
@@ -334,6 +525,38 @@ def test_submitted_public_factor_import_enters_b3_quarantine(tmp_path) -> None:
             (submitted["id"], submitted["id"], submitted["id"]),
         ).fetchone()["count"]
     assert quarantine_count == 1
+
+
+def test_submitted_public_factor_import_remains_publishable_with_current_factory_batch(tmp_path) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    _install_fama_french_download_fixture(client)
+
+    job = assert_ok(
+        client.post(
+            "/factor-sources/import-jobs",
+            json={
+                "source_id": "fama_french",
+                "dataset_key": "fama_french_us_research_factors_daily",
+                "import_mode": "AUTO_DOWNLOAD",
+                "frequency": "DAILY",
+            },
+        )
+    )
+    submitted = assert_ok(client.post(f"/factor-sources/import-jobs/{job['id']}/submit-review"))
+    latest_factory_source = _insert_completed_factory_run(client.app.state.service, tmp_path / "factory-artifacts")
+
+    overview = assert_ok(client.get("/factor-factory/overview"))
+    external_item = overview["external_import_quarantine"]["items"][0]
+    publishable_by_candidate = {row["candidate_id"]: row for row in overview["publishable_factors"]}
+
+    assert overview["batch_lineage"]["source_job_id"] == latest_factory_source
+    assert overview["batch_lineage"]["publishable_total"] == 0
+    assert external_item["source_mining_job_id"] == submitted["id"]
+    assert external_item["status"] == "PASSED"
+    assert external_item["publish_status"] == "ELIGIBLE"
+    assert external_item["id"] in publishable_by_candidate
+    assert publishable_by_candidate[external_item["id"]]["display_name_cn"] == external_item["display_name_cn"]
+    assert overview["task_summary"]["publishable_count"] == 1
 
 
 def test_factor_source_template_api_serves_xlsx_by_extension(tmp_path) -> None:

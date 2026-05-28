@@ -9,6 +9,22 @@
 
 ## [Unreleased]
 
+### 新增 (Added)
+
+- **SEC 424B2 FCN 合同骨架**: 新增结构化票据 `note_date` 影子数据合同、确定性 424B2 解析预览接口和 F2 worst-of/票息/敲出/敲入距离表达式合同，生产路径禁用外部 LLM。
+- **SEC 424B2 Parser 版本治理与 JPM Pilot 回放**: 新增 parser/rule/html/table/result hash 审计字段、重解析候选接口、JPM pilot manifest discover/ingest 接口，以及基于 `dataset_price_bars.adj_close` 的 FCN `note_date` sandbox replay。
+- **SEC 424B2 FCN 归因与压力测试**: 新增 FCN 票息损益归因、Pilot 敲入压力测试和 Auto-Repair dry-run 合同，让 replay 结果可解释为累计票息、安全垫消耗与只读风险建议。
+- **因子工厂批次血缘契约**: 新增 `/factor-factory/batch-lineage` 诊断接口和 `batch_lineage` overview 契约，统一 `current_batch_id -> source_job_id -> manifest -> quarantine -> publishable` 真相链。
+
+### 修复 (Fixed)
+
+- **因子工厂计数与发布准入**: B1/B3/B4 改读 canonical batch lineage 总数，Top50/分页只保留为预览；manifest 缺字段或 source job 不一致时阻断当前批次发布。
+- **Nasdaq 归档成员解析**: 官方归档 activity 表解析改为要求 `href symbol` 与可见 ticker 一致，跳过 `InfoQuote` 等工具链接，避免未来刷新把非真实股票代码写入 Nasdaq-100 PIT 成员和 L1 缺口。
+
+### 优化 (Changed)
+
+- **PIT/L1 备份瘦身**: 小批 L1 修复默认改为 targeted `ds-price` preimage + manifest；全量主库/market-data pair 备份必须显式调用并通过剩余空间门禁，清理脚本保护活动 DB、最新 full-pair、最新 targeted preimage 与 evidence。
+
 ## [0.1.1-027] - 2026-05-27 - 优化推云 impact 封装、推云 full 封装
 
 ### 优化 (Changed)

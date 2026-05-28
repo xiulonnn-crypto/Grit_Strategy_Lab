@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './factor-phase2-pages.css';
 
 type FactorDirection = 'HIGH_IS_GOOD' | 'LOW_IS_GOOD';
+type CompositeRebalanceFrequency = 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'semiannual' | 'yearly';
 
 export type FactorModelOption = {
   id: string;
@@ -65,7 +66,7 @@ export type FactorModelPreviewPayload = {
     capRedistributionMode: 'cash' | 'proportional_refill';
   };
   rebalanceLogic?: {
-    frequency: 'daily' | 'weekly' | 'monthly';
+    frequency: CompositeRebalanceFrequency;
     calendarRule: string;
     exitRankPercentile: number;
     minTradeNotionalUsd: number;
@@ -212,6 +213,15 @@ const DEFAULT_COMPOSITE_REBALANCE_LOGIC: NonNullable<FactorModelPreviewPayload['
   exitRankPercentile: 20,
   minTradeNotionalUsd: 10_000,
 };
+
+const COMPOSITE_REBALANCE_OPTIONS: ReadonlyArray<{ value: CompositeRebalanceFrequency; label: string }> = [
+  { value: 'daily', label: '每日' },
+  { value: 'weekly', label: '每周' },
+  { value: 'monthly', label: '每月' },
+  { value: 'quarterly', label: '每季度' },
+  { value: 'semiannual', label: '每半年' },
+  { value: 'yearly', label: '每年' },
+];
 
 const DEFAULT_COMPOSITE_EXECUTION_CONSTRAINTS: NonNullable<FactorModelPreviewPayload['executionConstraints']> = {
   notionalUsd: 10_000_000,
@@ -1098,7 +1108,7 @@ export function FactorModelBuilderPage({
               <article className="composite-step-card" aria-label="再平衡逻辑">
                 <header><span>03</span><strong>再平衡逻辑</strong></header>
                 <div className="control-grid control-grid--four">
-                  <label><span>调仓频率</span><select aria-label="调仓频率" value={rebalanceLogic.frequency} onChange={(event) => setRebalanceLogic((current) => ({ ...current, frequency: event.target.value as typeof rebalanceLogic.frequency }))}><option value="daily">每日</option><option value="weekly">每周</option><option value="monthly">每月</option></select></label>
+                  <label><span>调仓频率</span><select aria-label="调仓频率" value={rebalanceLogic.frequency} onChange={(event) => setRebalanceLogic((current) => ({ ...current, frequency: event.target.value as CompositeRebalanceFrequency }))}>{COMPOSITE_REBALANCE_OPTIONS.map((option) => (<option key={option.value} value={option.value}>{option.label}</option>))}</select></label>
                   <label><span>日历规则</span><select aria-label="调仓日历规则" value={rebalanceLogic.calendarRule} onChange={(event) => setRebalanceLogic((current) => ({ ...current, calendarRule: event.target.value }))}><option value="first_trading_day">首个交易日</option><option value="last_trading_day">最后交易日</option><option value="monday">周一</option></select></label>
                   <label><span>退出阈值 %</span><input aria-label="排名退出阈值" type="number" value={rebalanceLogic.exitRankPercentile} onChange={(event) => setRebalanceLogic((current) => ({ ...current, exitRankPercentile: Number(event.target.value) || 0 }))} /></label>
                   <label><span>最小交易额</span><input aria-label="最小交易金额" type="number" value={rebalanceLogic.minTradeNotionalUsd} onChange={(event) => setRebalanceLogic((current) => ({ ...current, minTradeNotionalUsd: Number(event.target.value) || 0 }))} /></label>

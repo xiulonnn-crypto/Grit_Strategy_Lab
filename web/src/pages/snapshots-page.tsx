@@ -892,6 +892,72 @@ function UniverseRow({ item }: { item: ApiUniverseSnapshot }): JSX.Element {
   );
 }
 
+const SNAPSHOT_LOADING_LAYERS = ['L1', 'L2', 'L3', 'L4'];
+
+function SnapshotLoadingLines(): JSX.Element {
+  return (
+    <>
+      <span className="snapshots-loading-line snapshots-loading-line--wide" />
+      <span className="snapshots-loading-line snapshots-loading-line--medium" />
+      <span className="snapshots-loading-line snapshots-loading-line--short" />
+    </>
+  );
+}
+
+function SnapshotLoadingPanel({ title, className = '' }: { title: string; className?: string }): JSX.Element {
+  return (
+    <article className={`snapshots-ops-panel snapshots-loading-panel ${className}`.trim()}>
+      <div className="snapshots-ops-panel__header">
+        <div>
+          <h2>{title}</h2>
+          <span className="snapshots-loading-line snapshots-loading-line--caption" />
+        </div>
+      </div>
+      <div className="snapshots-loading-panel__body" aria-hidden="true">
+        <SnapshotLoadingLines />
+        <SnapshotLoadingLines />
+      </div>
+    </article>
+  );
+}
+
+function SnapshotsLoadingState(): JSX.Element {
+  return (
+    <div className="snapshots-ops-console snapshots-loading-console" data-testid="snapshots-loading-console" aria-busy="true">
+      <section className="snapshots-ops-panel snapshots-ops-health snapshots-loading-state" aria-labelledby="snapshots-loading-title">
+        <div className="snapshots-ops-panel__header">
+          <div>
+            <h2 id="snapshots-loading-title">L1-L4 数据层健康</h2>
+            <p className="snapshots-ops-small-note">正在读取快照治理台...</p>
+          </div>
+          <span className="snapshots-loading-pill">加载中</span>
+        </div>
+        <div className="snapshots-ops-health-grid" aria-hidden="true">
+          {SNAPSHOT_LOADING_LAYERS.map((layer) => (
+            <article className="snapshots-ops-health-card snapshots-ops-health-card--loading" key={layer}>
+              <span className="snapshots-loading-label">{layer}</span>
+              <strong className="snapshots-loading-line snapshots-loading-line--title" />
+              <span className="snapshots-loading-line snapshots-loading-line--wide" />
+              <span className="snapshots-loading-line snapshots-loading-line--medium" />
+              <span className="snapshots-loading-line snapshots-loading-line--short" />
+            </article>
+          ))}
+        </div>
+      </section>
+      <section className="snapshots-ops-queue-row" aria-hidden="true">
+        <SnapshotLoadingPanel title="待处理队列" />
+        <SnapshotLoadingPanel title="因子影响摘要" />
+      </section>
+      <SnapshotLoadingPanel title="当前下钻" className="snapshots-ops-drilldown" />
+      <SnapshotLoadingPanel title="原始快照清单" className="snapshots-ops-ledger" />
+      <section className="snapshots-ops-foot-grid" aria-hidden="true">
+        <SnapshotLoadingPanel title="凭据与本机配置" />
+        <SnapshotLoadingPanel title="重启命令" />
+      </section>
+    </div>
+  );
+}
+
 export function SnapshotsPage(): JSX.Element {
   const { route } = useAppRoute();
   const api = useApiClient();
@@ -1110,11 +1176,7 @@ export function SnapshotsPage(): JSX.Element {
 
       {error ? <div className="error-banner">{error}</div> : null}
 
-      {loading ? (
-        <section className="panel snapshots-feedback-panel">
-          <p>正在加载快照操作台...</p>
-        </section>
-      ) : null}
+      {loading ? <SnapshotsLoadingState /> : null}
 
       {!loading ? (
         <SnapshotOperationsConsole

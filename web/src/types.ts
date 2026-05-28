@@ -3678,6 +3678,7 @@ export type ApiExternalFactorMappingRow = {
 export type ApiExternalFactorArtifactPaths = {
   uploaded_file_id?: string | null;
   raw_file_ref?: string | null;
+  download_url?: string | null;
   manifest_ref?: string | null;
   template_ref?: string | null;
 };
@@ -4000,6 +4001,505 @@ export type ApiFactorFactoryRun = {
   error_message?: string | null;
 };
 
+export type ApiFactorFactoryArtifactManifest = {
+  job_id?: string | null;
+  source_job_id?: string | null;
+  formula_count?: number | null;
+  refined_count?: number | null;
+  hash?: string | null;
+  created_at?: string | null;
+};
+
+export type ApiFactorFactoryArtifactRef = {
+  formula_manifest?: string | null;
+  refined_f2_candidate_ledger?: string | null;
+};
+
+export type ApiFactorFactoryBatchLineage = {
+  current_batch_id?: string | null;
+  source_job_id?: string | null;
+  artifact_id?: string | null;
+  artifact_ref?: ApiFactorFactoryArtifactRef;
+  manifest?: ApiFactorFactoryArtifactManifest;
+  raw_f2_total: number;
+  refined_f2_total: number;
+  total_candidates: number;
+  ledger_total: number;
+  quarantine_total: number;
+  quarantine_status_counts?: Record<string, number>;
+  quarantine_raw_f2_total?: number;
+  quarantine_refined_f2_total?: number;
+  publishable_total: number;
+  preview_count: number;
+  is_preview: boolean;
+  page_count: number;
+  source_reason: string;
+  status: "OK" | "WARN" | "BLOCKED" | string;
+  warnings: string[];
+  publish_blocked?: boolean;
+  publish_blocker_reason_cn?: string;
+  db_path?: string | null;
+  [key: string]: unknown;
+};
+
+export type ApiSec424B2EvidenceAnchor = {
+  field_path?: string;
+  table_index?: number | null;
+  row_index?: number | null;
+  column_index?: number | null;
+  text?: string;
+  source_url?: string | null;
+  [key: string]: unknown;
+};
+
+export type ApiSec424B2ParseRun = {
+  run_id: string;
+  accession_number?: string;
+  issuer_cik?: string;
+  source_url?: string;
+  primary_document_url?: string;
+  raw_html_sha256?: string;
+  normalized_text_hash?: string;
+  table_signature_hash?: string;
+  parser_rule_hash?: string;
+  parse_result_hash?: string;
+  parser_version?: string;
+  status: "PARSED" | "REVIEW_REQUIRED" | "FAILED" | string;
+  warnings?: string[];
+  llm_used?: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ApiStructuredNoteUnderlying = {
+  note_id?: string;
+  underlying_index?: number | null;
+  ticker: string;
+  initial_value?: number | null;
+  strike_value?: number | null;
+  barrier_ratio?: number | null;
+  barrier_value?: number | null;
+  trigger_ratio?: number | null;
+  trigger_value?: number | null;
+  exchange?: string;
+  evidence?: ApiSec424B2EvidenceAnchor | Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+};
+
+export type ApiStructuredNoteTerms = {
+  note_id: string;
+  factor_id?: string;
+  legacy_factor_id?: string | null;
+  source_url?: string;
+  issuer_cik?: string;
+  accession_number?: string;
+  primary_document?: string;
+  cusip?: string | null;
+  pricing_date?: string | null;
+  issue_date?: string | null;
+  maturity_date?: string | null;
+  coupon_rate_annual?: number | null;
+  coupon_frequency?: string;
+  observation_frequency?: string;
+  autocall_frequency?: string;
+  memory_feature?: boolean;
+  payoff_type?: string;
+  review_status?: "PARSED" | "REVIEW_REQUIRED" | "FAILED" | string;
+  underlying_tickers?: string[];
+  underlying_count?: number;
+  barrier_percentage?: number | null;
+  definition_version?: string;
+  metadata?: Record<string, unknown>;
+  evidence?: Record<string, unknown>;
+};
+
+export type ApiStructuredNoteF2Expression = {
+  factor_id: string;
+  definition_id?: string | null;
+  name: string;
+  expression: string;
+  description_cn?: string;
+  dependencies?: string[];
+  missing_policy?: string;
+  output_dimension: "note_date";
+  argument_schema?: Record<string, unknown>;
+  instance_binding?: Record<string, unknown>;
+};
+
+export type ApiStructuredNoteFactorDefinition = {
+  definition_id: string;
+  layer: "F1" | "F2";
+  name?: string;
+  description_cn?: string;
+  output_dimension?: string;
+  argument_schema?: Record<string, unknown>;
+  version?: string;
+  publish_boundary?: string;
+};
+
+export type ApiStructuredNoteUnderlyingSlot = {
+  underlying_index: number;
+  ticker?: string;
+  initial_value?: number | null;
+  strike_value?: number | null;
+  barrier_ratio?: number | null;
+  barrier_value?: number | null;
+  trigger_ratio?: number | null;
+  trigger_value?: number | null;
+  exchange?: string;
+};
+
+export type ApiStructuredNoteF1StaticTermBundle = {
+  note_id: string;
+  parse_run_id?: string | null;
+  definition_version?: string;
+  f1_definition_ids?: string[];
+  static_terms?: Record<string, unknown>;
+  underlying_count?: number;
+  underlying_slots?: ApiStructuredNoteUnderlyingSlot[];
+  missing_fields?: string[];
+  cache_status?: string;
+  parser_version?: string;
+  parser_rule_hash?: string;
+};
+
+export type ApiStructuredNoteF2Contract = {
+  contract_id: string;
+  note_id: string;
+  output_dimension: "note_date";
+  definition_version?: string;
+  source_factor_ids?: string[];
+  underlying_tickers?: string[];
+  underlying_count?: number;
+  underlying_slots?: ApiStructuredNoteUnderlyingSlot[];
+  stable_definition_count?: Record<string, number>;
+  publish_boundary?: string;
+  production_llm_policy?: "NO_LLM_PROD";
+  expressions: ApiStructuredNoteF2Expression[];
+};
+
+export type ApiStructuredNoteFactorDefinitionResponse = {
+  definition_version: string;
+  definitions: ApiStructuredNoteFactorDefinition[];
+  summary?: Record<string, unknown>;
+};
+
+export type ApiStructuredNoteDefinitionBindingResponse = {
+  note_id: string;
+  definition_version?: string;
+  f1_bundle: ApiStructuredNoteF1StaticTermBundle;
+  f2_contract: ApiStructuredNoteF2Contract;
+  calculable_f2_definition_ids?: string[];
+  blocked_f2_definition_ids?: string[];
+  summary?: Record<string, unknown>;
+};
+
+export type ApiStructuredNoteF1CacheStatsResponse = {
+  cache_entry_count?: number;
+  cache_hit_count?: number;
+  cache_miss_count?: number;
+  cache_hit_rate?: number;
+  eviction_count?: number;
+  approx_memory_bytes?: number;
+  approx_memory_mb?: number;
+  max_notes?: number;
+  policy?: string;
+  warn_memory_bytes?: number;
+  memory_guardrail_state?: string;
+};
+
+export type ApiStructuredNoteFcnRuntimeHealthResponse = {
+  status?: "OK" | "WARN" | "DATA_SOURCE_BLOCKED" | "MEMORY_GUARDRAIL_BLOCKED" | "RUNTIME_NOT_READY" | string;
+  runtime_ready?: boolean;
+  service_ready?: boolean;
+  cache_stats: ApiStructuredNoteF1CacheStatsResponse;
+  latest_preflight_run?: Record<string, unknown> | null;
+  summary?: Record<string, unknown>;
+};
+
+export type ApiStructuredNoteFcnReplayPreflightPayload = {
+  manifest_id?: string | null;
+  manifest_path?: string | null;
+  note_ids?: string[];
+  sample_limit?: number;
+  max_notes?: number;
+  dataset_snapshot_id?: string;
+  start_date?: string | null;
+  end_date?: string | null;
+  replay_mode?: "sandbox";
+  price_proxies?: Record<string, unknown>;
+};
+
+export type ApiStructuredNoteFcnReplayPreflightNoteResult = {
+  note_id?: string;
+  parse_run_id?: string | null;
+  status?: "OK" | "WARN" | "DATA_SOURCE_BLOCKED" | "MEMORY_GUARDRAIL_BLOCKED" | "RUNTIME_NOT_READY" | string;
+  underlying_count?: number;
+  replay_point_count?: number;
+  ok_point_count?: number;
+  blocked_point_count?: number;
+  elapsed_ms?: number;
+  missing_symbols?: string[];
+  blocker_code?: string | null;
+};
+
+export type ApiStructuredNoteFcnReplayPreflightResponse = {
+  run_id: string;
+  status?: "OK" | "WARN" | "DATA_SOURCE_BLOCKED" | "MEMORY_GUARDRAIL_BLOCKED" | "RUNTIME_NOT_READY" | string;
+  note_count?: number;
+  replay_point_count?: number;
+  points_per_second?: number;
+  p50_ms_per_note?: number | null;
+  p95_ms_per_note?: number | null;
+  price_missing_ratio?: number;
+  data_source_blocked_count?: number;
+  max_underlying_count?: number;
+  slot_count_histogram?: Record<string, number>;
+  cache_stats_before?: ApiStructuredNoteF1CacheStatsResponse;
+  cache_stats_after?: ApiStructuredNoteF1CacheStatsResponse;
+  note_results?: ApiStructuredNoteFcnReplayPreflightNoteResult[];
+  summary?: Record<string, unknown>;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ApiSec424B2ParsePreviewPayload = {
+  source_url?: string | null;
+  issuer_cik?: string | null;
+  accession_number?: string | null;
+  primary_document?: string | null;
+  html?: string | null;
+  persist?: boolean;
+  parser_options?: Record<string, unknown>;
+};
+
+export type ApiSec424B2ParsePreviewResponse = {
+  status: "PARSED" | "REVIEW_REQUIRED" | "FAILED" | string;
+  warnings: string[];
+  llm_used: boolean;
+  parse_run: ApiSec424B2ParseRun;
+  note: ApiStructuredNoteTerms;
+  underlyings: ApiStructuredNoteUnderlying[];
+  f2_contract: ApiStructuredNoteF2Contract;
+};
+
+export type ApiSec424B2PilotManifestEntry = {
+  accession_number?: string;
+  source_url?: string;
+  primary_document?: string;
+  issuer_cik?: string;
+  raw_html_sha256?: string;
+  parser_version?: string;
+  parser_rule_hash?: string;
+  table_signature_hash?: string;
+  parse_result_hash?: string;
+  status?: "PARSED" | "REVIEW_REQUIRED" | "FAILED" | string;
+  warnings?: string[];
+  note_id?: string;
+  underlying_tickers?: string[];
+  underlying_count?: number;
+  asset_mix?: string;
+  coupon_rate_annual?: number | null;
+  barrier_percentage?: number | null;
+  autocall_frequency?: string;
+  memory_feature?: boolean;
+  feature_bucket?: string;
+  price_proxies?: Record<string, unknown>;
+  last_parse_run_id?: string | null;
+  last_replay_run_id?: string | null;
+  last_status?: string | null;
+  last_validated_at?: string | null;
+  [key: string]: unknown;
+};
+
+export type ApiSec424B2PilotDiscoverPayload = {
+  issuer_cik?: string;
+  scan_limit?: number;
+  pilot_limit?: number;
+  parser_options?: Record<string, unknown>;
+};
+
+export type ApiSec424B2PilotManifestResponse = {
+  manifest_id?: string;
+  issuer_cik?: string;
+  pilot_limit?: number;
+  scan_limit?: number;
+  selected_count?: number;
+  blocked_count?: number;
+  last_validated_at?: string | null;
+  last_replay_run_id?: string | null;
+  validation_status?: string | null;
+  manifest_hash?: string | null;
+  parser_version?: string | null;
+  parser_rule_hash?: string | null;
+  warnings?: string[];
+  entries: ApiSec424B2PilotManifestEntry[];
+  summary?: Record<string, unknown>;
+};
+
+export type ApiSec424B2PilotIngestPayload = ApiSec424B2PilotDiscoverPayload & {
+  manifest_path?: string | null;
+  entries?: ApiSec424B2PilotManifestEntry[];
+  persist?: boolean;
+};
+
+export type ApiSec424B2PilotIngestResponse = {
+  manifest_id: string;
+  manifest_path?: string;
+  status?: string;
+  selected_count?: number;
+  parse_run_count?: number;
+  entries: ApiSec424B2PilotManifestEntry[];
+  parse_runs: ApiSec424B2ParsePreviewResponse[];
+  warnings?: string[];
+  summary?: Record<string, unknown>;
+};
+
+export type ApiSec424B2ReparseCandidate = {
+  run_id: string;
+  accession_number?: string;
+  issuer_cik?: string;
+  source_url?: string;
+  parser_version?: string;
+  parser_rule_hash?: string;
+  raw_html_sha256?: string;
+  parse_result_hash?: string;
+  status?: "PARSED" | "REVIEW_REQUIRED" | "FAILED" | string;
+  reasons?: string[];
+  warnings?: string[];
+};
+
+export type ApiSec424B2ReparseCandidateResponse = {
+  candidates: ApiSec424B2ReparseCandidate[];
+  summary?: Record<string, unknown>;
+};
+
+export type ApiSec424B2ReparseJobPayload = {
+  auto_repair_enabled?: boolean | null;
+  mode?: "dry_run";
+  dry_run?: boolean;
+  current_parser_version?: string | null;
+  current_rule_hash?: string | null;
+  reasons_allowlist?: string[];
+  max_filings?: number;
+};
+
+export type ApiSec424B2ReparseJobResponse = {
+  job_id: string;
+  status?: "DISABLED" | "DRY_RUN_READY" | "DRY_RUN_ONLY" | "NOT_FOUND" | string;
+  mode?: "dry_run" | string;
+  dry_run?: boolean;
+  auto_repair_enabled?: boolean;
+  reasons_allowlist?: string[];
+  candidate_count?: number;
+  selected_count?: number;
+  candidates?: ApiSec424B2ReparseCandidate[];
+  actions?: Record<string, unknown>[];
+  summary?: Record<string, unknown>;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ApiStructuredNoteFcnReplayPayload = {
+  note_id?: string | null;
+  parse_run_id?: string | null;
+  dataset_snapshot_id?: string;
+  replay_mode?: "sandbox" | "production";
+  start_date?: string | null;
+  end_date?: string | null;
+  observation_frequency?: string | null;
+  price_proxies?: Record<string, unknown>;
+};
+
+export type ApiStructuredNoteFcnReplayPoint = {
+  note_date: string;
+  status?: string;
+  worst_performance?: number | null;
+  coupon_eligible?: boolean;
+  coupon_signal?: number;
+  autocall_trigger?: boolean;
+  distance_to_barrier?: number | null;
+  details?: Record<string, unknown>;
+};
+
+export type ApiStructuredNoteFcnReplayResponse = {
+  run_id: string;
+  note_id: string;
+  parse_run_id?: string | null;
+  dataset_snapshot_id?: string;
+  replay_mode?: string;
+  status?: "OK" | "PARTIAL" | "DATA_SOURCE_BLOCKED" | "FAILED" | string;
+  points: ApiStructuredNoteFcnReplayPoint[];
+  summary?: Record<string, unknown>;
+  price_proxies?: Record<string, unknown>;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ApiStructuredNoteFcnAttributionPoint = {
+  note_date: string;
+  status?:
+    | "CARRY_BUFFERING"
+    | "COUPON_OFFSET_EXHAUSTED"
+    | "NEGATIVE_CONVEXITY_ACTIVE"
+    | "DATA_SOURCE_BLOCKED"
+    | string;
+  worst_performance?: number | null;
+  cumulative_coupons?: number;
+  drawdown_loss_proxy?: number | null;
+  net_benefit?: number | null;
+  coupon_loss_coverage_ratio?: number | null;
+  coupon_signal?: number;
+  source_replay_status?: string;
+  details?: Record<string, unknown>;
+};
+
+export type ApiStructuredNoteFcnAttributionResponse = {
+  run_id: string;
+  note_id: string;
+  parse_run_id?: string | null;
+  status?: "OK" | "PARTIAL" | "DATA_SOURCE_BLOCKED" | "FAILED" | string;
+  points: ApiStructuredNoteFcnAttributionPoint[];
+  summary?: Record<string, unknown>;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ApiStructuredNoteFcnPilotPressureTestPayload = {
+  manifest_id?: string | null;
+  manifest_path?: string | null;
+  near_barrier_threshold?: number;
+  target_symbol?: string;
+};
+
+export type ApiStructuredNoteFcnPilotPressureNoteResult = {
+  note_id?: string;
+  accession_number?: string;
+  replay_run_id?: string | null;
+  note_date?: string | null;
+  status?: string;
+  distance_to_barrier?: number | null;
+  worst_performance?: number | null;
+  reason?: string;
+};
+
+export type ApiStructuredNoteFcnPilotPressureTestResponse = {
+  manifest_id?: string;
+  manifest_path?: string | null;
+  risk_state?: "NORMAL" | "WATCH" | "REDUCE_BETA" | "DATA_SOURCE_BLOCKED" | string;
+  evaluated_note_count?: number;
+  blocked_note_count?: number;
+  coverage_ratio?: number;
+  average_distance_to_barrier?: number | null;
+  min_distance_to_barrier?: number | null;
+  notes_near_barrier_count?: number;
+  notes_breached_barrier_count?: number;
+  advisory_instructions?: Record<string, unknown>[];
+  note_results?: ApiStructuredNoteFcnPilotPressureNoteResult[];
+  summary?: Record<string, unknown>;
+  created_at?: string | null;
+};
+
 export type ApiFactorFactoryFunnel = {
   mined_candidates: number;
   quarantine_candidates: number;
@@ -4036,6 +4536,7 @@ export type ApiFactorFactoryOverview = {
   external_import_precheck_jobs?: ApiExternalFactorImportReviewQueue;
   external_import_review_queue?: ApiExternalFactorImportReviewQueue;
   external_import_quarantine?: ApiFactorQuarantineCandidateListResponse;
+  batch_lineage?: ApiFactorFactoryBatchLineage;
   gate_policy: ApiFactorFactoryGatePolicy;
   daily_run?: ApiFactorFactoryRun;
   manual_run?: ApiFactorFactoryRun;
@@ -4416,6 +4917,44 @@ export type DemoApi = {
   getFactorMiningJob: (id: string) => Promise<ApiFactorMiningJob>;
   cancelFactorMiningJob: (id: string) => Promise<ApiFactorMiningJob>;
   getFactorFactoryOverview?: () => Promise<ApiFactorFactoryOverview>;
+  getFactorFactoryBatchLineage?: (runId?: string) => Promise<ApiFactorFactoryBatchLineage>;
+  previewSec424B2StructuredNote?: (
+    payload: ApiSec424B2ParsePreviewPayload,
+  ) => Promise<ApiSec424B2ParsePreviewResponse>;
+  getSec424B2ParseRun?: (runId: string) => Promise<ApiSec424B2ParsePreviewResponse>;
+  discoverSec424B2PilotPreview?: (
+    payload: ApiSec424B2PilotDiscoverPayload,
+  ) => Promise<ApiSec424B2PilotManifestResponse>;
+  ingestSec424B2Pilot?: (
+    payload: ApiSec424B2PilotIngestPayload,
+  ) => Promise<ApiSec424B2PilotIngestResponse>;
+  listSec424B2ReparseCandidates?: (params?: {
+    current_parser_version?: string;
+    current_rule_hash?: string;
+  }) => Promise<ApiSec424B2ReparseCandidateResponse>;
+  previewSec424B2ReparseJob?: (
+    payload: ApiSec424B2ReparseJobPayload,
+  ) => Promise<ApiSec424B2ReparseJobResponse>;
+  createSec424B2ReparseJob?: (
+    payload: ApiSec424B2ReparseJobPayload,
+  ) => Promise<ApiSec424B2ReparseJobResponse>;
+  getSec424B2ReparseJob?: (jobId: string) => Promise<ApiSec424B2ReparseJobResponse>;
+  listStructuredNoteFcnFactorDefinitions?: () => Promise<ApiStructuredNoteFactorDefinitionResponse>;
+  getStructuredNoteDefinitionBindings?: (noteId: string) => Promise<ApiStructuredNoteDefinitionBindingResponse>;
+  getStructuredNoteFcnRuntimeHealth?: () => Promise<ApiStructuredNoteFcnRuntimeHealthResponse>;
+  getStructuredNoteF1CacheStats?: () => Promise<ApiStructuredNoteF1CacheStatsResponse>;
+  preflightStructuredNoteFcnReplay?: (
+    payload: ApiStructuredNoteFcnReplayPreflightPayload,
+  ) => Promise<ApiStructuredNoteFcnReplayPreflightResponse>;
+  getStructuredNoteFcnReplayPreflightRun?: (runId: string) => Promise<ApiStructuredNoteFcnReplayPreflightResponse>;
+  replayStructuredNoteFcn?: (
+    payload: ApiStructuredNoteFcnReplayPayload,
+  ) => Promise<ApiStructuredNoteFcnReplayResponse>;
+  getStructuredNoteFcnReplayRun?: (runId: string) => Promise<ApiStructuredNoteFcnReplayResponse>;
+  getStructuredNoteFcnAttribution?: (runId: string) => Promise<ApiStructuredNoteFcnAttributionResponse>;
+  pressureTestStructuredNoteFcnPilot?: (
+    payload: ApiStructuredNoteFcnPilotPressureTestPayload,
+  ) => Promise<ApiStructuredNoteFcnPilotPressureTestResponse>;
   getFactorFactoryOperatorConfig?: () => Promise<ApiFactorFactoryOperatorConfigResponse>;
   saveFactorFactoryOperatorConfig?: (
     payload: ApiOperatorConfigDraft,

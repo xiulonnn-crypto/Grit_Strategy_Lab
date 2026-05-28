@@ -397,6 +397,9 @@ export function installMockApiServer() {
       if (method === 'GET' && url.pathname === '/factor-factory/overview' && demoApi.getFactorFactoryOverview) {
         return json(await demoApi.getFactorFactoryOverview());
       }
+      if (method === 'GET' && url.pathname === '/factor-factory/batch-lineage' && demoApi.getFactorFactoryBatchLineage) {
+        return json(await demoApi.getFactorFactoryBatchLineage(url.searchParams.get('run_id') ?? undefined));
+      }
       if (method === 'POST' && url.pathname === '/factor-factory/automation/start' && demoApi.startFactorFactoryAutomation) {
         return json(await demoApi.startFactorFactoryAutomation(body as import('./types').ApiFactorFactoryAutomationPayload));
       }

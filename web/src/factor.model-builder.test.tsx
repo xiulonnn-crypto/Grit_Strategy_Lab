@@ -887,6 +887,24 @@ describe('FactorModelBuilderPage', () => {
     });
     expect(initialPayload?.factors).toHaveLength(1);
     expect(initialPayload?.factors[0]).toMatchObject({ factorId: 's_mom_12m1m_rank', weightPct: 100 });
+    expect(initialPayload?.rebalanceFrequency).toBe('monthly');
+    expect(initialPayload?.rebalanceLogic?.frequency).toBe('monthly');
+
+    const frequencySelect = screen.getByLabelText('调仓频率') as HTMLSelectElement;
+    expect(Array.from(frequencySelect.options).map((option) => option.value)).toEqual([
+      'daily',
+      'weekly',
+      'monthly',
+      'quarterly',
+      'semiannual',
+      'yearly',
+    ]);
+    fireEvent.change(frequencySelect, { target: { value: 'semiannual' } });
+
+    await waitFor(() =>
+      expect(previewFactorModel.mock.calls.at(-1)?.[0].rebalanceLogic?.frequency).toBe('semiannual'),
+    );
+    expect(previewFactorModel.mock.calls.at(-1)?.[0].rebalanceFrequency).toBe('semiannual');
 
     const refillButtons = document.querySelectorAll<HTMLButtonElement>('.allocation-switch button');
     expect(refillButtons).toHaveLength(2);
@@ -903,6 +921,8 @@ describe('FactorModelBuilderPage', () => {
     await waitFor(() => expect(createFactorModel).toHaveBeenCalledTimes(1));
     expect(createFactorModel.mock.calls[0][0].strategyType).toBe('COMPOSITE_FACTOR');
     expect(createFactorModel.mock.calls[0][0].weightMapping?.capRedistributionMode).toBe('proportional_refill');
+    expect(createFactorModel.mock.calls[0][0].rebalanceFrequency).toBe('semiannual');
+    expect(createFactorModel.mock.calls[0][0].rebalanceLogic?.frequency).toBe('semiannual');
   });
 
   it('lets operators choose rebalance frequency before preview and creation', async () => {

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from bisect import bisect_right
+from collections import OrderedDict
 import json
+import logging
 import math
 import os
 import re
@@ -65,6 +67,7 @@ from .factor_mining import (
     factor_mining_job_id_for_request,
     run_factor_mining_job,
 )
+from .factor_factory_lineage import build_factor_factory_artifact_manifest, build_factor_factory_batch_lineage
 from .factor_research import (
     FACTOR_QUARANTINE_RULE_VERSION,
     FACTOR_PRUNE_CORRELATION_THRESHOLD,
@@ -98,6 +101,16 @@ from .pit_preprocessing import (
 from .pit_external_sources import resolve_cache_dir as default_pit_external_cache_dir
 from .polygon_provider import PolygonMarketDataProvider
 from .sec_edgar_provider import SecEdgarProvider
+from .structured_notes import (
+    SEC_424B2_PARSER_RULE_HASH,
+    SEC_424B2_PARSER_VERSION,
+    STRUCTURED_NOTE_DEFINITION_VERSION,
+    compile_fcn_f2_contract,
+    evaluate_fcn_note_signals,
+    parse_sec_424b2_structured_note,
+    structured_note_definition_ids,
+    structured_note_factor_definitions,
+)
 from .market_data_repository import (
     DATASET_ANALYST_CONSENSUS_SNAPSHOT_ID,
     DATASET_CORPORATE_ACTIONS_SNAPSHOT_ID,
@@ -154,6 +167,8 @@ from .universe_history import (
     semiannual_anchor_dates,
 )
 from .yahoo_provider import YahooMarketDataProvider
+
+logger = logging.getLogger(__name__)
 
 FACTOR_FACTORY_PRUNE_EVIDENCE_SOURCES = {
     "MEASURED_DIAGNOSTIC_IC_SERIES",
@@ -312,6 +327,47 @@ def _coerce_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _min_present_float(values: Iterable[Any]) -> float | None:
+    parsed: list[float] = []
+    for value in values:
+        try:
+            parsed.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return min(parsed) if parsed else None
+
+
+def _percentile(values: Sequence[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    if len(ordered) == 1:
+        return ordered[0]
+    rank = (len(ordered) - 1) * max(0.0, min(100.0, percentile)) / 100.0
+    lower = int(math.floor(rank))
+    upper = int(math.ceil(rank))
+    if lower == upper:
+        return ordered[lower]
+    weight = rank - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def _positive_int_env(name: str, default: int, *, minimum: int = 0) -> int:
+    try:
+        value = int(str(os.getenv(name) or default).strip())
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
+
+
+def _positive_float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
+    try:
+        value = float(str(os.getenv(name) or default).strip())
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
 
 
 def _pct_change(current: Any, base: Any) -> float:
@@ -660,6 +716,24 @@ class RealBacktestPlatformService(BacktestPlatformService):
         self._multi_factor_factor_index_cache_seconds = max(0.0, factor_index_cache_ttl)
         self._multi_factor_factor_index_cache: tuple[float, str, dict[str, dict[str, Any]]] | None = None
         self._multi_factor_factor_index_cache_lock = threading.Lock()
+        self._structured_note_f1_static_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._structured_note_f1_static_cache_load_count: dict[str, int] = {}
+        self._structured_note_f1_static_cache_bytes: dict[str, int] = {}
+        self._structured_note_f1_static_cache_hits = 0
+        self._structured_note_f1_static_cache_misses = 0
+        self._structured_note_f1_static_cache_evictions = 0
+        self._structured_note_f1_static_cache_max_notes = _positive_int_env(
+            "GRIT_STRUCTURED_NOTE_F1_CACHE_MAX_NOTES",
+            2000,
+            minimum=1,
+        )
+        self._structured_note_f1_static_cache_policy = str(
+            os.getenv("GRIT_STRUCTURED_NOTE_F1_CACHE_POLICY") or "read_through_lru"
+        ).strip().lower()
+        self._structured_note_f1_static_cache_warn_bytes = int(
+            _positive_float_env("GRIT_STRUCTURED_NOTE_F1_CACHE_WARN_MB", 256.0) * 1024 * 1024
+        )
+        self._structured_note_f1_static_cache_lock = threading.Lock()
 
     def _prewarm_read_model_caches(self) -> None:
         try:
@@ -2039,6 +2113,130 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "error_message": row.get("error_message"),
         }
 
+    @staticmethod
+    def _factor_factory_resolve_artifact_ref(value: Any) -> tuple[Path | None, str | None]:
+        ref = str(value or "").strip()
+        if not ref:
+            return None, None
+        path = Path(ref)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        return path, ref
+
+    @classmethod
+    def _factor_factory_artifact_payload(cls, value: Any) -> tuple[dict[str, Any], str | None, str | None]:
+        path, ref = cls._factor_factory_resolve_artifact_ref(value)
+        if path is None or not path.exists():
+            return {}, None, ref
+        data = path.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except Exception:
+            payload = {}
+        return payload if isinstance(payload, dict) else {}, digest, ref
+
+    def _factor_factory_latest_run_row(self, run_id: str | None = None) -> Mapping[str, Any] | None:
+        requested_run_id = str(run_id or "").strip()
+        if requested_run_id:
+            row = self.storage.fetch_one("SELECT * FROM factor_factory_runs WHERE id = ?", (requested_run_id,))
+        else:
+            row = self.storage.fetch_one(
+                """
+                SELECT *
+                FROM factor_factory_runs
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """
+            )
+        if not row:
+            return None
+        if self._factor_factory_overview_should_refresh_run_row(row, is_latest=not requested_run_id):
+            return self._refresh_factor_factory_run_row(row)
+        return row
+
+    def _factor_factory_batch_lineage(
+        self,
+        run: Mapping[str, Any] | None,
+        *,
+        publishable_factors: Sequence[Mapping[str, Any]] | None = None,
+        source_reason: str = "latest_factor_factory_run",
+    ) -> dict[str, Any]:
+        if not isinstance(run, Mapping):
+            return build_factor_factory_batch_lineage(
+                current_batch_id=None,
+                source_job_id=None,
+                artifact_ref={},
+                manifest_payload={},
+                ledger_payload={},
+                source_reason="factor_factory_run_not_found",
+                db_path=str(getattr(self.storage, "path", "")),
+            )
+        current_batch_id = str(run.get("id") or "").strip()
+        summary = run.get("summary") if isinstance(run.get("summary"), Mapping) else loads(run.get("summary_json"), {})
+        if not isinstance(summary, Mapping):
+            summary = {}
+        operator_engine = summary.get("operator_engine") if isinstance(summary.get("operator_engine"), Mapping) else {}
+        source_job_id = str(run.get("mining_job_id") or summary.get("mining_job_id") or "").strip()
+        artifact_refs = operator_engine.get("artifact_refs") if isinstance(operator_engine.get("artifact_refs"), Mapping) else {}
+        manifest_payload, manifest_hash, manifest_ref = self._factor_factory_artifact_payload(artifact_refs.get("formula_manifest"))
+        ledger_payload, ledger_hash, ledger_ref = self._factor_factory_artifact_payload(artifact_refs.get("refined_f2_candidate_ledger"))
+        quarantine_rows: Sequence[Mapping[str, Any]] = []
+        if source_job_id:
+            quarantine_rows = self.storage.fetch_all(
+                """
+                SELECT id, source_mining_job_id, status, publish_status, candidate_metrics_json
+                FROM factor_quarantine_candidates
+                WHERE source_mining_job_id = ?
+                """,
+                (source_job_id,),
+            )
+        if publishable_factors is not None:
+            publishable_total = len(publishable_factors)
+        elif source_job_id:
+            auto_quarantine_status = str(summary.get("auto_quarantine_status") or "").upper()
+            auto_quarantine_pending_count = int(_coerce_float(summary.get("auto_quarantine_pending_count"), 0.0))
+            if auto_quarantine_status == "PARTIAL" and auto_quarantine_pending_count > 0:
+                publishable_total = 0
+            else:
+                publishable_total = len(self._factor_factory_publishable_factors(
+                    source_mining_job_id=source_job_id,
+                    fallback_items=[],
+                ))
+        else:
+            publishable_total = 0
+        return build_factor_factory_batch_lineage(
+            current_batch_id=current_batch_id,
+            source_job_id=source_job_id,
+            artifact_ref={
+                "formula_manifest": manifest_ref or artifact_refs.get("formula_manifest"),
+                "refined_f2_candidate_ledger": ledger_ref or artifact_refs.get("refined_f2_candidate_ledger"),
+            },
+            manifest_payload=manifest_payload,
+            ledger_payload=ledger_payload,
+            manifest_hash=manifest_hash,
+            ledger_hash=ledger_hash,
+            raw_f2_total=int(
+                operator_engine.get("raw_f2_batch_delivered_count")
+                or operator_engine.get("deduped_formula_count")
+                or 0
+            ),
+            refined_f2_total=int(operator_engine.get("refined_f2_batch_delivered_count") or 0),
+            preview_count=int(operator_engine.get("top_preview_count") or 0),
+            quarantine_rows=quarantine_rows,
+            publishable_total=publishable_total,
+            source_reason=source_reason,
+            db_path=str(getattr(self.storage, "path", "")),
+        )
+
+    def get_factor_factory_batch_lineage(self, run_id: str | None = None) -> dict[str, Any]:
+        requested_run_id = str(run_id or "").strip()
+        row = self._factor_factory_latest_run_row(requested_run_id or None)
+        return self._factor_factory_batch_lineage(
+            row,
+            source_reason="explicit_run_id" if requested_run_id else "latest_factor_factory_run",
+        )
+
     def _factor_factory_run_status_from_mining_job(self, mining_status: str) -> str:
         if mining_status in {"QUEUED", "RUNNING"}:
             return "RUNNING"
@@ -2962,6 +3160,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         source_mining_job_id: str,
         fallback_items: Sequence[Mapping[str, Any]],
         defer_non_external: bool = False,
+        include_external_imports: bool = False,
     ) -> list[dict[str, Any]]:
         rows: list[Mapping[str, Any]] = []
         source_mining_job_id = str(source_mining_job_id or "").strip()
@@ -2978,17 +3177,22 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 """,
                 (source_mining_job_id,),
             )
-            rows = [
-                *rows,
-                *self.storage.fetch_all(
+            if include_external_imports:
+                external_rows = self.storage.fetch_all(
                     """
                     SELECT *
                     FROM factor_quarantine_candidates
-                    WHERE source_mining_job_id LIKE 'extimp_%'
+                    WHERE source_mining_job_id GLOB 'extimp_*'
                       AND status = 'PASSED'
-                    """
-                ),
-            ]
+                      AND publish_status = 'ELIGIBLE'
+                    """,
+                )
+                seen_row_ids = {str(row.get("id") or "") for row in rows}
+                rows.extend(
+                    row
+                    for row in external_rows
+                    if str(row.get("id") or "") and str(row.get("id") or "") not in seen_row_ids
+                )
         else:
             rows = list(fallback_items)
         existing_factor_ids: set[str] = set()
@@ -3257,7 +3461,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
         runs: Sequence[Mapping[str, Any]],
         mining: Mapping[str, Any],
         quarantine: Mapping[str, Any],
+        batch_lineage: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        batch_lineage = batch_lineage if isinstance(batch_lineage, Mapping) else {}
         mining_items = mining.get("items") if isinstance(mining.get("items"), list) else []
         quarantine_items = quarantine.get("items") if isinstance(quarantine.get("items"), list) else []
         quarantine_summary = quarantine.get("summary") if isinstance(quarantine.get("summary"), Mapping) else {}
@@ -3268,7 +3474,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
             if isinstance(latest_summary.get("operator_engine"), Mapping)
             else {}
         )
-        source_mining_job_id = str((latest_run or {}).get("mining_job_id") or latest_summary.get("mining_job_id") or "")
+        source_mining_job_id = str(
+            batch_lineage.get("source_job_id")
+            or (latest_run or {}).get("mining_job_id")
+            or latest_summary.get("mining_job_id")
+            or ""
+        )
         f1_snapshot_id = str(
             latest_summary.get("f1_catalog_snapshot_id")
             or operator_engine_summary.get("f1_catalog_snapshot_id")
@@ -3287,11 +3498,16 @@ class RealBacktestPlatformService(BacktestPlatformService):
         elif mining_items:
             top_candidates = list((mining_items[0] or {}).get("top_candidates") or [])
         raw_f2_count = int(
-            operator_engine_summary.get("raw_f2_batch_delivered_count")
+            batch_lineage.get("raw_f2_total")
+            or operator_engine_summary.get("raw_f2_batch_delivered_count")
             or operator_engine_summary.get("deduped_formula_count")
             or len(top_candidates)
         )
-        refined_f2_count = int(operator_engine_summary.get("refined_f2_batch_delivered_count") or 0)
+        refined_f2_count = int(
+            batch_lineage.get("refined_f2_total")
+            or operator_engine_summary.get("refined_f2_batch_delivered_count")
+            or 0
+        )
         l3_count_known = "f3_composition_candidate_count" in operator_engine_summary
         l3_candidate_count = int(operator_engine_summary.get("f3_composition_candidate_count") or 0)
         source_candidate_metric_rows: list[Mapping[str, Any]] = []
@@ -3322,7 +3538,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 for item in quarantine_items
                 if isinstance(item, Mapping) and str(item.get("target_layer") or "").upper() == "L3"
             )
-        quarantine_total = int(quarantine_summary.get("total") or len(quarantine_items))
+        quarantine_total = int(batch_lineage.get("quarantine_total") or quarantine_summary.get("total") or len(quarantine_items))
         task_status = self._factor_factory_task_status(latest_run)
         delivered_count = raw_f2_count if task_status == "已完成" else None
         task_rows = [
@@ -3450,11 +3666,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
             str(latest_summary.get("auto_quarantine_status") or "").upper() == "PARTIAL"
             and int(_coerce_float(latest_summary.get("auto_quarantine_pending_count"), 0.0)) > 0
         )
-        publishable_factors = self._factor_factory_publishable_factors(
-            source_mining_job_id=source_mining_job_id,
-            fallback_items=[item for item in quarantine_items if isinstance(item, Mapping)],
-            defer_non_external=defer_non_external_publishables,
-        )
+        if source_mining_job_id and bool(batch_lineage.get("publish_blocked")):
+            publishable_factors = []
+        else:
+            publishable_factors = self._factor_factory_publishable_factors(
+                source_mining_job_id=source_mining_job_id,
+                fallback_items=[item for item in quarantine_items if isinstance(item, Mapping)],
+                defer_non_external=defer_non_external_publishables,
+                include_external_imports=True,
+            )
         return {
             "task_summary": {
                 "total_tasks": len(task_rows),
@@ -3679,6 +3899,1851 @@ class RealBacktestPlatformService(BacktestPlatformService):
     def get_f1_catalog_latest(self) -> dict[str, Any]:
         return self.list_f1_catalog()
 
+    def preview_sec_424b2_structured_note(self, request: Any | None = None) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        source_url = str(payload.get("source_url") or "").strip()
+        issuer_cik = str(payload.get("issuer_cik") or "").strip()
+        accession_number = str(payload.get("accession_number") or "").strip()
+        primary_document = str(payload.get("primary_document") or "").strip()
+        html_text = str(payload.get("html") or "")
+        if not html_text:
+            provider = SecEdgarProvider()
+            if source_url:
+                html_text = provider.fetch_archive_document(source_url)
+            elif issuer_cik:
+                filings = provider.fetch_424b2_filings_by_cik(issuer_cik, limit=1)
+                if not filings:
+                    raise ValueError(f"No SEC 424B2 filings found for CIK {issuer_cik}.")
+                latest = filings[0]
+                source_url = str(latest.get("primary_document_url") or "")
+                accession_number = accession_number or str(latest.get("accession_number") or "")
+                primary_document = primary_document or str(latest.get("primary_document") or "")
+                html_text = provider.fetch_archive_document(source_url)
+            else:
+                raise ValueError("SEC 424B2 parse preview requires html, source_url, or issuer_cik.")
+        result = parse_sec_424b2_structured_note(
+            html_text,
+            source_url=source_url,
+            issuer_cik=issuer_cik,
+            accession_number=accession_number,
+            primary_document=primary_document,
+            parser_options=payload.get("parser_options") if isinstance(payload.get("parser_options"), Mapping) else {},
+        )
+        if payload.get("persist"):
+            self._persist_sec_424b2_parse_result(result)
+            return self.get_sec_424b2_parse_run(str(result["parse_run"]["run_id"]))
+        return result
+
+    def _persist_sec_424b2_parse_result(self, result: Mapping[str, Any]) -> None:
+        now = iso_now()
+        parse_run = dict(result.get("parse_run") or {})
+        note = dict(result.get("note") or {})
+        underlyings = [dict(item) for item in result.get("underlyings") or [] if isinstance(item, Mapping)]
+        run_id = str(parse_run.get("run_id") or "")
+        note_id = str(note.get("note_id") or note.get("factor_id") or "")
+        if not run_id or not note_id:
+            raise ValueError("SEC 424B2 parse result is missing run_id or note_id.")
+        self.storage.insert_json_row(
+            "sec_424b2_parse_runs",
+            {
+                "id": run_id,
+                "run_id": run_id,
+                "accession_number": str(parse_run.get("accession_number") or ""),
+                "issuer_cik": str(parse_run.get("issuer_cik") or ""),
+                "source_url": str(parse_run.get("source_url") or ""),
+                "primary_document_url": str(parse_run.get("primary_document_url") or ""),
+                "raw_html_sha256": str(parse_run.get("raw_html_sha256") or ""),
+                "normalized_text_hash": str(parse_run.get("normalized_text_hash") or ""),
+                "table_signature_hash": str(parse_run.get("table_signature_hash") or ""),
+                "parser_rule_hash": str(parse_run.get("parser_rule_hash") or ""),
+                "parse_result_hash": str(parse_run.get("parse_result_hash") or ""),
+                "parser_version": str(parse_run.get("parser_version") or ""),
+                "status": str(parse_run.get("status") or "REVIEW_REQUIRED"),
+                "warnings_json": dumps(list(parse_run.get("warnings") or [])),
+                "llm_used": 1 if parse_run.get("llm_used") else 0,
+                "created_at": str(parse_run.get("created_at") or now),
+                "updated_at": now,
+            },
+        )
+        self.storage.insert_json_row(
+            "structured_note_terms",
+            {
+                "id": note_id,
+                "note_id": note_id,
+                "parse_run_id": run_id,
+                "source_url": str(note.get("source_url") or ""),
+                "issuer_cik": str(note.get("issuer_cik") or ""),
+                "accession_number": str(note.get("accession_number") or ""),
+                "cusip": note.get("cusip"),
+                "pricing_date": note.get("pricing_date"),
+                "issue_date": note.get("issue_date"),
+                "maturity_date": note.get("maturity_date"),
+                "coupon_rate_annual": note.get("coupon_rate_annual"),
+                "coupon_frequency": str(note.get("coupon_frequency") or ""),
+                "observation_frequency": str(note.get("observation_frequency") or ""),
+                "autocall_frequency": str(note.get("autocall_frequency") or ""),
+                "memory_feature": 1 if note.get("memory_feature") else 0,
+                "payoff_type": str(note.get("payoff_type") or "REVIEW_REQUIRED"),
+                "review_status": str(note.get("review_status") or result.get("status") or "REVIEW_REQUIRED"),
+                "metadata_json": dumps(
+                    {
+                        **dict(note.get("metadata") or {}),
+                        "factor_id": str(note.get("factor_id") or "f1_fcn_note_terms"),
+                        "legacy_factor_id": str(note.get("legacy_factor_id") or note_id),
+                        "underlying_count": len([item for item in underlyings if item.get("ticker")]),
+                    }
+                ),
+                "evidence_json": dumps(dict(note.get("evidence") or {})),
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        self.storage.execute("DELETE FROM structured_note_underlyings WHERE note_id = ?", (note_id,))
+        self.storage.execute("DELETE FROM structured_note_evidence_anchors WHERE note_id = ?", (note_id,))
+        for underlying in underlyings:
+            ticker = str(underlying.get("ticker") or "").upper()
+            if not ticker:
+                continue
+            metadata = {
+                **dict(underlying.get("metadata") or {}),
+                "underlying_index": underlying.get("underlying_index"),
+            }
+            self.storage.insert_json_row(
+                "structured_note_underlyings",
+                {
+                    "id": f"{note_id}_{re.sub(r'[^A-Z0-9]+', '_', ticker).strip('_')}",
+                    "note_id": note_id,
+                    "ticker": ticker,
+                    "initial_value": underlying.get("initial_value"),
+                    "strike_value": underlying.get("strike_value"),
+                    "barrier_ratio": underlying.get("barrier_ratio"),
+                    "barrier_value": underlying.get("barrier_value"),
+                    "trigger_ratio": underlying.get("trigger_ratio"),
+                    "trigger_value": underlying.get("trigger_value"),
+                    "exchange": str(underlying.get("exchange") or ""),
+                    "evidence_json": dumps(dict(underlying.get("evidence") or {})),
+                    "metadata_json": dumps(metadata),
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+        for anchor in self._sec_424b2_evidence_anchors(note, underlyings):
+            anchor_text = str(anchor.get("text") or "")
+            field_path = str(anchor.get("field_path") or "")
+            anchor_id = "sec424b2_ev_" + hashlib.sha256(
+                f"{note_id}|{field_path}|{anchor_text}".encode("utf-8")
+            ).hexdigest()[:16]
+            self.storage.insert_json_row(
+                "structured_note_evidence_anchors",
+                {
+                    "id": anchor_id,
+                    "note_id": note_id,
+                    "field_path": field_path,
+                    "table_index": anchor.get("table_index"),
+                    "row_index": anchor.get("row_index"),
+                    "column_index": anchor.get("column_index"),
+                    "text": anchor_text,
+                    "source_url": str(anchor.get("source_url") or note.get("source_url") or ""),
+                    "created_at": now,
+                },
+            )
+        self._invalidate_structured_note_f1_static_cache(note_id)
+
+    def _invalidate_structured_note_f1_static_cache(self, note_id: str | None = None) -> None:
+        with self._structured_note_f1_static_cache_lock:
+            if note_id:
+                self._structured_note_f1_static_cache.pop(str(note_id), None)
+                self._structured_note_f1_static_cache_bytes.pop(str(note_id), None)
+                return
+            self._structured_note_f1_static_cache.clear()
+            self._structured_note_f1_static_cache_bytes.clear()
+
+    @staticmethod
+    def _structured_note_bundle_approx_bytes(bundle: Mapping[str, Any]) -> int:
+        return len(dumps(dict(bundle)).encode("utf-8", errors="replace"))
+
+    def get_structured_note_f1_cache_stats(self) -> dict[str, Any]:
+        with self._structured_note_f1_static_cache_lock:
+            hits = self._structured_note_f1_static_cache_hits
+            misses = self._structured_note_f1_static_cache_misses
+            total = hits + misses
+            approx_bytes = sum(self._structured_note_f1_static_cache_bytes.values())
+            return {
+                "cache_entry_count": len(self._structured_note_f1_static_cache),
+                "cache_hit_count": hits,
+                "cache_miss_count": misses,
+                "cache_hit_rate": (hits / total) if total else 0.0,
+                "eviction_count": self._structured_note_f1_static_cache_evictions,
+                "approx_memory_bytes": approx_bytes,
+                "approx_memory_mb": approx_bytes / (1024 * 1024),
+                "max_notes": self._structured_note_f1_static_cache_max_notes,
+                "policy": self._structured_note_f1_static_cache_policy,
+                "warn_memory_bytes": self._structured_note_f1_static_cache_warn_bytes,
+                "memory_guardrail_state": (
+                    "WARN" if approx_bytes >= self._structured_note_f1_static_cache_warn_bytes else "OK"
+                ),
+            }
+
+    def _store_structured_note_f1_static_cache_entry(self, note_id: str, bundle: Mapping[str, Any]) -> None:
+        normalized_note_id = str(note_id)
+        cached_bundle = deepcopy(dict(bundle))
+        approx_bytes = self._structured_note_bundle_approx_bytes(cached_bundle)
+        self._structured_note_f1_static_cache[normalized_note_id] = cached_bundle
+        self._structured_note_f1_static_cache.move_to_end(normalized_note_id)
+        self._structured_note_f1_static_cache_bytes[normalized_note_id] = approx_bytes
+        if self._structured_note_f1_static_cache_policy == "read_through_lru":
+            while len(self._structured_note_f1_static_cache) > self._structured_note_f1_static_cache_max_notes:
+                evicted_note_id, evicted_bundle = self._structured_note_f1_static_cache.popitem(last=False)
+                evicted_bytes = self._structured_note_f1_static_cache_bytes.pop(
+                    evicted_note_id,
+                    self._structured_note_bundle_approx_bytes(evicted_bundle),
+                )
+                self._structured_note_f1_static_cache_evictions += 1
+                logger.debug(
+                    "structured_note_f1_cache_evicted",
+                    extra={
+                        "note_id": evicted_note_id,
+                        "approx_memory_bytes": evicted_bytes,
+                        "cache_entry_count_after": len(self._structured_note_f1_static_cache),
+                        "max_notes": self._structured_note_f1_static_cache_max_notes,
+                        "policy": self._structured_note_f1_static_cache_policy,
+                    },
+                )
+
+    def list_structured_note_fcn_factor_definitions(self) -> dict[str, Any]:
+        definitions = structured_note_factor_definitions()
+        f1_count = sum(1 for item in definitions if item.get("layer") == "F1")
+        f2_count = sum(1 for item in definitions if item.get("layer") == "F2")
+        note_instance_count = self.storage.fetch_one("SELECT COUNT(*) AS count FROM structured_note_terms")
+        replay_series_count = self.storage.fetch_one("SELECT COUNT(DISTINCT note_id || ':' || run_id) AS count FROM structured_note_replay_runs")
+        return {
+            "definition_version": STRUCTURED_NOTE_DEFINITION_VERSION,
+            "definitions": definitions,
+            "summary": {
+                "f1_definition_count": f1_count,
+                "f2_definition_count": f2_count,
+                "note_instance_count": int((note_instance_count or {}).get("count") or 0),
+                "f2_series_count": int((replay_series_count or {}).get("count") or 0),
+                "publish_boundary": "sandbox -> quarantine -> publish",
+            },
+        }
+
+    def get_structured_note_f1_static_bundle(self, note_id: str) -> dict[str, Any]:
+        normalized_note_id = str(note_id or "").strip()
+        if not normalized_note_id:
+            raise ValueError("Structured note F1 bundle requires note_id.")
+        with self._structured_note_f1_static_cache_lock:
+            cached = self._structured_note_f1_static_cache.get(normalized_note_id)
+            if cached is not None:
+                self._structured_note_f1_static_cache_hits += 1
+                self._structured_note_f1_static_cache.move_to_end(normalized_note_id)
+                result = deepcopy(cached)
+                result["cache_status"] = "HIT"
+                result["cache_load_count"] = self._structured_note_f1_static_cache_load_count.get(normalized_note_id, 0)
+                result["approx_memory_bytes"] = self._structured_note_f1_static_cache_bytes.get(normalized_note_id, 0)
+                return result
+        bundle = self._build_structured_note_f1_static_bundle(normalized_note_id)
+        with self._structured_note_f1_static_cache_lock:
+            self._structured_note_f1_static_cache_misses += 1
+            self._store_structured_note_f1_static_cache_entry(normalized_note_id, bundle)
+            self._structured_note_f1_static_cache_load_count[normalized_note_id] = (
+                self._structured_note_f1_static_cache_load_count.get(normalized_note_id, 0) + 1
+            )
+            result = deepcopy(bundle)
+            result["cache_status"] = "MISS"
+            result["cache_load_count"] = self._structured_note_f1_static_cache_load_count.get(normalized_note_id, 0)
+            result["approx_memory_bytes"] = self._structured_note_f1_static_cache_bytes.get(normalized_note_id, 0)
+            return result
+
+    def _build_structured_note_f1_static_bundle(self, note_id: str) -> dict[str, Any]:
+        note_row = self.storage.fetch_one("SELECT * FROM structured_note_terms WHERE note_id = ?", (note_id,))
+        if not note_row:
+            raise ValueError(f"Structured note not found: {note_id}")
+        parse_run_id = str(note_row.get("parse_run_id") or "")
+        parse_run = self.storage.fetch_one("SELECT * FROM sec_424b2_parse_runs WHERE run_id = ?", (parse_run_id,))
+        underlying_rows = self.storage.fetch_all(
+            "SELECT * FROM structured_note_underlyings WHERE note_id = ? ORDER BY ticker",
+            (note_id,),
+        )
+        underlyings = self._sort_structured_note_underlyings(
+            [self._decode_structured_note_underlying(row) for row in underlying_rows]
+        )
+        note = self._decode_structured_note_terms(note_row, underlyings)
+        metadata = note.get("metadata") if isinstance(note.get("metadata"), Mapping) else {}
+        parser_version = str((parse_run or {}).get("parser_version") or metadata.get("parser_version") or "")
+        parser_rule_hash = str((parse_run or {}).get("parser_rule_hash") or "")
+        barrier_ratio = _min_present_float(item.get("barrier_ratio") for item in underlyings)
+        trigger_ratio = _min_present_float(item.get("trigger_ratio") for item in underlyings)
+        static_terms = {
+            "f1_fcn_note_id": note_id,
+            "f1_fcn_issuer_cik": note.get("issuer_cik"),
+            "f1_fcn_accession_number": note.get("accession_number"),
+            "f1_fcn_primary_document": note.get("primary_document"),
+            "f1_fcn_source_url": note.get("source_url"),
+            "f1_fcn_cusip": note.get("cusip"),
+            "f1_fcn_pricing_date": note.get("pricing_date"),
+            "f1_fcn_issue_date": note.get("issue_date"),
+            "f1_fcn_maturity_date": note.get("maturity_date"),
+            "f1_fcn_coupon_rate_annual": note.get("coupon_rate_annual"),
+            "f1_fcn_coupon_frequency": note.get("coupon_frequency"),
+            "f1_fcn_observation_frequency": note.get("observation_frequency"),
+            "f1_fcn_autocall_frequency": note.get("autocall_frequency"),
+            "f1_fcn_memory_feature": note.get("memory_feature"),
+            "f1_fcn_payoff_type": note.get("payoff_type"),
+            "f1_fcn_barrier_ratio": barrier_ratio,
+            "f1_fcn_trigger_ratio": trigger_ratio,
+            "f1_fcn_call_threshold_ratio": (metadata or {}).get("call_threshold_ratio", 1.0),
+            "f1_fcn_review_status": note.get("review_status"),
+            "f1_fcn_underlying_count": len(underlyings),
+            "f1_fcn_parser_version": parser_version,
+            "f1_fcn_parser_rule_hash": parser_rule_hash,
+            "f1_fcn_raw_html_sha256": (parse_run or {}).get("raw_html_sha256"),
+            "f1_fcn_table_signature_hash": (parse_run or {}).get("table_signature_hash"),
+        }
+        underlying_slots = []
+        missing_fields: list[str] = []
+        if not underlyings:
+            missing_fields.append("f1_fcn_underlying_count")
+        if note.get("review_status") != "PARSED":
+            missing_fields.append("REVIEW_REQUIRED")
+        if note.get("coupon_rate_annual") is None:
+            missing_fields.append("f1_fcn_coupon_rate_annual")
+        for index, underlying in enumerate(underlyings):
+            initial_value = underlying.get("initial_value") if underlying.get("initial_value") is not None else underlying.get("strike_value")
+            slot = {
+                "underlying_index": index,
+                "ticker": str(underlying.get("ticker") or "").upper(),
+                "initial_value": initial_value,
+                "strike_value": underlying.get("strike_value"),
+                "barrier_ratio": underlying.get("barrier_ratio"),
+                "barrier_value": underlying.get("barrier_value"),
+                "trigger_ratio": underlying.get("trigger_ratio"),
+                "trigger_value": underlying.get("trigger_value"),
+                "exchange": str(underlying.get("exchange") or ""),
+            }
+            underlying_slots.append(slot)
+            if not slot["ticker"]:
+                missing_fields.append(f"f1_fcn_underlying_ticker(slot={index})")
+            if slot["initial_value"] is None:
+                missing_fields.append(f"f1_fcn_underlying_initial_value(slot={index})")
+            if slot["barrier_ratio"] is None and slot["barrier_value"] is None:
+                missing_fields.append(f"f1_fcn_underlying_barrier_ratio(slot={index})")
+        return {
+            "note_id": note_id,
+            "parse_run_id": parse_run_id or None,
+            "definition_version": str(metadata.get("definition_version") or STRUCTURED_NOTE_DEFINITION_VERSION),
+            "f1_definition_ids": structured_note_definition_ids("F1"),
+            "static_terms": static_terms,
+            "note": note,
+            "underlyings": underlyings,
+            "underlying_count": len(underlying_slots),
+            "underlying_slots": underlying_slots,
+            "missing_fields": sorted(set(missing_fields)),
+            "cache_status": "MISS",
+            "parser_version": parser_version,
+            "parser_rule_hash": parser_rule_hash,
+        }
+
+    def get_structured_note_definition_bindings(self, note_id: str) -> dict[str, Any]:
+        bundle = self.get_structured_note_f1_static_bundle(note_id)
+        note = dict(bundle.get("note") or {})
+        underlyings = [dict(item) for item in bundle.get("underlying_slots") or []]
+        f2_contract = compile_fcn_f2_contract(note, underlyings)
+        f2_ids = structured_note_definition_ids("F2")
+        blocked = list(f2_ids) if bundle.get("missing_fields") else []
+        calculable = [] if blocked else list(f2_ids)
+        return {
+            "note_id": str(bundle.get("note_id") or note_id),
+            "definition_version": str(bundle.get("definition_version") or STRUCTURED_NOTE_DEFINITION_VERSION),
+            "f1_bundle": {
+                key: value
+                for key, value in bundle.items()
+                if key not in {"note", "underlyings", "cache_load_count"}
+            },
+            "f2_contract": f2_contract,
+            "calculable_f2_definition_ids": calculable,
+            "blocked_f2_definition_ids": blocked,
+            "summary": {
+                "f1_static_cache_status": bundle.get("cache_status"),
+                "cache_load_count": bundle.get("cache_load_count"),
+                "underlying_count": bundle.get("underlying_count"),
+                "missing_field_count": len(bundle.get("missing_fields") or []),
+                "definition_version": bundle.get("definition_version"),
+                "source_factor_ids": f2_contract.get("source_factor_ids"),
+            },
+        }
+
+    def get_structured_note_fcn_runtime_health(self) -> dict[str, Any]:
+        cache_stats = self.get_structured_note_f1_cache_stats()
+        table_probe = self.storage.fetch_one("SELECT COUNT(*) AS count FROM structured_note_terms")
+        latest = self.storage.fetch_one(
+            """
+            SELECT *
+            FROM structured_note_replay_preflight_runs
+            ORDER BY updated_at DESC, run_id DESC
+            LIMIT 1
+            """
+        )
+        service_ready = table_probe is not None
+        return {
+            "status": "OK" if service_ready else "RUNTIME_NOT_READY",
+            "runtime_ready": bool(service_ready),
+            "service_ready": bool(service_ready),
+            "cache_stats": cache_stats,
+            "latest_preflight_run": self._decode_structured_note_preflight_run_summary(latest) if latest else None,
+            "summary": {
+                "note_instance_count": int((table_probe or {}).get("count") or 0),
+                "runtime_check": "service_storage_ready" if service_ready else "structured_note_terms_unavailable",
+                "quickstart_preflight": "external_script_required_for_live_acceptance",
+                "publish_boundary": "sandbox -> quarantine -> publish",
+            },
+        }
+
+    def preflight_structured_note_fcn_replay(self, request: Any | None = None) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        now = iso_now()
+        cache_stats_before = self.get_structured_note_f1_cache_stats()
+        note_ids, selection_warnings = self._structured_note_preflight_note_ids(payload)
+        dataset_snapshot_id = str(payload.get("dataset_snapshot_id") or DATASET_PRICE_SNAPSHOT_ID)
+        replay_mode = str(payload.get("replay_mode") or "sandbox").lower()
+        price_proxies = dict(payload.get("price_proxies") or {}) if isinstance(payload.get("price_proxies"), Mapping) else {}
+        run_id = "fcn_preflight_" + hashlib.sha256(
+            f"{','.join(note_ids)}|{dataset_snapshot_id}|{replay_mode}|{now}|{uuid4().hex}".encode("utf-8")
+        ).hexdigest()[:16]
+        note_results: list[dict[str, Any]] = []
+        slot_count_histogram: dict[int, int] = {}
+        elapsed_ms_per_note: list[float] = []
+        replay_point_count = 0
+        blocked_point_count = 0
+        data_source_blocked_count = 0
+        warnings = list(selection_warnings)
+        started = monotonic()
+        status = "OK"
+        if not note_ids:
+            status = "DATA_SOURCE_BLOCKED"
+            warnings.append("no_structured_note_instances_selected")
+        for note_id in note_ids:
+            note_started = monotonic()
+            try:
+                bundle = self.get_structured_note_f1_static_bundle(note_id)
+                result = self._preflight_one_structured_note_fcn_replay(
+                    bundle,
+                    dataset_snapshot_id=dataset_snapshot_id,
+                    replay_mode=replay_mode,
+                    price_proxies=price_proxies,
+                    start_date=payload.get("start_date"),
+                    end_date=payload.get("end_date"),
+                )
+            except Exception as exc:
+                result = {
+                    "note_id": note_id,
+                    "parse_run_id": None,
+                    "status": "DATA_SOURCE_BLOCKED",
+                    "underlying_count": 0,
+                    "replay_point_count": 0,
+                    "ok_point_count": 0,
+                    "blocked_point_count": 0,
+                    "missing_symbols": [],
+                    "blocker_code": f"preflight_exception: {exc}",
+                }
+            elapsed_ms = (monotonic() - note_started) * 1000
+            result["elapsed_ms"] = elapsed_ms
+            note_results.append(result)
+            elapsed_ms_per_note.append(elapsed_ms)
+            underlying_count = int(result.get("underlying_count") or 0)
+            slot_count_histogram[underlying_count] = slot_count_histogram.get(underlying_count, 0) + 1
+            replay_point_count += int(result.get("replay_point_count") or 0)
+            blocked_point_count += int(result.get("blocked_point_count") or 0)
+            if result.get("status") == "DATA_SOURCE_BLOCKED":
+                data_source_blocked_count += 1
+            current_cache_stats = self.get_structured_note_f1_cache_stats()
+            if current_cache_stats.get("approx_memory_bytes", 0) >= current_cache_stats.get("warn_memory_bytes", 0):
+                status = "MEMORY_GUARDRAIL_BLOCKED"
+                warnings.append("f1_static_cache_memory_guardrail_exceeded")
+                break
+        elapsed_seconds = max(0.0, monotonic() - started)
+        cache_stats_after = self.get_structured_note_f1_cache_stats()
+        if status != "MEMORY_GUARDRAIL_BLOCKED":
+            if data_source_blocked_count:
+                status = "DATA_SOURCE_BLOCKED"
+            elif warnings:
+                status = "WARN"
+            elif note_results:
+                status = "OK"
+        price_missing_ratio = (blocked_point_count / replay_point_count) if replay_point_count else (
+            1.0 if data_source_blocked_count else 0.0
+        )
+        summary = {
+            "warnings": warnings,
+            "dataset_snapshot_id": dataset_snapshot_id,
+            "replay_mode": replay_mode,
+            "sample_limit": int(payload.get("sample_limit") or 10),
+            "max_notes": int(payload.get("max_notes") or 100),
+            "publish_boundary": "sandbox -> quarantine -> publish",
+            "preflight_only": True,
+            "slot_count_histogram": dict(sorted(slot_count_histogram.items())),
+        }
+        response = {
+            "run_id": run_id,
+            "status": status,
+            "note_count": len(note_results),
+            "replay_point_count": replay_point_count,
+            "points_per_second": (replay_point_count / elapsed_seconds) if elapsed_seconds > 0 else 0.0,
+            "p50_ms_per_note": _percentile(elapsed_ms_per_note, 50),
+            "p95_ms_per_note": _percentile(elapsed_ms_per_note, 95),
+            "price_missing_ratio": price_missing_ratio,
+            "data_source_blocked_count": data_source_blocked_count,
+            "max_underlying_count": max(slot_count_histogram) if slot_count_histogram else 0,
+            "slot_count_histogram": dict(sorted(slot_count_histogram.items())),
+            "cache_stats_before": cache_stats_before,
+            "cache_stats_after": cache_stats_after,
+            "note_results": note_results,
+            "summary": summary,
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.storage.insert_json_row(
+            "structured_note_replay_preflight_runs",
+            {
+                "id": run_id,
+                "run_id": run_id,
+                "status": status,
+                "request_json": dumps(dict(payload)),
+                "note_results_json": dumps(note_results),
+                "summary_json": dumps(
+                    {
+                        **summary,
+                        "note_count": response["note_count"],
+                        "replay_point_count": replay_point_count,
+                        "points_per_second": response["points_per_second"],
+                        "p50_ms_per_note": response["p50_ms_per_note"],
+                        "p95_ms_per_note": response["p95_ms_per_note"],
+                        "price_missing_ratio": price_missing_ratio,
+                        "data_source_blocked_count": data_source_blocked_count,
+                        "max_underlying_count": response["max_underlying_count"],
+                        "cache_stats_before": cache_stats_before,
+                        "cache_stats_after": cache_stats_after,
+                    }
+                ),
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        return response
+
+    def get_structured_note_fcn_replay_preflight_run(self, run_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one("SELECT * FROM structured_note_replay_preflight_runs WHERE run_id = ?", (run_id,))
+        if not row:
+            raise ValueError(f"Structured note replay preflight run not found: {run_id}")
+        return self._decode_structured_note_preflight_run(row)
+
+    def _decode_structured_note_preflight_run_summary(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        summary = loads(row.get("summary_json"), {})
+        return {
+            "run_id": str(row.get("run_id") or ""),
+            "status": str(row.get("status") or "RUNTIME_NOT_READY"),
+            "note_count": int((summary if isinstance(summary, Mapping) else {}).get("note_count") or 0),
+            "replay_point_count": int((summary if isinstance(summary, Mapping) else {}).get("replay_point_count") or 0),
+            "updated_at": row.get("updated_at"),
+        }
+
+    def _decode_structured_note_preflight_run(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        summary = loads(row.get("summary_json"), {})
+        if not isinstance(summary, Mapping):
+            summary = {}
+        slot_histogram = {
+            int(key): int(value)
+            for key, value in dict(summary.get("slot_count_histogram") or {}).items()
+        }
+        return {
+            "run_id": str(row.get("run_id") or ""),
+            "status": str(row.get("status") or "RUNTIME_NOT_READY"),
+            "note_count": int(summary.get("note_count") or 0),
+            "replay_point_count": int(summary.get("replay_point_count") or 0),
+            "points_per_second": float(summary.get("points_per_second") or 0.0),
+            "p50_ms_per_note": summary.get("p50_ms_per_note"),
+            "p95_ms_per_note": summary.get("p95_ms_per_note"),
+            "price_missing_ratio": float(summary.get("price_missing_ratio") or 0.0),
+            "data_source_blocked_count": int(summary.get("data_source_blocked_count") or 0),
+            "max_underlying_count": int(summary.get("max_underlying_count") or 0),
+            "slot_count_histogram": slot_histogram,
+            "cache_stats_before": summary.get("cache_stats_before") if isinstance(summary.get("cache_stats_before"), Mapping) else {},
+            "cache_stats_after": summary.get("cache_stats_after") if isinstance(summary.get("cache_stats_after"), Mapping) else {},
+            "note_results": loads(row.get("note_results_json"), []),
+            "summary": dict(summary),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+        }
+
+    def _structured_note_preflight_note_ids(self, payload: Mapping[str, Any]) -> tuple[list[str], list[str]]:
+        raw_note_ids = payload.get("note_ids") if isinstance(payload.get("note_ids"), list) else []
+        note_ids = [str(item).strip() for item in raw_note_ids if str(item).strip()]
+        warnings: list[str] = []
+        if not note_ids and (payload.get("manifest_id") or payload.get("manifest_path")):
+            manifest, _manifest_path = self._load_structured_note_pilot_manifest(payload)
+            note_ids = [
+                str(entry.get("note_id") or "").strip()
+                for entry in manifest.get("entries") or []
+                if isinstance(entry, Mapping) and str(entry.get("note_id") or "").strip()
+            ]
+        if not note_ids:
+            sample_limit = max(1, min(10_000, int(payload.get("sample_limit") or 10)))
+            rows = self.storage.fetch_all(
+                """
+                SELECT note_id
+                FROM structured_note_terms
+                ORDER BY updated_at DESC, note_id DESC
+                LIMIT ?
+                """,
+                (sample_limit,),
+            )
+            note_ids = [str(row.get("note_id") or "") for row in rows if row.get("note_id")]
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for note_id in note_ids:
+            if note_id and note_id not in seen:
+                deduped.append(note_id)
+                seen.add(note_id)
+        sample_limit = max(1, min(10_000, int(payload.get("sample_limit") or len(deduped) or 10)))
+        max_notes = max(1, min(10_000, int(payload.get("max_notes") or 100)))
+        effective_limit = min(sample_limit, max_notes)
+        if len(deduped) > effective_limit:
+            warnings.append(f"sample_truncated_to_{effective_limit}_notes")
+        return deduped[:effective_limit], warnings
+
+    def _preflight_one_structured_note_fcn_replay(
+        self,
+        bundle: Mapping[str, Any],
+        *,
+        dataset_snapshot_id: str,
+        replay_mode: str,
+        price_proxies: Mapping[str, Any],
+        start_date: Any,
+        end_date: Any,
+    ) -> dict[str, Any]:
+        note = dict(bundle.get("note") or {})
+        underlyings = [dict(item) for item in bundle.get("underlying_slots") or [] if isinstance(item, Mapping)]
+        symbol_map = self._structured_note_price_symbol_map(underlyings, price_proxies, replay_mode)
+        rows_by_symbol = self.market_data_repository.load_dataset_price_bars(
+            dataset_snapshot_id,
+            sorted(set(symbol_map.values())),
+            start_date=start_date or note.get("pricing_date"),
+            end_date=end_date or note.get("maturity_date"),
+            include_metadata=False,
+        )
+        logical_rows = {
+            logical: list(rows_by_symbol.get(actual) or [])
+            for logical, actual in symbol_map.items()
+        }
+        missing_symbols = [ticker for ticker, rows in logical_rows.items() if not rows]
+        observation_dates = self._structured_note_observation_dates(
+            logical_rows,
+            str(note.get("observation_frequency") or note.get("coupon_frequency") or "Monthly"),
+        )
+        price_by_ticker_date = {
+            ticker: {str(row.get("date")): _coerce_float(row.get("adj_close") or row.get("close"), None) for row in rows}
+            for ticker, rows in logical_rows.items()
+        }
+        history: list[float] = []
+        ok_count = 0
+        blocked_count = 0
+        for note_date in observation_dates:
+            current_prices = {
+                ticker: price_by_date.get(note_date)
+                for ticker, price_by_date in price_by_ticker_date.items()
+                if price_by_date.get(note_date) is not None
+            }
+            signal = evaluate_fcn_note_signals(
+                note,
+                underlyings,
+                current_prices,
+                history_worst_performance=history[-21:],
+            )
+            if signal.get("worst_performance") is not None:
+                history.append(float(signal["worst_performance"]))
+            if signal.get("status") == "OK":
+                ok_count += 1
+            else:
+                blocked_count += 1
+        if not observation_dates:
+            blocked_count = 1
+        status = "OK" if observation_dates and ok_count == len(observation_dates) and not missing_symbols else "DATA_SOURCE_BLOCKED"
+        return {
+            "note_id": str(bundle.get("note_id") or note.get("note_id") or ""),
+            "parse_run_id": bundle.get("parse_run_id"),
+            "status": status,
+            "underlying_count": int(bundle.get("underlying_count") or len(underlyings)),
+            "replay_point_count": len(observation_dates),
+            "ok_point_count": ok_count,
+            "blocked_point_count": blocked_count,
+            "missing_symbols": missing_symbols,
+            "blocker_code": None if status == "OK" else ("missing_price_history" if missing_symbols else "missing_observation_dates"),
+        }
+
+    @staticmethod
+    def _sec_424b2_evidence_anchors(note: Mapping[str, Any], underlyings: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        anchors: list[dict[str, Any]] = []
+        note_evidence = note.get("evidence") if isinstance(note.get("evidence"), Mapping) else {}
+        for field_path, raw_anchor in note_evidence.items():
+            if not isinstance(raw_anchor, Mapping):
+                continue
+            anchors.append({"field_path": str(field_path), **dict(raw_anchor)})
+        for index, underlying in enumerate(underlyings):
+            raw_anchor = underlying.get("evidence") if isinstance(underlying.get("evidence"), Mapping) else {}
+            if not raw_anchor:
+                continue
+            ticker = str(underlying.get("ticker") or index)
+            anchors.append({"field_path": f"underlyings.{ticker}", **dict(raw_anchor)})
+        return anchors
+
+    def get_sec_424b2_parse_run(self, run_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one("SELECT * FROM sec_424b2_parse_runs WHERE run_id = ?", (run_id,))
+        if not row:
+            raise ValueError(f"SEC 424B2 parse run not found: {run_id}")
+        note_row = self.storage.fetch_one("SELECT * FROM structured_note_terms WHERE parse_run_id = ?", (run_id,))
+        if not note_row:
+            raise ValueError(f"Structured note terms not found for parse run: {run_id}")
+        note_id = str(note_row.get("note_id") or "")
+        underlying_rows = self.storage.fetch_all(
+            "SELECT * FROM structured_note_underlyings WHERE note_id = ? ORDER BY ticker",
+            (note_id,),
+        )
+        underlyings = self._sort_structured_note_underlyings(
+            [self._decode_structured_note_underlying(row) for row in underlying_rows]
+        )
+        note = self._decode_structured_note_terms(note_row, underlyings)
+        f2_contract = compile_fcn_f2_contract(note, underlyings)
+        warnings = loads(row.get("warnings_json"), [])
+        status = str(row.get("status") or note.get("review_status") or "REVIEW_REQUIRED")
+        return {
+            "status": status,
+            "warnings": warnings if isinstance(warnings, list) else [],
+            "llm_used": bool(row.get("llm_used")),
+            "parse_run": {
+                "run_id": str(row.get("run_id") or ""),
+                "accession_number": str(row.get("accession_number") or ""),
+                "issuer_cik": str(row.get("issuer_cik") or ""),
+                "source_url": str(row.get("source_url") or ""),
+                "primary_document_url": str(row.get("primary_document_url") or ""),
+                "raw_html_sha256": str(row.get("raw_html_sha256") or ""),
+                "normalized_text_hash": str(row.get("normalized_text_hash") or ""),
+                "table_signature_hash": str(row.get("table_signature_hash") or ""),
+                "parser_rule_hash": str(row.get("parser_rule_hash") or ""),
+                "parse_result_hash": str(row.get("parse_result_hash") or ""),
+                "parser_version": str(row.get("parser_version") or ""),
+                "status": status,
+                "warnings": warnings if isinstance(warnings, list) else [],
+                "llm_used": bool(row.get("llm_used")),
+                "created_at": row.get("created_at"),
+                "updated_at": row.get("updated_at"),
+            },
+            "note": note,
+            "underlyings": underlyings,
+            "f2_contract": f2_contract,
+        }
+
+    @staticmethod
+    def _decode_structured_note_terms(
+        row: Mapping[str, Any],
+        underlyings: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        metadata = loads(row.get("metadata_json"), {})
+        evidence = loads(row.get("evidence_json"), {})
+        note_id = str(row.get("note_id") or "")
+        return {
+            "note_id": note_id,
+            "factor_id": str(metadata.get("factor_id") or "f1_fcn_note_terms"),
+            "legacy_factor_id": str(metadata.get("legacy_factor_id") or note_id),
+            "source_url": str(row.get("source_url") or ""),
+            "issuer_cik": str(row.get("issuer_cik") or ""),
+            "accession_number": str(row.get("accession_number") or ""),
+            "primary_document": "",
+            "cusip": row.get("cusip"),
+            "pricing_date": row.get("pricing_date"),
+            "issue_date": row.get("issue_date"),
+            "maturity_date": row.get("maturity_date"),
+            "coupon_rate_annual": row.get("coupon_rate_annual"),
+            "coupon_frequency": str(row.get("coupon_frequency") or ""),
+            "observation_frequency": str(row.get("observation_frequency") or ""),
+            "autocall_frequency": str(row.get("autocall_frequency") or ""),
+            "memory_feature": bool(row.get("memory_feature")),
+            "payoff_type": str(row.get("payoff_type") or "REVIEW_REQUIRED"),
+            "review_status": str(row.get("review_status") or "REVIEW_REQUIRED"),
+            "underlying_tickers": [str(item.get("ticker") or "") for item in underlyings if item.get("ticker")],
+            "underlying_count": len([item for item in underlyings if item.get("ticker")]),
+            "barrier_percentage": _min_present_float(item.get("barrier_ratio") for item in underlyings),
+            "definition_version": str(metadata.get("definition_version") or STRUCTURED_NOTE_DEFINITION_VERSION),
+            "metadata": metadata if isinstance(metadata, dict) else {},
+            "evidence": evidence if isinstance(evidence, dict) else {},
+        }
+
+    @staticmethod
+    def _decode_structured_note_underlying(row: Mapping[str, Any]) -> dict[str, Any]:
+        evidence = loads(row.get("evidence_json"), {})
+        metadata = loads(row.get("metadata_json"), {})
+        underlying_index = None
+        if isinstance(metadata, dict) and metadata.get("underlying_index") is not None:
+            try:
+                underlying_index = int(metadata.get("underlying_index"))
+            except (TypeError, ValueError):
+                underlying_index = None
+        return {
+            "note_id": str(row.get("note_id") or ""),
+            "underlying_index": underlying_index,
+            "ticker": str(row.get("ticker") or ""),
+            "initial_value": row.get("initial_value"),
+            "strike_value": row.get("strike_value"),
+            "barrier_ratio": row.get("barrier_ratio"),
+            "barrier_value": row.get("barrier_value"),
+            "trigger_ratio": row.get("trigger_ratio"),
+            "trigger_value": row.get("trigger_value"),
+            "exchange": str(row.get("exchange") or ""),
+            "evidence": evidence if isinstance(evidence, dict) else {},
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        }
+
+    @staticmethod
+    def _sort_structured_note_underlyings(underlyings: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        def sort_key(item: Mapping[str, Any]) -> tuple[int, str]:
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
+            raw_index = item.get("underlying_index")
+            if raw_index is None:
+                raw_index = metadata.get("underlying_index") if isinstance(metadata, Mapping) else None
+            try:
+                return int(raw_index), str(item.get("ticker") or "")
+            except (TypeError, ValueError):
+                return 1_000_000, str(item.get("ticker") or "")
+
+        ordered = [dict(item) for item in underlyings]
+        ordered.sort(key=sort_key)
+        for index, item in enumerate(ordered):
+            item["underlying_index"] = index
+            metadata = dict(item.get("metadata") or {}) if isinstance(item.get("metadata"), Mapping) else {}
+            metadata["underlying_index"] = index
+            item["metadata"] = metadata
+        return ordered
+
+    def discover_sec_424b2_pilot_preview(self, request: Any | None = None) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        issuer_cik = str(payload.get("issuer_cik") or "0001665650").strip()
+        scan_limit = max(1, min(200, int(payload.get("scan_limit") or 100)))
+        pilot_limit = max(5, min(10, int(payload.get("pilot_limit") or 10)))
+        parser_options = payload.get("parser_options") if isinstance(payload.get("parser_options"), Mapping) else {}
+        provider = SecEdgarProvider()
+        filings = provider.fetch_424b2_filings_by_cik(issuer_cik, limit=scan_limit)
+        entries: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        for filing in filings[:scan_limit]:
+            source_url = str(filing.get("primary_document_url") or filing.get("source_url") or "")
+            accession = str(filing.get("accession_number") or "")
+            primary_document = str(filing.get("primary_document") or "")
+            if not source_url:
+                warnings.append(f"{accession or 'unknown'}: missing_primary_document_url")
+                continue
+            try:
+                html_text = provider.fetch_archive_document(source_url)
+                parsed = parse_sec_424b2_structured_note(
+                    html_text,
+                    source_url=source_url,
+                    issuer_cik=issuer_cik,
+                    accession_number=accession,
+                    primary_document=primary_document,
+                    parser_options=parser_options,
+                )
+                entries.append(self._sec_424b2_pilot_manifest_entry(parsed, filing=filing))
+            except Exception as exc:
+                warnings.append(f"{accession or source_url}: {exc}")
+                entries.append(
+                    {
+                        "accession_number": accession,
+                        "source_url": source_url,
+                        "primary_document": primary_document,
+                        "issuer_cik": str(issuer_cik).zfill(10) if str(issuer_cik).isdigit() else issuer_cik,
+                        "status": "FAILED",
+                        "warnings": [str(exc)],
+                        "feature_bucket": "fetch_or_parse_failed",
+                    }
+                )
+        selected = self._select_sec_424b2_pilot_entries(entries, pilot_limit)
+        manifest_id = "sec424b2_pilot_" + hashlib.sha256(
+            dumps([entry.get("accession_number") or entry.get("source_url") for entry in selected]).encode("utf-8")
+        ).hexdigest()[:12]
+        summary = self._sec_424b2_pilot_summary(selected, source_count=len(entries))
+        manifest_hash = self._stable_json_hash({"manifest_id": manifest_id, "entries": selected})
+        return {
+            "manifest_id": manifest_id,
+            "issuer_cik": str(issuer_cik).zfill(10) if str(issuer_cik).isdigit() else issuer_cik,
+            "pilot_limit": pilot_limit,
+            "scan_limit": scan_limit,
+            "selected_count": len(selected),
+            "blocked_count": sum(1 for entry in entries if entry.get("status") != "PARSED"),
+            "last_validated_at": None,
+            "last_replay_run_id": None,
+            "validation_status": "PREVIEW",
+            "manifest_hash": manifest_hash,
+            "parser_version": SEC_424B2_PARSER_VERSION,
+            "parser_rule_hash": SEC_424B2_PARSER_RULE_HASH,
+            "warnings": warnings,
+            "entries": selected,
+            "summary": {**summary, "manifest_hash": manifest_hash},
+        }
+
+    def ingest_sec_424b2_pilot(self, request: Any | None = None) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        manifest_path = str(
+            payload.get("manifest_path")
+            or os.getenv("GRIT_SEC_424B2_PILOT_MANIFEST")
+            or ".tmp/sec-424b2-pilot/jpm_manifest.json"
+        )
+        entries = [dict(item) for item in payload.get("entries") or [] if isinstance(item, Mapping)]
+        warnings: list[str] = []
+        if not entries:
+            preview = self.discover_sec_424b2_pilot_preview(payload)
+            entries = [dict(item) for item in preview.get("entries") or [] if isinstance(item, Mapping)]
+            warnings.extend([str(item) for item in preview.get("warnings") or []])
+        pilot_limit = max(5, min(10, int(payload.get("pilot_limit") or len(entries) or 10)))
+        entries = self._select_sec_424b2_pilot_entries(entries, pilot_limit)
+        parse_runs: list[dict[str, Any]] = []
+        provider = SecEdgarProvider()
+        for entry in entries:
+            if str(entry.get("status") or "") == "FAILED":
+                continue
+            try:
+                html_text = str(entry.get("html") or "")
+                source_url = str(entry.get("source_url") or "")
+                if not html_text:
+                    html_text = provider.fetch_archive_document(source_url)
+                parsed = self.preview_sec_424b2_structured_note(
+                    {
+                        "source_url": source_url,
+                        "issuer_cik": entry.get("issuer_cik") or payload.get("issuer_cik") or "0001665650",
+                        "accession_number": entry.get("accession_number"),
+                        "primary_document": entry.get("primary_document"),
+                        "html": html_text,
+                        "persist": bool(payload.get("persist", True)),
+                        "parser_options": payload.get("parser_options") if isinstance(payload.get("parser_options"), Mapping) else {},
+                    }
+                )
+                parse_runs.append(parsed)
+                entry["last_parse_run_id"] = str(parsed.get("parse_run", {}).get("run_id") or "")
+                entry["last_status"] = str(parsed.get("status") or "REVIEW_REQUIRED")
+                entry["last_validated_at"] = iso_now()
+                if parsed.get("note", {}).get("note_id"):
+                    entry["note_id"] = str(parsed.get("note", {}).get("note_id") or "")
+            except Exception as exc:
+                warnings.append(f"{entry.get('accession_number') or entry.get('source_url')}: {exc}")
+                entry["last_status"] = "DATA_SOURCE_BLOCKED"
+                entry["last_validated_at"] = iso_now()
+        manifest_id = "sec424b2_pilot_" + hashlib.sha256(
+            dumps([entry.get("accession_number") or entry.get("source_url") for entry in entries]).encode("utf-8")
+        ).hexdigest()[:12]
+        now = iso_now()
+        validation_status = "COMPLETED" if parse_runs else "DATA_SOURCE_BLOCKED"
+        manifest_hash = self._stable_json_hash({"manifest_id": manifest_id, "entries": entries})
+        summary = {
+            **self._sec_424b2_pilot_summary(entries, source_count=len(entries)),
+            "manifest_hash": manifest_hash,
+            "validation_status": validation_status,
+            "last_validated_at": now,
+        }
+        manifest = {
+            "manifest_id": manifest_id,
+            "issuer_cik": str(payload.get("issuer_cik") or (entries[0].get("issuer_cik") if entries else "") or "0001665650"),
+            "pilot_limit": pilot_limit,
+            "scan_limit": int(payload.get("scan_limit") or len(entries) or 0),
+            "entries": entries,
+            "parse_run_ids": [run.get("parse_run", {}).get("run_id") for run in parse_runs],
+            "last_validated_at": now,
+            "last_replay_run_id": None,
+            "validation_status": validation_status,
+            "manifest_hash": manifest_hash,
+            "parser_version": SEC_424B2_PARSER_VERSION,
+            "parser_rule_hash": SEC_424B2_PARSER_RULE_HASH,
+            "warnings": warnings,
+            "created_at": now,
+        }
+        path = Path(manifest_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        self.storage.insert_json_row(
+            "structured_note_pilot_manifests",
+            {
+                "id": manifest_id,
+                "manifest_id": manifest_id,
+                "issuer_cik": str(manifest.get("issuer_cik") or ""),
+                "manifest_path": str(path),
+                "pilot_limit": pilot_limit,
+                "scan_limit": int(manifest.get("scan_limit") or 0),
+                "entries_json": dumps(entries),
+                "summary_json": dumps(summary),
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        return {
+            "manifest_id": manifest_id,
+            "manifest_path": str(path),
+            "status": "COMPLETED" if parse_runs else "DATA_SOURCE_BLOCKED",
+            "selected_count": len(entries),
+            "parse_run_count": len(parse_runs),
+            "last_validated_at": now,
+            "last_replay_run_id": None,
+            "validation_status": validation_status,
+            "manifest_hash": manifest_hash,
+            "parser_version": SEC_424B2_PARSER_VERSION,
+            "parser_rule_hash": SEC_424B2_PARSER_RULE_HASH,
+            "entries": entries,
+            "parse_runs": parse_runs,
+            "warnings": warnings,
+            "summary": summary,
+        }
+
+    def list_sec_424b2_reparse_candidates(
+        self,
+        *,
+        current_parser_version: str | None = None,
+        current_rule_hash: str | None = None,
+    ) -> dict[str, Any]:
+        parser_version = str(current_parser_version or SEC_424B2_PARSER_VERSION)
+        rule_hash = str(current_rule_hash or SEC_424B2_PARSER_RULE_HASH)
+        rows = self.storage.fetch_all("SELECT * FROM sec_424b2_parse_runs ORDER BY updated_at DESC, run_id DESC")
+        hashes_by_accession: dict[str, set[str]] = {}
+        for row in rows:
+            accession = str(row.get("accession_number") or row.get("source_url") or row.get("run_id") or "")
+            hashes_by_accession.setdefault(accession, set()).add(str(row.get("raw_html_sha256") or ""))
+        candidates: list[dict[str, Any]] = []
+        for row in rows:
+            warnings = loads(row.get("warnings_json"), [])
+            warning_items = [str(item) for item in warnings] if isinstance(warnings, list) else []
+            reasons: list[str] = []
+            if str(row.get("parser_version") or "") != parser_version:
+                reasons.append("PARSER_CHANGED")
+            if str(row.get("parser_rule_hash") or "") != rule_hash:
+                reasons.append("RULEPACK_CHANGED")
+            accession = str(row.get("accession_number") or row.get("source_url") or row.get("run_id") or "")
+            if len({item for item in hashes_by_accession.get(accession, set()) if item}) > 1:
+                reasons.append("HTML_CHANGED")
+            if str(row.get("status") or "") != "PARSED":
+                reasons.append("LOW_CONFIDENCE")
+            if any("unsupported" in item or "payoff" in item for item in warning_items):
+                reasons.append("UNSUPPORTED_PAYOFF")
+            if any("DATA_SOURCE_BLOCKED" in item or "price" in item.lower() for item in warning_items):
+                reasons.append("DATA_SOURCE_BLOCKED")
+            if not reasons:
+                continue
+            candidates.append(
+                {
+                    "run_id": str(row.get("run_id") or ""),
+                    "accession_number": str(row.get("accession_number") or ""),
+                    "issuer_cik": str(row.get("issuer_cik") or ""),
+                    "source_url": str(row.get("source_url") or ""),
+                    "parser_version": str(row.get("parser_version") or ""),
+                    "parser_rule_hash": str(row.get("parser_rule_hash") or ""),
+                    "raw_html_sha256": str(row.get("raw_html_sha256") or ""),
+                    "parse_result_hash": str(row.get("parse_result_hash") or ""),
+                    "status": str(row.get("status") or "REVIEW_REQUIRED"),
+                    "reasons": sorted(set(reasons)),
+                    "warnings": warning_items,
+                }
+            )
+        reason_counts: dict[str, int] = {}
+        for candidate in candidates:
+            for reason in candidate.get("reasons") or []:
+                reason_counts[str(reason)] = reason_counts.get(str(reason), 0) + 1
+        return {
+            "candidates": candidates,
+            "summary": {
+                "candidate_count": len(candidates),
+                "reason_counts": reason_counts,
+                "current_parser_version": parser_version,
+                "current_rule_hash": rule_hash,
+            },
+        }
+
+    def preview_sec_424b2_reparse_job(self, request: Any | None = None) -> dict[str, Any]:
+        return self._build_sec_424b2_reparse_job(request, persist=False)
+
+    def create_sec_424b2_reparse_job(self, request: Any | None = None) -> dict[str, Any]:
+        return self._build_sec_424b2_reparse_job(request, persist=True)
+
+    def get_sec_424b2_reparse_job(self, job_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one("SELECT * FROM sec_424b2_reparse_jobs WHERE job_id = ?", (job_id,))
+        if not row:
+            raise ValueError(f"SEC 424B2 reparse job not found: {job_id}")
+        candidates = loads(row.get("candidates_json"), [])
+        actions = loads(row.get("actions_json"), [])
+        allowlist = loads(row.get("reasons_allowlist_json"), [])
+        summary = loads(row.get("summary_json"), {})
+        return {
+            "job_id": str(row.get("job_id") or ""),
+            "status": str(row.get("status") or "NOT_FOUND"),
+            "mode": str(row.get("mode") or "dry_run"),
+            "dry_run": bool(row.get("dry_run")),
+            "auto_repair_enabled": bool(row.get("auto_repair_enabled")),
+            "reasons_allowlist": allowlist if isinstance(allowlist, list) else [],
+            "candidate_count": int((summary or {}).get("candidate_count") or 0) if isinstance(summary, Mapping) else 0,
+            "selected_count": len(actions) if isinstance(actions, list) else 0,
+            "candidates": candidates if isinstance(candidates, list) else [],
+            "actions": actions if isinstance(actions, list) else [],
+            "summary": summary if isinstance(summary, dict) else {},
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+        }
+
+    def _build_sec_424b2_reparse_job(self, request: Any | None, *, persist: bool) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        mode = str(payload.get("mode") or os.getenv("GRIT_SEC_424B2_AUTO_REPAIR_MODE") or "dry_run").lower()
+        dry_run = payload.get("dry_run")
+        dry_run_enabled = True if dry_run is None else bool(dry_run)
+        auto_repair_enabled = self._sec_424b2_auto_repair_enabled(payload)
+        allowlist = self._sec_424b2_reparse_allowlist(payload)
+        max_filings = max(1, min(100, int(payload.get("max_filings") or os.getenv("GRIT_SEC_424B2_AUTO_REPAIR_MAX_FILINGS") or 10)))
+        candidate_response = self.list_sec_424b2_reparse_candidates(
+            current_parser_version=payload.get("current_parser_version"),
+            current_rule_hash=payload.get("current_rule_hash"),
+        )
+        candidates = [dict(item) for item in candidate_response.get("candidates") or [] if isinstance(item, Mapping)]
+        eligible = [
+            candidate
+            for candidate in candidates
+            if any(str(reason) in allowlist for reason in candidate.get("reasons") or [])
+        ][:max_filings]
+        status = "DRY_RUN_READY"
+        blocked_reason = ""
+        if mode != "dry_run" or not dry_run_enabled:
+            status = "DRY_RUN_ONLY"
+            blocked_reason = "non_dry_run_reparse_jobs_are_not_enabled"
+            eligible = []
+        elif not auto_repair_enabled:
+            status = "DISABLED"
+            blocked_reason = "auto_repair_disabled"
+            eligible = []
+        actions = [
+            {
+                "action": "REPARSE_DRY_RUN",
+                "run_id": str(candidate.get("run_id") or ""),
+                "accession_number": str(candidate.get("accession_number") or ""),
+                "source_url": str(candidate.get("source_url") or ""),
+                "matched_reasons": [
+                    str(reason) for reason in candidate.get("reasons") or [] if str(reason) in allowlist
+                ],
+                "would_fetch_source_url": bool(candidate.get("source_url")),
+                "would_write_parse_run": False,
+            }
+            for candidate in eligible
+        ]
+        now = iso_now()
+        job_id = "sec424b2_reparse_job_" + hashlib.sha256(
+            f"{now}|{uuid4().hex}|{allowlist}|{max_filings}".encode("utf-8")
+        ).hexdigest()[:16]
+        summary = {
+            "candidate_count": len(candidates),
+            "eligible_count": len(eligible),
+            "selected_count": len(actions),
+            "max_filings": max_filings,
+            "blocked_reason": blocked_reason,
+            "dry_run_only": True,
+            "source": "reparse-candidates",
+            "current_parser_version": (candidate_response.get("summary") or {}).get("current_parser_version"),
+            "current_rule_hash": (candidate_response.get("summary") or {}).get("current_rule_hash"),
+        }
+        response = {
+            "job_id": job_id,
+            "status": status,
+            "mode": "dry_run",
+            "dry_run": True,
+            "auto_repair_enabled": auto_repair_enabled,
+            "reasons_allowlist": allowlist,
+            "candidate_count": len(candidates),
+            "selected_count": len(actions),
+            "candidates": eligible,
+            "actions": actions,
+            "summary": summary,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if persist:
+            self.storage.insert_json_row(
+                "sec_424b2_reparse_jobs",
+                {
+                    "id": job_id,
+                    "job_id": job_id,
+                    "status": status,
+                    "mode": "dry_run",
+                    "dry_run": 1,
+                    "auto_repair_enabled": 1 if auto_repair_enabled else 0,
+                    "reasons_allowlist_json": dumps(allowlist),
+                    "candidates_json": dumps(eligible),
+                    "actions_json": dumps(actions),
+                    "summary_json": dumps(summary),
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+        return response
+
+    @staticmethod
+    def _sec_424b2_auto_repair_enabled(payload: Mapping[str, Any]) -> bool:
+        if payload.get("auto_repair_enabled") is not None:
+            return bool(payload.get("auto_repair_enabled"))
+        raw = str(os.getenv("GRIT_SEC_424B2_AUTO_REPAIR") or "off").strip().lower()
+        return raw in {"1", "true", "yes", "on", "enabled"}
+
+    @staticmethod
+    def _sec_424b2_reparse_allowlist(payload: Mapping[str, Any]) -> list[str]:
+        raw = payload.get("reasons_allowlist")
+        if not raw:
+            raw = [
+                item.strip()
+                for item in str(
+                    os.getenv("GRIT_SEC_424B2_AUTO_REPAIR_REASON_ALLOWLIST")
+                    or "PARSER_CHANGED,RULEPACK_CHANGED"
+                ).split(",")
+            ]
+        elif isinstance(raw, str):
+            raw = [item.strip() for item in raw.split(",")]
+        allowed_reasons = {
+            "PARSER_CHANGED",
+            "RULEPACK_CHANGED",
+            "HTML_CHANGED",
+            "LOW_CONFIDENCE",
+            "UNSUPPORTED_PAYOFF",
+            "DATA_SOURCE_BLOCKED",
+        }
+        allowlist = [str(item).strip().upper() for item in raw if str(item).strip().upper() in allowed_reasons]
+        return allowlist or ["PARSER_CHANGED", "RULEPACK_CHANGED"]
+
+    def replay_structured_note_fcn(self, request: Any | None = None) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        parse_run_id = str(payload.get("parse_run_id") or "").strip()
+        note_id = str(payload.get("note_id") or "").strip()
+        if parse_run_id:
+            parsed = self.get_sec_424b2_parse_run(parse_run_id)
+        elif note_id:
+            note_row = self.storage.fetch_one("SELECT * FROM structured_note_terms WHERE note_id = ?", (note_id,))
+            if not note_row:
+                raise ValueError(f"Structured note not found: {note_id}")
+            parsed = self.get_sec_424b2_parse_run(str(note_row.get("parse_run_id") or ""))
+        else:
+            raise ValueError("FCN replay requires note_id or parse_run_id.")
+        parsed_note = dict(parsed.get("note") or {})
+        bundle = self.get_structured_note_f1_static_bundle(str(parsed_note.get("note_id") or note_id))
+        note = dict(bundle.get("note") or parsed_note)
+        underlyings = [dict(item) for item in bundle.get("underlying_slots") or [] if isinstance(item, Mapping)]
+        dataset_snapshot_id = str(payload.get("dataset_snapshot_id") or DATASET_PRICE_SNAPSHOT_ID)
+        replay_mode = str(payload.get("replay_mode") or "sandbox").lower()
+        price_proxies = dict(payload.get("price_proxies") or {}) if isinstance(payload.get("price_proxies"), Mapping) else {}
+        symbol_map = self._structured_note_price_symbol_map(underlyings, price_proxies, replay_mode)
+        rows_by_symbol = self.market_data_repository.load_dataset_price_bars(
+            dataset_snapshot_id,
+            sorted(set(symbol_map.values())),
+            start_date=payload.get("start_date") or note.get("pricing_date"),
+            end_date=payload.get("end_date") or note.get("maturity_date"),
+            include_metadata=False,
+        )
+        logical_rows = {
+            logical: list(rows_by_symbol.get(actual) or [])
+            for logical, actual in symbol_map.items()
+        }
+        missing_symbols = [ticker for ticker, rows in logical_rows.items() if not rows]
+        observation_dates = self._structured_note_observation_dates(
+            logical_rows,
+            str(payload.get("observation_frequency") or note.get("observation_frequency") or note.get("coupon_frequency") or "Monthly"),
+        )
+        replay_underlyings = deepcopy(underlyings)
+        points: list[dict[str, Any]] = []
+        history: list[float] = []
+        price_by_ticker_date = {
+            ticker: {str(row.get("date")): _coerce_float(row.get("adj_close") or row.get("close"), None) for row in rows}
+            for ticker, rows in logical_rows.items()
+        }
+        for note_date in observation_dates:
+            current_prices = {
+                ticker: price_by_date.get(note_date)
+                for ticker, price_by_date in price_by_ticker_date.items()
+                if price_by_date.get(note_date) is not None
+            }
+            signal = evaluate_fcn_note_signals(
+                note,
+                replay_underlyings,
+                current_prices,
+                history_worst_performance=history[-21:],
+            )
+            if signal.get("worst_performance") is not None:
+                history.append(float(signal["worst_performance"]))
+            points.append(
+                {
+                    "note_date": note_date,
+                    "status": str(signal.get("status") or "OK"),
+                    "worst_performance": signal.get("worst_performance"),
+                    "coupon_eligible": bool(signal.get("coupon_eligible")),
+                    "coupon_signal": float(signal.get("coupon_signal") or 0.0),
+                    "autocall_trigger": bool(signal.get("autocall_trigger")),
+                    "distance_to_barrier": signal.get("distance_to_barrier"),
+                    "details": signal,
+                }
+            )
+        ok_count = sum(1 for point in points if point.get("status") == "OK")
+        status = "OK" if points and ok_count == len(points) else "PARTIAL" if ok_count else "DATA_SOURCE_BLOCKED"
+        if missing_symbols:
+            status = "PARTIAL" if ok_count else "DATA_SOURCE_BLOCKED"
+        run_id = "fcn_replay_" + hashlib.sha256(
+            f"{note.get('note_id')}|{dataset_snapshot_id}|{replay_mode}|{iso_now()}|{uuid4().hex}".encode("utf-8")
+        ).hexdigest()[:16]
+        now = iso_now()
+        summary = {
+            "point_count": len(points),
+            "ok_count": ok_count,
+            "blocked_count": len(points) - ok_count,
+            "missing_symbols": missing_symbols,
+            "dataset_snapshot_id": dataset_snapshot_id,
+            "price_source": "dataset_price_bars.adj_close",
+            "f1_static_cache_status": bundle.get("cache_status"),
+            "underlying_count": bundle.get("underlying_count"),
+            "definition_version": bundle.get("definition_version"),
+            "missing_static_fields": bundle.get("missing_fields") or [],
+        }
+        self.storage.insert_json_row(
+            "structured_note_replay_runs",
+            {
+                "id": run_id,
+                "run_id": run_id,
+                "note_id": str(note.get("note_id") or ""),
+                "parse_run_id": parse_run_id or str(parsed.get("parse_run", {}).get("run_id") or ""),
+                "dataset_snapshot_id": dataset_snapshot_id,
+                "replay_mode": replay_mode,
+                "status": status,
+                "summary_json": dumps(summary),
+                "price_proxies_json": dumps(price_proxies),
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        for point in points:
+            point_id = "fcn_replay_point_" + hashlib.sha256(
+                f"{run_id}|{point.get('note_date')}".encode("utf-8")
+            ).hexdigest()[:16]
+            self.storage.insert_json_row(
+                "structured_note_replay_points",
+                {
+                    "id": point_id,
+                    "replay_run_id": run_id,
+                    "note_id": str(note.get("note_id") or ""),
+                    "note_date": str(point.get("note_date") or ""),
+                    "status": str(point.get("status") or "OK"),
+                    "worst_performance": point.get("worst_performance"),
+                    "coupon_eligible": 1 if point.get("coupon_eligible") else 0,
+                    "coupon_signal": point.get("coupon_signal"),
+                    "autocall_trigger": 1 if point.get("autocall_trigger") else 0,
+                    "distance_to_barrier": point.get("distance_to_barrier"),
+                    "details_json": dumps(dict(point.get("details") or {})),
+                    "created_at": now,
+                },
+            )
+        return {
+            "run_id": run_id,
+            "note_id": str(note.get("note_id") or ""),
+            "parse_run_id": parse_run_id or str(parsed.get("parse_run", {}).get("run_id") or ""),
+            "dataset_snapshot_id": dataset_snapshot_id,
+            "replay_mode": replay_mode,
+            "status": status,
+            "points": points,
+            "summary": summary,
+            "price_proxies": price_proxies,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def get_structured_note_replay_run(self, run_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one("SELECT * FROM structured_note_replay_runs WHERE run_id = ?", (run_id,))
+        if not row:
+            raise ValueError(f"Structured note replay run not found: {run_id}")
+        point_rows = self.storage.fetch_all(
+            "SELECT * FROM structured_note_replay_points WHERE replay_run_id = ? ORDER BY note_date",
+            (run_id,),
+        )
+        return {
+            "run_id": str(row.get("run_id") or ""),
+            "note_id": str(row.get("note_id") or ""),
+            "parse_run_id": row.get("parse_run_id"),
+            "dataset_snapshot_id": str(row.get("dataset_snapshot_id") or DATASET_PRICE_SNAPSHOT_ID),
+            "replay_mode": str(row.get("replay_mode") or "sandbox"),
+            "status": str(row.get("status") or "DATA_SOURCE_BLOCKED"),
+            "points": [
+                {
+                    "note_date": str(point.get("note_date") or ""),
+                    "status": str(point.get("status") or "OK"),
+                    "worst_performance": point.get("worst_performance"),
+                    "coupon_eligible": bool(point.get("coupon_eligible")),
+                    "coupon_signal": float(point.get("coupon_signal") or 0.0),
+                    "autocall_trigger": bool(point.get("autocall_trigger")),
+                    "distance_to_barrier": point.get("distance_to_barrier"),
+                    "details": loads(point.get("details_json"), {}),
+                }
+                for point in point_rows
+            ],
+            "summary": loads(row.get("summary_json"), {}),
+            "price_proxies": loads(row.get("price_proxies_json"), {}),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+        }
+
+    def get_structured_note_fcn_attribution(self, run_id: str) -> dict[str, Any]:
+        replay = self.get_structured_note_replay_run(run_id)
+        replay_summary = replay.get("summary") if isinstance(replay.get("summary"), Mapping) else {}
+        bundle_summary: dict[str, Any] = {
+            "f1_static_cache_status": replay_summary.get("f1_static_cache_status"),
+            "underlying_count": replay_summary.get("underlying_count"),
+            "definition_version": replay_summary.get("definition_version"),
+        }
+        try:
+            bundle = self.get_structured_note_f1_static_bundle(str(replay.get("note_id") or ""))
+            bundle_summary = {
+                "f1_static_cache_status": bundle.get("cache_status"),
+                "underlying_count": bundle.get("underlying_count"),
+                "definition_version": bundle.get("definition_version"),
+            }
+        except Exception:
+            pass
+        cumulative_coupons = 0.0
+        points: list[dict[str, Any]] = []
+        status_counts: dict[str, int] = {}
+        blocked_count = 0
+        latest_net_benefit: float | None = None
+        for point in replay.get("points") or []:
+            coupon_signal = _coerce_float(point.get("coupon_signal"), 0.0)
+            cumulative_coupons += coupon_signal
+            worst_performance = _coerce_float(point.get("worst_performance"), None)
+            source_status = str(point.get("status") or "")
+            drawdown_loss_proxy: float | None = None
+            net_benefit: float | None = None
+            coverage_ratio: float | None = None
+            attribution_status = "DATA_SOURCE_BLOCKED"
+            if source_status == "OK" and worst_performance is not None:
+                drawdown_loss_proxy = max(0.0, 1.0 - float(worst_performance))
+                net_benefit = cumulative_coupons - drawdown_loss_proxy
+                latest_net_benefit = net_benefit
+                if drawdown_loss_proxy > 0:
+                    coverage_ratio = cumulative_coupons / drawdown_loss_proxy
+                distance = _coerce_float(point.get("distance_to_barrier"), None)
+                if net_benefit < 0 and distance is not None and distance <= 0:
+                    attribution_status = "NEGATIVE_CONVEXITY_ACTIVE"
+                elif net_benefit < 0:
+                    attribution_status = "COUPON_OFFSET_EXHAUSTED"
+                else:
+                    attribution_status = "CARRY_BUFFERING"
+            else:
+                blocked_count += 1
+            status_counts[attribution_status] = status_counts.get(attribution_status, 0) + 1
+            points.append(
+                {
+                    "note_date": str(point.get("note_date") or ""),
+                    "status": attribution_status,
+                    "worst_performance": worst_performance,
+                    "cumulative_coupons": cumulative_coupons,
+                    "drawdown_loss_proxy": drawdown_loss_proxy,
+                    "net_benefit": net_benefit,
+                    "coupon_loss_coverage_ratio": coverage_ratio,
+                    "coupon_signal": coupon_signal,
+                    "source_replay_status": source_status,
+                    "details": {
+                        "source_replay_run_id": run_id,
+                        "formula": "Cumulative_Coupons - Max(0, 1 - Worst_Performance)",
+                        "advisory_only": True,
+                    },
+                }
+            )
+        status = "OK" if points and blocked_count == 0 else "PARTIAL" if points else "DATA_SOURCE_BLOCKED"
+        if blocked_count == len(points) and points:
+            status = "DATA_SOURCE_BLOCKED"
+        return {
+            "run_id": str(replay.get("run_id") or run_id),
+            "note_id": str(replay.get("note_id") or ""),
+            "parse_run_id": replay.get("parse_run_id"),
+            "status": status,
+            "points": points,
+            "summary": {
+                "point_count": len(points),
+                "blocked_count": blocked_count,
+                "status_counts": status_counts,
+                "cumulative_coupons": cumulative_coupons,
+                "latest_net_benefit": latest_net_benefit,
+                "source_replay_status": replay.get("status"),
+                "publish_boundary": "sandbox -> quarantine -> publish",
+                "advisory_only": True,
+                **bundle_summary,
+            },
+            "created_at": replay.get("created_at"),
+            "updated_at": replay.get("updated_at"),
+        }
+
+    def pressure_test_structured_note_fcn_pilot(self, request: Any | None = None) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        manifest, manifest_path = self._load_structured_note_pilot_manifest(payload)
+        entries = [dict(item) for item in manifest.get("entries") or [] if isinstance(item, Mapping)]
+        near_threshold = max(0.0, _coerce_float(payload.get("near_barrier_threshold"), 1.0))
+        target_symbol = str(payload.get("target_symbol") or "QQQ").upper()
+        note_results: list[dict[str, Any]] = []
+        distances: list[float] = []
+        blocked_count = 0
+        cache_status_counts: dict[str, int] = {}
+        underlying_counts: list[int] = []
+        for entry in entries:
+            note_id = str(entry.get("note_id") or "")
+            accession = str(entry.get("accession_number") or "")
+            if not note_id:
+                blocked_count += 1
+                note_results.append(
+                    {
+                        "note_id": "",
+                        "accession_number": accession,
+                        "replay_run_id": None,
+                        "note_date": None,
+                        "status": "DATA_SOURCE_BLOCKED",
+                        "distance_to_barrier": None,
+                        "worst_performance": None,
+                        "reason": "missing_note_id",
+                    }
+                )
+                continue
+            try:
+                bundle = self.get_structured_note_f1_static_bundle(note_id)
+                cache_status = str(bundle.get("cache_status") or "")
+                cache_status_counts[cache_status] = cache_status_counts.get(cache_status, 0) + 1
+                underlying_counts.append(int(bundle.get("underlying_count") or 0))
+            except Exception:
+                bundle = {}
+            latest = self.storage.fetch_one(
+                """
+                SELECT run_id
+                FROM structured_note_replay_runs
+                WHERE note_id = ?
+                ORDER BY updated_at DESC, created_at DESC, run_id DESC
+                LIMIT 1
+                """,
+                (note_id,),
+            )
+            if not latest:
+                blocked_count += 1
+                note_results.append(
+                    {
+                        "note_id": note_id,
+                        "accession_number": accession,
+                        "replay_run_id": None,
+                        "note_date": None,
+                        "status": "DATA_SOURCE_BLOCKED",
+                        "distance_to_barrier": None,
+                        "worst_performance": None,
+                        "reason": "missing_replay_run",
+                    }
+                )
+                continue
+            replay = self.get_structured_note_replay_run(str(latest.get("run_id") or ""))
+            replay_points = list(replay.get("points") or [])
+            latest_point = replay_points[-1] if replay_points else {}
+            distance = _coerce_float(latest_point.get("distance_to_barrier"), None)
+            worst = _coerce_float(latest_point.get("worst_performance"), None)
+            source_status = str(latest_point.get("status") or replay.get("status") or "")
+            if source_status != "OK" or distance is None:
+                blocked_count += 1
+                note_results.append(
+                    {
+                        "note_id": note_id,
+                        "accession_number": accession,
+                        "replay_run_id": replay.get("run_id"),
+                        "note_date": latest_point.get("note_date"),
+                        "status": "DATA_SOURCE_BLOCKED",
+                        "distance_to_barrier": distance,
+                        "worst_performance": worst,
+                        "reason": "missing_distance_to_barrier",
+                    }
+                )
+                continue
+            distances.append(float(distance))
+            note_results.append(
+                {
+                    "note_id": note_id,
+                    "accession_number": accession,
+                    "replay_run_id": replay.get("run_id"),
+                    "note_date": latest_point.get("note_date"),
+                    "status": "OK",
+                    "distance_to_barrier": float(distance),
+                    "worst_performance": worst,
+                    "reason": "",
+                }
+            )
+        evaluated_count = len(entries)
+        coverage_ratio = (len(distances) / evaluated_count) if evaluated_count else 0.0
+        average_distance = (sum(distances) / len(distances)) if distances else None
+        min_distance = min(distances) if distances else None
+        near_count = sum(1 for distance in distances if distance < near_threshold)
+        breached_count = sum(1 for distance in distances if distance <= 0)
+        if coverage_ratio < 0.8 or average_distance is None:
+            risk_state = "DATA_SOURCE_BLOCKED"
+        elif average_distance < 1.0 or near_count >= 3:
+            risk_state = "REDUCE_BETA"
+        elif average_distance < 2.0:
+            risk_state = "WATCH"
+        else:
+            risk_state = "NORMAL"
+        advisory_instructions: list[dict[str, Any]] = []
+        if risk_state == "REDUCE_BETA":
+            advisory_instructions.append(
+                {
+                    "action_type": "Beta_Reduction",
+                    "target": target_symbol,
+                    "mode": "ADVISORY_ONLY",
+                    "reason": "Pilot FCN average distance to barrier deteriorated",
+                    "suggested_beta_multiplier": 0.75,
+                    "publish_boundary": "sandbox -> quarantine -> publish",
+                }
+            )
+        now = iso_now()
+        return {
+            "manifest_id": str(manifest.get("manifest_id") or payload.get("manifest_id") or ""),
+            "manifest_path": manifest_path,
+            "risk_state": risk_state,
+            "evaluated_note_count": evaluated_count,
+            "blocked_note_count": blocked_count,
+            "coverage_ratio": coverage_ratio,
+            "average_distance_to_barrier": average_distance,
+            "min_distance_to_barrier": min_distance,
+            "notes_near_barrier_count": near_count,
+            "notes_breached_barrier_count": breached_count,
+            "advisory_instructions": advisory_instructions,
+            "note_results": note_results,
+            "summary": {
+                "near_barrier_threshold": near_threshold,
+                "target_symbol": target_symbol,
+                "advisory_only": True,
+                "source": "latest_structured_note_replay_runs",
+                "manifest_hash": manifest.get("manifest_hash"),
+                "f1_static_cache_status": cache_status_counts,
+                "underlying_count": {
+                    "min": min(underlying_counts) if underlying_counts else 0,
+                    "max": max(underlying_counts) if underlying_counts else 0,
+                },
+                "definition_version": STRUCTURED_NOTE_DEFINITION_VERSION,
+            },
+            "created_at": now,
+        }
+
+    def _load_structured_note_pilot_manifest(self, payload: Mapping[str, Any]) -> tuple[dict[str, Any], str | None]:
+        manifest_path = str(payload.get("manifest_path") or "").strip()
+        manifest_id = str(payload.get("manifest_id") or "").strip()
+        if manifest_path:
+            path = Path(manifest_path)
+            if not path.exists():
+                raise ValueError(f"Structured note pilot manifest not found: {manifest_path}")
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict):
+                raise ValueError(f"Structured note pilot manifest must be a JSON object: {manifest_path}")
+            return manifest, str(path)
+        if not manifest_id:
+            raise ValueError("Pilot pressure test requires manifest_id or manifest_path.")
+        row = self.storage.fetch_one("SELECT * FROM structured_note_pilot_manifests WHERE manifest_id = ?", (manifest_id,))
+        if not row:
+            raise ValueError(f"Structured note pilot manifest not found: {manifest_id}")
+        summary = loads(row.get("summary_json"), {})
+        manifest = {
+            "manifest_id": str(row.get("manifest_id") or ""),
+            "issuer_cik": str(row.get("issuer_cik") or ""),
+            "manifest_path": str(row.get("manifest_path") or ""),
+            "entries": loads(row.get("entries_json"), []),
+            **(summary if isinstance(summary, dict) else {}),
+        }
+        return manifest, str(row.get("manifest_path") or "")
+
+    @staticmethod
+    def _sec_424b2_pilot_manifest_entry(
+        parsed: Mapping[str, Any],
+        *,
+        filing: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        filing = filing or {}
+        parse_run = dict(parsed.get("parse_run") or {})
+        note = dict(parsed.get("note") or {})
+        underlyings = [dict(item) for item in parsed.get("underlyings") or [] if isinstance(item, Mapping)]
+        tickers = [str(item.get("ticker") or "").upper() for item in underlyings if item.get("ticker")]
+        asset_mix = RealBacktestPlatformService._structured_note_asset_mix(tickers)
+        coupon = _coerce_float(note.get("coupon_rate_annual"), None)
+        barrier = _coerce_float(note.get("barrier_percentage"), None)
+        return {
+            "accession_number": str(parse_run.get("accession_number") or filing.get("accession_number") or ""),
+            "source_url": str(parse_run.get("source_url") or filing.get("primary_document_url") or ""),
+            "primary_document": str(filing.get("primary_document") or note.get("primary_document") or ""),
+            "issuer_cik": str(parse_run.get("issuer_cik") or note.get("issuer_cik") or ""),
+            "raw_html_sha256": str(parse_run.get("raw_html_sha256") or ""),
+            "parser_version": str(parse_run.get("parser_version") or ""),
+            "parser_rule_hash": str(parse_run.get("parser_rule_hash") or ""),
+            "table_signature_hash": str(parse_run.get("table_signature_hash") or ""),
+            "parse_result_hash": str(parse_run.get("parse_result_hash") or ""),
+            "status": str(parsed.get("status") or "REVIEW_REQUIRED"),
+            "warnings": list(parsed.get("warnings") or []),
+            "note_id": str(note.get("note_id") or ""),
+            "underlying_tickers": tickers,
+            "underlying_count": len(tickers),
+            "asset_mix": asset_mix,
+            "coupon_rate_annual": coupon,
+            "barrier_percentage": barrier,
+            "autocall_frequency": str(note.get("autocall_frequency") or ""),
+            "memory_feature": bool(note.get("memory_feature")),
+            "feature_bucket": "|".join(
+                [
+                    f"u{len(tickers)}",
+                    asset_mix,
+                    f"coupon_{round(coupon or 0.0, 3)}",
+                    f"barrier_{round(barrier or 0.0, 2)}",
+                    "memory" if note.get("memory_feature") else "no_memory",
+                ]
+            ),
+            "price_proxies": RealBacktestPlatformService._default_structured_note_price_proxies(tickers),
+            "last_parse_run_id": str(parse_run.get("run_id") or "") or None,
+            "last_replay_run_id": None,
+            "last_status": str(parsed.get("status") or "REVIEW_REQUIRED"),
+            "last_validated_at": str(parse_run.get("created_at") or "") or None,
+        }
+
+    @staticmethod
+    def _select_sec_424b2_pilot_entries(entries: Sequence[Mapping[str, Any]], limit: int) -> list[dict[str, Any]]:
+        sentinel = "0001918704-26-014078"
+        ordered = sorted(
+            [dict(entry) for entry in entries],
+            key=lambda entry: (
+                0 if str(entry.get("accession_number") or "") == sentinel else 1,
+                0 if str(entry.get("status") or "") == "PARSED" else 1,
+                str(entry.get("feature_bucket") or ""),
+                str(entry.get("accession_number") or entry.get("source_url") or ""),
+            ),
+        )
+        selected: list[dict[str, Any]] = []
+        seen_buckets: set[str] = set()
+        for entry in ordered:
+            bucket = str(entry.get("feature_bucket") or entry.get("accession_number") or entry.get("source_url") or "")
+            if bucket in seen_buckets and len(selected) < max(1, limit // 2):
+                continue
+            selected.append(entry)
+            seen_buckets.add(bucket)
+            if len(selected) >= limit:
+                return selected
+        for entry in ordered:
+            identity = str(entry.get("accession_number") or entry.get("source_url") or "")
+            if any(str(item.get("accession_number") or item.get("source_url") or "") == identity for item in selected):
+                continue
+            selected.append(entry)
+            if len(selected) >= limit:
+                break
+        return selected
+
+    @staticmethod
+    def _sec_424b2_pilot_summary(entries: Sequence[Mapping[str, Any]], *, source_count: int) -> dict[str, Any]:
+        status_counts: dict[str, int] = {}
+        asset_mix_counts: dict[str, int] = {}
+        for entry in entries:
+            status = str(entry.get("status") or "REVIEW_REQUIRED")
+            status_counts[status] = status_counts.get(status, 0) + 1
+            asset_mix = str(entry.get("asset_mix") or "")
+            if asset_mix:
+                asset_mix_counts[asset_mix] = asset_mix_counts.get(asset_mix, 0) + 1
+        return {
+            "source_count": source_count,
+            "selected_count": len(entries),
+            "status_counts": status_counts,
+            "asset_mix_counts": asset_mix_counts,
+            "parser_version": SEC_424B2_PARSER_VERSION,
+            "parser_rule_hash": SEC_424B2_PARSER_RULE_HASH,
+        }
+
+    @staticmethod
+    def _stable_json_hash(payload: Mapping[str, Any] | Sequence[Any]) -> str:
+        return hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _structured_note_asset_mix(tickers: Sequence[str]) -> str:
+        index_like = {"SPX", "RTY", "NDX", "DJI", "RUT"}
+        etf_like = {"SPY", "QQQ", "IWM", "KRE", "DIA", "XLF", "XLK"}
+        has_index = any(str(ticker).upper() in index_like for ticker in tickers)
+        has_etf = any(str(ticker).upper() in etf_like for ticker in tickers)
+        has_equity = any(str(ticker).upper() not in index_like | etf_like for ticker in tickers)
+        parts = []
+        if has_index:
+            parts.append("INDEX")
+        if has_etf:
+            parts.append("ETF")
+        if has_equity:
+            parts.append("EQUITY")
+        return "+".join(parts) or "UNKNOWN"
+
+    @staticmethod
+    def _default_structured_note_price_proxies(tickers: Sequence[str]) -> dict[str, dict[str, str]]:
+        defaults = {
+            "SPX": "SPY",
+            "RTY": "IWM",
+            "NDX": "QQQ",
+        }
+        return {
+            ticker: {"price_proxy_symbol": proxy, "proxy_mode": "SANDBOX_ONLY"}
+            for ticker in [str(item).upper() for item in tickers]
+            if (proxy := defaults.get(ticker))
+        }
+
+    @staticmethod
+    def _structured_note_price_symbol_map(
+        underlyings: Sequence[Mapping[str, Any]],
+        price_proxies: Mapping[str, Any],
+        replay_mode: str,
+    ) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for underlying in underlyings:
+            ticker = str(underlying.get("ticker") or "").upper()
+            if not ticker:
+                continue
+            proxy_payload = price_proxies.get(ticker) or price_proxies.get(ticker.lower())
+            proxy_symbol = ""
+            proxy_mode = ""
+            if isinstance(proxy_payload, Mapping):
+                proxy_symbol = str(proxy_payload.get("price_proxy_symbol") or "").upper()
+                proxy_mode = str(proxy_payload.get("proxy_mode") or "").upper()
+            elif isinstance(proxy_payload, str):
+                proxy_symbol = proxy_payload.upper()
+                proxy_mode = "SANDBOX_ONLY"
+            if replay_mode == "sandbox" and proxy_symbol and proxy_mode == "SANDBOX_ONLY":
+                result[ticker] = proxy_symbol
+            else:
+                result[ticker] = ticker
+        return result
+
+    @staticmethod
+    def _structured_note_observation_dates(
+        rows_by_ticker: Mapping[str, Sequence[Mapping[str, Any]]],
+        frequency: str,
+    ) -> list[str]:
+        date_sets = [
+            {str(row.get("date") or "") for row in rows if str(row.get("date") or "")}
+            for rows in rows_by_ticker.values()
+            if rows
+        ]
+        if not date_sets:
+            return []
+        common_dates = sorted(set.intersection(*date_sets))
+        if not common_dates:
+            return []
+        lowered = str(frequency or "").lower()
+        if "quarter" in lowered:
+            grouped: dict[str, str] = {}
+            for item in common_dates:
+                month = int(item[5:7])
+                grouped[f"{item[:4]}-Q{(month - 1) // 3 + 1}"] = item
+            return list(grouped.values())
+        if "month" in lowered:
+            grouped = {}
+            for item in common_dates:
+                grouped[item[:7]] = item
+            return list(grouped.values())
+        return common_dates
+
     def get_factor_factory_operator_config(self) -> dict[str, Any]:
         profile_row = self.storage.fetch_one("SELECT * FROM factor_factory_profiles WHERE id = 'default'")
         profile = self._decode_factor_factory_profile_row(profile_row)
@@ -3902,13 +5967,17 @@ class RealBacktestPlatformService(BacktestPlatformService):
             for row in refreshed_rows
         ]
         latest_mining_job_id = str((latest_run_full or {}).get("mining_job_id") or "")
-        quarantine = self.list_factor_quarantine_candidates(
+        current_quarantine = self.list_factor_quarantine_candidates(
             source_job_id=latest_mining_job_id or None,
             page=1,
             page_size=50,
         )
+        batch_lineage = self._factor_factory_batch_lineage(
+            latest_run_full,
+            source_reason="latest_factor_factory_run",
+        )
         external_quarantine = factor_research_service.list_external_factor_import_quarantine_candidates(limit=12)
-        quarantine = self._merge_factor_factory_quarantine_projection(quarantine, external_quarantine)
+        quarantine = self._merge_factor_factory_quarantine_projection(current_quarantine, external_quarantine)
         active_run_full = (
             latest_run_full
             if latest_run_full and latest_run_full.get("status") in {"QUEUED", "RUNNING"}
@@ -3925,6 +5994,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "external_import_precheck_jobs": factor_research_service.list_external_factor_import_precheck_jobs(limit=8),
             "external_import_review_queue": factor_research_service.list_external_factor_import_review_queue(limit=8),
             "external_import_quarantine": external_quarantine,
+            "batch_lineage": batch_lineage,
             "gate_policy": profile.get("gate_policy") or self._factor_factory_default_gate_policy(),
             "operator_config": self.get_factor_factory_operator_config(),
         }
@@ -3942,15 +6012,19 @@ class RealBacktestPlatformService(BacktestPlatformService):
             reason = str(item.get("rejected_reason") or eligibility.get("reason") or "unknown")
             key = reason.split(";", 1)[0][:48] if reason else "unknown"
             rejected_reasons[key] = rejected_reasons.get(key, 0) + 1
-        formula_count = int(
-            operator_engine_summary.get("deduped_formula_count")
-            or operator_engine_summary.get("generated_formula_count")
-            or 0
+        formula_count = int(batch_lineage.get("raw_f2_total") or 0)
+        raw_f2_count = int(batch_lineage.get("raw_f2_total") or formula_count)
+        refined_f2_count = int(batch_lineage.get("refined_f2_total") or 0)
+        lineage_status_counts = (
+            batch_lineage.get("quarantine_status_counts")
+            if isinstance(batch_lineage.get("quarantine_status_counts"), Mapping)
+            else {}
         )
-        raw_f2_count = int(operator_engine_summary.get("raw_f2_batch_delivered_count") or formula_count)
-        refined_f2_count = int(operator_engine_summary.get("refined_f2_batch_delivered_count") or 0)
-        quarantine_pass_count = int(quarantine_summary.get("passed_count") or 0) + int(quarantine_summary.get("published_count") or 0)
-        failure_count = int(quarantine_summary.get("rejected_count") or 0)
+        quarantine_pass_count = (
+            int(lineage_status_counts.get("PASSED") or 0)
+            + int(lineage_status_counts.get("PUBLISHED") or 0)
+        ) or int(quarantine_summary.get("passed_count") or 0) + int(quarantine_summary.get("published_count") or 0)
+        failure_count = int(lineage_status_counts.get("REJECTED") or 0) or int(quarantine_summary.get("rejected_count") or 0)
         overview["monitor_summary"] = {
             "formula_count": formula_count,
             "selected_date_formula_count": formula_count,
@@ -3959,13 +6033,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "refined_f2_delivered_count": refined_f2_count,
             "initial_screen_pass_count": refined_f2_count,
             "quarantine_pass_count": quarantine_pass_count,
-            "s_grade_promotion_count": sum(
-                1
-                for item in quarantine_items
-                if isinstance(item, Mapping)
-                and str(item.get("publish_status") or "").upper() == "ELIGIBLE"
-                and bool(item.get("wnzt_complete"))
-            ),
+            "s_grade_promotion_count": int(batch_lineage.get("publishable_total") or 0),
             "alpha_concentration": round(max((_coerce_float((item.get("candidate_metrics") or {}).get("s_grade_correlation"), 0.0) for item in quarantine_items if isinstance(item, Mapping) and isinstance(item.get("candidate_metrics"), Mapping)), default=0.0), 4),
             "failure_candidate_count": failure_count,
             "failure_reason_distribution": rejected_reasons,
@@ -3976,6 +6044,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             runs=runs_full,
             mining=mining_full,
             quarantine=quarantine,
+            batch_lineage=batch_lineage,
         ))
         return overview
 
@@ -4724,16 +6793,6 @@ class RealBacktestPlatformService(BacktestPlatformService):
         artifact_dir_rel.mkdir(parents=True, exist_ok=True)
         ledger_rel = artifact_dir_rel / "refined-f2-candidates.json"
         manifest_rel = artifact_dir_rel / "formula-manifest.json"
-        manifest_hash = hashlib.sha256(
-            json.dumps(
-                {
-                    "source_factor_ids": source_factor_ids,
-                    "candidates": full_candidates,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            ).encode("utf-8")
-        ).hexdigest()
         refined_count = sum(
             1
             for candidate in full_candidates
@@ -4753,17 +6812,23 @@ class RealBacktestPlatformService(BacktestPlatformService):
             ),
             encoding="utf-8",
         )
-        manifest_payload = {
-            "job_id": job_id,
-            "source_job_id": job_id,
-            "source": "online_factor_library_raw_f2",
-            "formula_count": len(full_candidates),
-            "refined_count": refined_count,
-            "hash": manifest_hash,
-            "created_at": created_at,
-            "source_factor_count": len(source_factor_ids),
-            "source_factor_ids": source_factor_ids,
-        }
+        manifest_payload = build_factor_factory_artifact_manifest(
+            run_id=run_id,
+            job_id=job_id,
+            source_job_id=job_id,
+            formula_count=len(full_candidates),
+            refined_count=refined_count,
+            created_at=created_at,
+            hash_payload={
+                "source_factor_ids": source_factor_ids,
+                "candidates": full_candidates,
+            },
+            extra={
+                "source": "online_factor_library_raw_f2",
+                "source_factor_count": len(source_factor_ids),
+                "source_factor_ids": source_factor_ids,
+            },
+        )
         manifest_rel.write_text(
             json.dumps(manifest_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",

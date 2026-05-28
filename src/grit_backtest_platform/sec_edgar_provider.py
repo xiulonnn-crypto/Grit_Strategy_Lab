@@ -22,6 +22,7 @@ SEC_COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json
 REPORT_FORMS = {"10-K", "10-Q", "8-K", "20-F", "6-K"}
 CORPORATE_ACTION_FILING_FORMS = {"8-K"}
 FUNDAMENTAL_REPORT_FORMS = {"10-K", "10-Q", "20-F", "40-F"}
+STRUCTURED_NOTE_FILING_FORMS = {"424B2"}
 _EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
 
 SEC_FUNDAMENTAL_FACT_TAGS: dict[str, tuple[str, ...]] = {
@@ -481,6 +482,52 @@ class SecEdgarProvider:
             for symbol in sorted(requested)
             if symbol in ticker_index
         }
+
+    def fetch_submissions_by_cik(self, cik: str) -> dict[str, Any]:
+        normalized_cik = str(cik or "").strip().zfill(10)
+        if not normalized_cik or not normalized_cik.isdigit():
+            raise RuntimeError(f"Invalid SEC CIK: {cik}.")
+        payload = self._request_json(SEC_SUBMISSIONS_URL.format(cik=normalized_cik))
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"Unexpected SEC submissions payload for CIK {normalized_cik}.")
+        return payload
+
+    def fetch_424b2_filings_by_cik(self, cik: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        normalized_cik = str(cik or "").strip().zfill(10)
+        payload = self.fetch_submissions_by_cik(normalized_cik)
+        filings = ((payload or {}).get("filings") or {}).get("recent") or {}
+        dates = filings.get("filingDate") or []
+        forms = filings.get("form") or []
+        accession_numbers = filings.get("accessionNumber") or []
+        primary_documents = filings.get("primaryDocument") or []
+        accepted: list[dict[str, Any]] = []
+        for index, filing_date in enumerate(dates):
+            if index >= len(forms):
+                continue
+            form = str(forms[index] or "").strip().upper()
+            if not _form_matches(form, STRUCTURED_NOTE_FILING_FORMS):
+                continue
+            accession_number = accession_numbers[index] if index < len(accession_numbers) else None
+            primary_document = primary_documents[index] if index < len(primary_documents) else None
+            accepted.append(
+                {
+                    "date": _parse_iso_date(filing_date),
+                    "form": form,
+                    "accession_number": accession_number,
+                    "primary_document": primary_document,
+                    "cik": normalized_cik,
+                    **_filing_archive_payload(normalized_cik, accession_number, primary_document),
+                }
+            )
+            if len(accepted) >= max(1, int(limit)):
+                break
+        return accepted
+
+    def fetch_archive_document(self, url: str) -> str:
+        normalized_url = str(url or "").strip()
+        if not normalized_url.startswith("https://www.sec.gov/Archives/edgar/data/"):
+            raise RuntimeError("SEC archive document URL must use https://www.sec.gov/Archives/edgar/data/.")
+        return self._request_text(normalized_url)
 
     def fetch_report_filings(self, symbol: str, start_date: date, end_date: date) -> list[dict[str, Any]]:
         identity = self.resolve_identity(symbol)

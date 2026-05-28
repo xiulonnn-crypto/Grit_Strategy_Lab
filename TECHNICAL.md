@@ -16,6 +16,7 @@
 ## Factor Factory batch lineage repair gate
 
 - Before editing code for `#/factors/factory`, `/factor-factory/overview`, Raw_F2, Refined_F2, WNZT, quarantine, publishable factors, or batch-count anomalies, run the read-only preflight: `python scripts/factor_factory_lineage_preflight.py`. Use `--db <path>` when `GRIT_BACKTEST_DB` points at a non-root runtime DB, and `--strict` when mismatches should fail the review gate.
+- For implementation closeout, prefer `powershell -ExecutionPolicy Bypass -File .\scripts\codex-factor-factory-lineage-sanity.ps1` so manifest writer sanity, canonical resolver checks, focused backend/frontend tests, and owner slices run in the right order. Use `-Quick` only for inner-loop checks before the final owner-slice run.
 - The preflight output is the first evidence item in the `$grit-review` chain. It must report `current_batch_id`, `source_job_id`, Raw_F2 count, Refined_F2 count, ledger artifact count, quarantine source-job count, status counts, and the UI summary source. If it reports `ledger_count_mismatch_*`, `quarantine_count_mismatch_*`, `ledger_source_job_mismatch`, or `preview_may_be_used_as_batch_total`, classify the issue as batch lineage before touching UI code.
 - Preview is never canonical. `top_candidates`, `top_preview_count`, default `page_size=50`, first-page quarantine rows, and UI preview lists are bounded projections only. Factor factory tests must guard that no preview or paged result is used as batch total, source-job truth, or publishable-factor truth.
 - Full Raw_F2 and Refined_F2 artifacts must carry a manifest contract: `job_id`, `source_job_id`, `formula_count`, `refined_count`, `hash`, and `created_at`. API responses and detail modals should echo this manifest or an explicit artifact reference. Missing manifest fields are a preflight warning and must block final acceptance for new artifact-producing work.
@@ -188,6 +189,7 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - 交付前自测不能替代正式 reviewer，它只是阻止明显不合格切片进入评审。
 - 临时截图、DOM dump、trace matrix 草稿和浏览器记录应放在 `.tmp/`、`artifacts/` 或 `output/logs/grit-coder/`，不要散落在 repo 根目录。
 - 恢复证据 Markdown 进入 `docs/recovery/`，恢复辅助脚本进入 `scripts/recovery/`，历史 Git 备份和旧数据库备份进入 `artifacts/recovery/`；`.codex-logs/` 只视为历史兼容位置，新日志和浏览器证据应写入 `output/logs/grit-coder/` 或 `artifacts/`。
+- PIT/L1 小批修复默认不得再整库复制 14GB market-data DB。使用 `scripts/recovery/sqlite_backup_policy.py pit-price-preimage --symbol <SYM>` 只备份目标 `ds-price` 行和 `backup-manifest.json`；只有结构性迁移、批量未知影响或用户明确要求全量恢复点时，才使用 `full-pair`，且必须通过 `--min-free-after-gb` 空间门禁。`artifacts/recovery` 是恢复/审计区，不是运行热路径；运行依赖仍是根目录 `.grit_backtest_platform.sqlite3` 与 `.grit_backtest_platform_market_data.sqlite3`，旧 `l1-*` 整库备份可由 cleanup 脚本在保护最新全量 pair、最新 targeted preimage 和 evidence 后清理。
 - pytest `--basetemp`、pytest `cache_dir`、`tempfile`/`TMPDIR`、临时调试库和一次性 debug 输出必须指向 `.tmp/` 下的任务目录。固定 backend 脚本使用 `.tmp/pytest-runtime/`；直接运行 `python -m pytest` 且未显式传入 `--basetemp` 时，repo 级 `conftest.py` 会提前把 Python `TEMP`、`TMP`、`TMPDIR`、`PYTEST_DEBUG_TEMPROOT` 归一到 `.tmp/pytest-runtime/`，并把本仓库 `tmp_path` fixture 目录建到 `.tmp/pytest-runtime/tmp-paths/`，避免触碰本机默认 `%TEMP%` ACL 以及 pytest Windows `0o700` numbered-dir ACL 问题；repo 级 pytest 门禁会拒绝位于项目外，或位于仓库内但不在 `.tmp/` 下的显式 `--basetemp` 与 `cache_dir`，并拒绝仓库内错误位置的 `TEMP`、`TMP`、`TMPDIR` 和 `PYTEST_DEBUG_TEMPROOT`；固定脚本不得把 `pytesttmp-*`、`pytest-cache-files-*`、`tmp_dbg_*`、`tmp-promote-*` 或 `tmp/` 直接写到 repo 根目录，也不得把项目 pytest 临时根切到 `C:\tmp`。
 
 ### 1.4 文档优先级
@@ -222,6 +224,9 @@ Codex 在本仓库的默认阅读顺序固定如下：
 - `GET/PUT /factor-factory/operator-config` 保存默认 profile 草稿；`POST /factor-factory/operator-config/snapshots` 生成不可变 `operator_config_snapshot_id`。默认只启用 `TS_Return`、`TS_Rank`、`TS_Corr`，窗口为 `[3,5,10,21,63,126,252]`，默认 depth 为 `2`。
 - `POST /factor-factory/run-now` 与每日自动化会把 `f1_catalog_snapshot_id`、`operator_config_snapshot_id`、启用算子、窗口空间、默认 depth、阻塞字段策略写入 `factor_factory_runs.request_json.config_snapshot` 与 summary；`config_signature` 包含两个快照 ID。
 - `DATA_SOURCE_BLOCKED` 的 F1 字段会按配置策略从 `source_factor_ids` 中排除，挖掘候选仍必须走 `sandbox -> quarantine -> publish`。
+- SEC 424B2 结构化票据第一期只作为 `note_date` 衍生品影子数据合同接入：`POST /structured-notes/sec-424b2/parse-preview` 用确定性 HTML 表格/正则解析生成 F1 票据条款、底层资产与 F2 合同表达式，生产禁用外部 LLM。持久化表为 `sec_424b2_parse_runs`、`structured_note_terms`、`structured_note_underlyings` 与 `structured_note_evidence_anchors`；发布仍必须走后续 `sandbox -> quarantine -> publish`，不得把 preview 或低置信 `REVIEW_REQUIRED` 结果直接当作可发布因子。
+- SEC 424B2 Execution Core 增加 parser 版本治理与 JPM pilot 回放：parse run 必须记录 `parser_version`、`parser_rule_hash`、`raw_html_sha256`、`normalized_text_hash`、`table_signature_hash`、`parse_result_hash`；`GET /structured-notes/sec-424b2/reparse-candidates` 用 `PARSER_CHANGED`、`RULEPACK_CHANGED`、`HTML_CHANGED`、`LOW_CONFIDENCE`、`UNSUPPORTED_PAYOFF`、`DATA_SOURCE_BLOCKED` 生成补齐队列。JPM 小样本使用 `POST /structured-notes/sec-424b2/pilot/discover-preview` 与 `/pilot/ingest` 生成 manifest；`POST /structured-notes/fcn/replay` 只读 `dataset_price_bars.adj_close`，缺价格输出 `DATA_SOURCE_BLOCKED`。指数代理如 `SPX -> SPY`、`RTY -> IWM` 只能在 `proxy_mode=SANDBOX_ONLY` 且 `replay_mode=sandbox` 下用于回测，不得改写真实 underlying identity。
+- SEC 424B2 FCN 归因层继续使用 replay run 作为唯一输入事实源：`GET /structured-notes/fcn/replay-runs/{run_id}/attribution` 计算累计票息、跌幅代理、净收益与覆盖率；`POST /structured-notes/fcn/pilot-pressure-test` 汇总 pilot manifest 最新 replay run 的敲入距离并只输出 `ADVISORY_ONLY` 的 `Beta_Reduction` 建议，不自动改写 QQQ 仓位、策略参数或正式因子发布状态。`POST /structured-notes/sec-424b2/reparse-jobs/preview`、`POST /structured-notes/sec-424b2/reparse-jobs` 与 `GET /structured-notes/sec-424b2/reparse-jobs/{job_id}` 仅交付 Auto-Repair dry-run 合同；默认关闭，且 dry-run 不写新 parse run。
 
 ### 1.5.2 Phase 0 / F1 / Operator 三段实施路径
 
@@ -408,6 +413,19 @@ Codex 对话默认不要直接反复重启本地脚本。先使用 `powershell -
 | `NASDAQ_DATA_LINK_API_KEY` | Nasdaq Data Link WIKI 与 Tables API 凭证，用于 2018 年前美国股票历史价格补丁；Tables EOD 默认尝试 `QUOTEMEDIA/PRICES`，可用 `GRIT_NASDAQ_DATA_LINK_PRICE_TABLES` 覆盖为逗号分隔表代码；不等同于 Nasdaq real-time/delayed API 的 client credentials；只读环境变量，不写入缓存、SQLite 或日志 |
 | `FINNHUB_API_KEY` | Finnhub 凭证，用于 company profile、listing status 身份交叉校验与小批 targeted candle fallback；行业字段仅作辅助 metadata |
 | `SEC_USER_AGENT` | SEC EDGAR 身份/生命周期确权 user agent，必须包含可联系邮箱；只读环境变量，不落库 |
+| `GRIT_DERIVATIVES_DATA_PATH` | 结构化票据/衍生品影子数据路径，避免与 `CRSP_DATA_PATH` 的纯股票日频价量数据混用 |
+| `GRIT_SEC_424B2_CACHE_DIR` | SEC 424B2 原文缓存目录，默认应放在 `.tmp/` 或 operator 管理的本地路径 |
+| `GRIT_SEC_424B2_RATE_LIMIT_RPS` | SEC 424B2 抓取限速配置；必须低于 SEC fair-access 上限并保留可联系 `SEC_USER_AGENT` |
+| `GRIT_SEC_424B2_PILOT_MANIFEST` | JPM 424B2 pilot manifest 路径；QuickStart 只配置路径，具体 accession、URL、hash 与 proxy 证据写入 manifest |
+| `GRIT_SEC_424B2_PILOT_LIMIT` | JPM pilot 锁定样本数量，默认 `10`，本阶段允许 `5-10` |
+| `GRIT_STRUCTURED_NOTE_REPLAY_MODE` | 结构化票据回放模式，默认 `sandbox`；只有 sandbox 可消费 manifest 中显式 `SANDBOX_ONLY` 价格代理 |
+| `GRIT_STRUCTURED_NOTE_F1_CACHE_MAX_NOTES` | F1 静态条款 read-through LRU cache 最大 note 数；默认 `2000`，runtime preflight 可用于 10/100/1000/10000 分级放量前验证容量 |
+| `GRIT_STRUCTURED_NOTE_F1_CACHE_POLICY` | F1 静态条款 cache 策略；当前固定为 `read_through_lru`，LRU 只淘汰内存 bundle，不删除 DB parse run、terms 或 underlyings |
+| `GRIT_STRUCTURED_NOTE_F1_CACHE_WARN_MB` | F1 静态条款 cache 近似内存告警阈值；默认 `256` MB，超阈值时 runtime preflight 返回 `MEMORY_GUARDRAIL_BLOCKED` |
+| `GRIT_SEC_424B2_AUTO_REPAIR` | SEC 424B2 reparse Auto-Repair 开关，默认 `off`；开启后仍先生成 dry-run job |
+| `GRIT_SEC_424B2_AUTO_REPAIR_MODE` | Auto-Repair 模式，当前只允许 `dry_run` |
+| `GRIT_SEC_424B2_AUTO_REPAIR_REASON_ALLOWLIST` | Auto-Repair dry-run 可进入候选的原因白名单，默认 `PARSER_CHANGED,RULEPACK_CHANGED` |
+| `GRIT_SEC_424B2_AUTO_REPAIR_MAX_FILINGS` | 单次 Auto-Repair dry-run 最多选取的 filing 数，默认 `10` |
 | `GRIT_ENABLE_STOOQ_ONLINE` | 设为 `1` / `true` / `yes` / `on` 后，Stooq offline ZIP 不可用时允许按单标的在线 CSV 补丁 |
 | `GRIT_STOOQ_ONLINE_CACHE_DIR` | 覆盖 Stooq 在线 CSV manifest/cache 目录；默认 `.tmp/pit-bulk-cache/stooq` |
 | `EODHD_API_TOKEN` / `EODHD_API_KEY` | EODHD 退市标的价格、分红拆分与基础面授权源；只读取环境变量，不落库 |

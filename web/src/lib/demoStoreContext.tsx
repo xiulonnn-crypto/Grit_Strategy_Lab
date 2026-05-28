@@ -46,6 +46,7 @@ import type {
   ApiFactorDiagnosticRunResponse,
   ApiF1CatalogResponse,
   ApiFactorFactoryAutomationPayload,
+  ApiFactorFactoryBatchLineage,
   ApiFactorFactoryOnlineRawF2Payload,
   ApiFactorFactoryOperatorConfigResponse,
   ApiFactorFactoryOverview,
@@ -881,6 +882,12 @@ function createHttpApiClient(): DemoApi {
     cancelFactorMiningJob: (id: string) =>
       requestJson<ApiFactorMiningJob>(`/factor-mining/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
     getFactorFactoryOverview: () => requestJson<ApiFactorFactoryOverview>('/factor-factory/overview'),
+    getFactorFactoryBatchLineage: (runId) => {
+      const search = new URLSearchParams();
+      if (runId) search.set('run_id', runId);
+      const query = search.toString();
+      return requestJson<ApiFactorFactoryBatchLineage>(`/factor-factory/batch-lineage${query ? `?${query}` : ''}`);
+    },
     getFactorFactoryOperatorConfig: () =>
       requestJson<ApiFactorFactoryOperatorConfigResponse>('/factor-factory/operator-config'),
     saveFactorFactoryOperatorConfig: (payload: ApiOperatorConfigDraft) =>

@@ -466,15 +466,10 @@ function manifestCanSubmitReview(manifest: PublicFactorImportManifest): boolean 
   if (!manifest.jobId.trim() || manifestIsSubmitted(manifest)) {
     return false;
   }
-  if (manifestIsReadyForReview(manifest) && manifest.submitReady) {
+  if (manifest.rowCount > 0 && manifestIsReadyForReview(manifest) && manifest.submitReady) {
     return true;
   }
-  const nextActions = (manifest.nextActions || []).map((action) => action.toLowerCase());
-  return (
-    manifestReviewStatus(manifest) === 'PENDING_REVIEW' &&
-    nextActions.includes('inspect_manifest') &&
-    !nextActions.includes('complete_semantic_mapping')
-  );
+  return false;
 }
 
 function manifestIsInReviewPreparation(manifest: PublicFactorImportManifest): boolean {

@@ -160,6 +160,45 @@ class _ProbeHandler(BaseHTTPRequestHandler):
         return
 
 
+class _FactoryOnlyProbeHandler(BaseHTTPRequestHandler):
+    factor_id = ""
+    display_name = ""
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path.startswith("/factor-factory/overview"):
+            payload = {
+                "external_import_quarantine": {
+                    "items": [
+                        {
+                            "id": "fq_demo",
+                            "target_factor_id": self.factor_id,
+                            "display_name_cn": self.display_name,
+                            "base_display_name_cn": self.display_name,
+                        }
+                    ]
+                }
+            }
+        elif self.path.startswith("/factors?"):
+            payload = {"items": []}
+        elif self.path.startswith(f"/factors/{self.factor_id}"):
+            self.send_response(404)
+            self.end_headers()
+            return
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+        data = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
 def test_factor_naming_probe_compares_four_surfaces(tmp_path: Path) -> None:
     factor_id = "s_f2_external_demo"
     display_name = "[External] Demo Factor (Daily) [Raw]"
@@ -213,3 +252,63 @@ def test_factor_naming_probe_compares_four_surfaces(tmp_path: Path) -> None:
     assert payload["factor_list"]["matched_projection"]["display_name_cn"] == display_name
     assert payload["factor_detail"]["projection"]["display_name_cn"] == display_name
     assert "Result:" in trace_path.read_text(encoding="utf-8")
+
+
+def test_factor_naming_probe_accepts_factory_only_candidates(tmp_path: Path) -> None:
+    factor_id = "s_f2_external_candidate_only"
+    display_name = "[External] Candidate Only (Monthly) [Refined]"
+    db_path = tmp_path / "missing.sqlite3"
+
+    handler = type(
+        "FactoryOnlyProbeHandler",
+        (_FactoryOnlyProbeHandler,),
+        {"factor_id": factor_id, "display_name": display_name},
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        out_path = tmp_path / "factory-only-probe.json"
+        trace_path = tmp_path / "factory-only-trace.md"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "scripts/factor_naming_probe.py",
+                "--factor-id",
+                factor_id,
+                "--db",
+                str(db_path),
+                "--api-base",
+                f"http://127.0.0.1:{server.server_port}",
+                "--expected-name",
+                display_name,
+                "--reject-name",
+                "Wrong Candidate Name",
+                "--acceptance-surface",
+                "factory",
+                "--out",
+                str(out_path),
+                "--trace-matrix",
+                str(trace_path),
+                "--strict",
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+    assert completed.returncode == 0, completed.stderr + completed.stdout
+    payload = json.loads(out_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "OK"
+    assert payload["acceptance_surface"] == "factory"
+    assert payload["warnings"] == []
+    assert payload["db"]["ok"] is False
+    assert payload["factor_detail"]["status_code"] == 404
+    assert payload["factory_overview"]["matched_projection"]["display_name_cn"] == display_name
+    trace = trace_path.read_text(encoding="utf-8")
+    assert "Acceptance surface: `factory`" in trace
+    assert "OUT_OF_SCOPE" in trace

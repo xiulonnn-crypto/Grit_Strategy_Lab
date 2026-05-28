@@ -156,7 +156,10 @@ function Get-StagedBlobText {
 }
 
 function Assert-TraceMatricesClosed {
-    param([string[]]$Paths)
+    param(
+        [string[]]$Paths,
+        [switch]$AllowCandidates
+    )
 
     [string[]]$tracePaths = @(
         $Paths |
@@ -179,7 +182,7 @@ function Assert-TraceMatricesClosed {
         return
     }
 
-    if ($AllowTraceCandidates) {
+    if ($AllowCandidates) {
         Write-Warning "Trace Matrix candidate rows are present; continuing because -AllowTraceCandidates was supplied."
         foreach ($row in $openRows) {
             Write-Warning "  $row"
@@ -191,6 +194,28 @@ function Assert-TraceMatricesClosed {
         "Trace Matrix files contain FAIL/BLOCKED/NOT_CHECKED rows. " +
         "Fix them or rerun with -AllowTraceCandidates for an explicit acceptance-candidate push.`n" +
         ($openRows -join "`n")
+    )
+}
+
+function Assert-PublishScopeFrozen {
+    param([string[]]$Paths)
+
+    $blocked = [System.Collections.Generic.List[string]]::new()
+    foreach ($path in $Paths) {
+        $lower = $path.ToLowerInvariant()
+        if ($lower.StartsWith('output/ui-artifact-trace/') -and $lower.EndsWith('.json')) {
+            $blocked.Add("$path => JSON evidence assets stay local; add them to .gitignore or remove them from the index before impact.")
+        }
+    }
+
+    if ($blocked.Count -eq 0) {
+        Write-Host 'Publish scope freeze passed.' -ForegroundColor Green
+        return
+    }
+
+    throw (
+        "Publish scope freeze failed. External impact pushes may not include local JSON evidence assets.`n" +
+        ($blocked -join "`n")
     )
 }
 
@@ -389,7 +414,8 @@ if ($SkipCommit) {
 
 if ($stagedPaths.Count -gt 0) {
     Invoke-StagedWhitespaceCheck -Paths $stagedPaths
-    Assert-TraceMatricesClosed -Paths $stagedPaths
+    Assert-TraceMatricesClosed -Paths $stagedPaths -AllowCandidates:($PlanOnly -and $AllowTraceCandidates)
+    Assert-PublishScopeFrozen -Paths $stagedPaths
 }
 
 [string[]]$highSignalPaths = @(Write-ExternalPushSummary -Paths $stagedPaths -RemoteUrl $remoteUrl)

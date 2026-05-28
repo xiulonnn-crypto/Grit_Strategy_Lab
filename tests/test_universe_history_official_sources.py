@@ -1100,6 +1100,28 @@ def test_extract_symbols_from_nasdaq_activity_html_parses_official_table():
     assert extracted.raw_symbols == ["AAPL", "MSFT", "NVDA"]
 
 
+def test_extract_symbols_from_nasdaq_activity_html_skips_infoquote_utility_link():
+    html = """
+        <html>
+          <body>
+            <a href="/Quote.dll?page=multi&mode=stock&symbol=QQQ">InfoQuote</a>
+            <table>
+              <tr><td>Apple</td><td><a href="/asp/quote.asp?symbol=AAPL&selected=AAPL">AAPL</a></td></tr>
+              <tr><td>Microsoft</td><td><a href="/asp/quote.asp?symbol=MSFT&selected=MSFT">MSFT</a></td></tr>
+              <tr><td>NVIDIA</td><td><a href="/asp/quote.asp?symbol=NVDA&selected=NVDA">NVDA</a></td></tr>
+            </table>
+          </body>
+        </html>
+    """
+
+    extracted = extract_symbols_from_nasdaq_activity_html(html, minimum_member_count=3)
+
+    assert extracted.normalized_symbols == ["AAPL", "MSFT", "NVDA"]
+    assert extracted.raw_symbols == ["AAPL", "MSFT", "NVDA"]
+    assert "INFOQUOTE" not in extracted.normalized_symbols
+    assert "QQQ" not in extracted.normalized_symbols
+
+
 def test_local_nasdaq100_seed_provider_replaces_fallback_anchor_when_provenance_complete(tmp_path):
     definition = UniverseDefinition(
         universe_key=NASDAQ100_UNIVERSE_KEY,

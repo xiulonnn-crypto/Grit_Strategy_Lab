@@ -282,6 +282,40 @@ function factoryOverview(overrides: Partial<ApiFactorFactoryOverview> = {}): Api
     funnel: { mined_candidates: 1, quarantine_candidates: 1, passed: 1, review_or_observation: 0, rejected: 0, published: 0 },
     mining: { items: [miningJob], summary: { total: 1 } },
     quarantine: { items: [quarantineCandidate], summary: { total: 1, page: 1, page_size: 50, total_pages: 1, passed_count: 1, rejected_count: 0 } },
+    batch_lineage: {
+      current_batch_id: 'ffr_factory_001',
+      source_job_id: 'fm_factory_001',
+      artifact_id: 'artifacts/factor-factory/operator-engine/ffr_factory_001/formula-manifest.json',
+      artifact_ref: {
+        formula_manifest: 'artifacts/factor-factory/operator-engine/ffr_factory_001/formula-manifest.json',
+        refined_f2_candidate_ledger: 'artifacts/factor-factory/operator-engine/ffr_factory_001/refined-f2-candidates.json',
+      },
+      manifest: {
+        job_id: 'fm_factory_001',
+        source_job_id: 'fm_factory_001',
+        formula_count: 1470,
+        refined_count: 1470,
+        hash: 'hash_factory_001',
+        created_at: '2026-05-18T08:02:00Z',
+      },
+      raw_f2_total: 1470,
+      refined_f2_total: 1470,
+      total_candidates: 1470,
+      ledger_total: 1470,
+      quarantine_total: 1470,
+      quarantine_status_counts: { PASSED: 1, PENDING: 1469 },
+      quarantine_raw_f2_total: 1470,
+      quarantine_refined_f2_total: 1470,
+      publishable_total: 1,
+      preview_count: 1,
+      is_preview: false,
+      page_count: 30,
+      source_reason: 'latest_factor_factory_run',
+      status: 'OK',
+      warnings: [],
+      publish_blocked: false,
+      publish_blocker_reason_cn: '',
+    },
     gate_policy: gatePolicy,
     task_summary: {
       total_tasks: 2,
@@ -298,7 +332,7 @@ function factoryOverview(overrides: Partial<ApiFactorFactoryOverview> = {}): Api
     monitor_summary: {
       formula_count: 1470,
       selected_date_formula_count: 1470,
-      initial_screen_pass_count: 1,
+      initial_screen_pass_count: 1470,
       quarantine_pass_count: 1,
       s_grade_promotion_count: 1,
       alpha_concentration: 0.22,
@@ -373,6 +407,46 @@ describe('FactorFactoryPage', () => {
     expect(document.querySelectorAll('.factor-factory-fixed-panel')).toHaveLength(3);
     expect(screen.getByLabelText('因子任务类型')).toBeInTheDocument();
     expect(screen.queryByText('因子改造类')).not.toBeInTheDocument();
+  });
+
+  it('uses canonical batch lineage totals instead of preview and first-page counts', async () => {
+    const base = factoryOverview();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(factoryOverview({
+      quarantine: {
+        ...base.quarantine,
+        summary: { total: 50, page: 1, page_size: 50, total_pages: 1, passed_count: 1, rejected_count: 0 },
+      },
+    })));
+
+    renderFactory();
+
+    await screen.findByRole('heading', { level: 1, name: '因子任务生产台' });
+    const metricValue = (key: string) => document.querySelector(`[data-metric-key="${key}"] .factor-phase2-metric__value`) as HTMLElement;
+    expect(metricValue('yesterday_formula_count')).toHaveTextContent('1470');
+    expect(metricValue('initial_screen_pass')).toHaveTextContent('1470');
+    expect(metricValue('s_grade_promotion')).toHaveTextContent('1');
+    expect(document.querySelector('[data-task-kind="mining"]')).toHaveTextContent('1470 当前批次');
+    expect(screen.getByText((content) => content.includes('1-1/1470'))).toBeInTheDocument();
+  });
+
+  it('blocks publish actions when canonical batch lineage is blocked', async () => {
+    const base = factoryOverview();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(factoryOverview({
+      batch_lineage: {
+        ...base.batch_lineage!,
+        status: 'BLOCKED',
+        warnings: ['manifest_missing:hash'],
+        publishable_total: 0,
+        publish_blocked: true,
+        publish_blocker_reason_cn: '当前批次证据不足，发布已阻断。',
+      },
+    })));
+
+    renderFactory();
+
+    expect(await screen.findByRole('heading', { name: '发布已阻断' })).toBeInTheDocument();
+    expect(screen.getByText('当前批次证据不足，发布已阻断。')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '一键发布' })).not.toBeInTheDocument();
   });
 
   it('shows submitted public factor imports as B3 quarantine results instead of a manual intake queue', async () => {
@@ -489,6 +563,142 @@ describe('FactorFactoryPage', () => {
     expect(await screen.findByRole('heading', { name: '专家复核建议' })).toBeInTheDocument();
     expect(screen.getByText('Fama-French 美股研究日频因子')).toBeInTheDocument();
     expect(screen.getByText('尝试 TS_Mean(..., 5) 等时序平滑。')).toBeInTheDocument();
+  });
+
+  it('keeps external public factor rows pinned after date-scoped quarantine search', async () => {
+    const overview = factoryOverview();
+    const monthlyDisplayName = '[外部] - Fama-French 美股研究月频因子 (Monthly) [Refined]';
+    const baseCandidate = overview.quarantine.items[0]!;
+    const monthlyCandidate: ApiFactorQuarantineCandidate = {
+      ...baseCandidate,
+      id: 'fq_ext_monthly_001',
+      mining_candidate_id: 'extcand_monthly_001',
+      source_mining_job_id: 'extimp_monthly_001',
+      expression: 'ExternalFactor(fama_french_us_research_factors_monthly)',
+      status: 'PASSED',
+      publish_status: 'ELIGIBLE',
+      display_name_cn: monthlyDisplayName,
+      factor_name: monthlyDisplayName,
+      target_factor_id: 's_f2_mom_raw_cur_external_fama_french_us_research_factors_monthly',
+      quarantine_result: 'PASS',
+      created_at: '2026-05-27T07:25:27Z',
+      updated_at: '2026-05-27T08:53:53Z',
+      last_quarantine_at: '2026-05-27T08:53:53Z',
+      latest_run: {
+        ...(baseCandidate.latest_run ?? {}),
+        id: 'extimp_monthly_001_run',
+        status: 'COMPLETED',
+        created_at: '2026-05-27T08:53:53Z',
+        completed_at: '2026-05-27T08:53:53Z',
+      },
+      reason_summary: '外部公开因子源文件已物化并完成 B3 源数据检疫。',
+      candidate_metrics: {
+        ...baseCandidate.candidate_metrics,
+        external_import_job_id: 'extimp_monthly_001',
+        external_import_display_name: monthlyDisplayName,
+        target_layer: 'L2',
+      },
+      publish_eligibility: {
+        status: 'ELIGIBLE',
+        reason: '外部公开因子源文件已物化并完成 B3 源数据检疫。',
+      },
+    };
+    const apiSearchCandidates: ApiFactorQuarantineCandidate[] = Array.from({ length: 50 }, (_, index) => ({
+      ...baseCandidate,
+      id: `fq_factory_search_${index + 1}`,
+      mining_candidate_id: `mine_search_${index + 1}`,
+      expression: `FactoryCandidate(${index + 1})`,
+      display_name_cn: `工厂候选 ${index + 1}`,
+      factor_name: `工厂候选 ${index + 1}`,
+      target_factor_id: `s_f2_factory_search_${index + 1}`,
+      status: 'REJECTED',
+      publish_status: 'BLOCKED',
+      quarantine_result: 'FAIL',
+      created_at: '2026-05-27T09:06:10Z',
+      updated_at: '2026-05-27T09:06:10Z',
+      last_quarantine_at: '2026-05-27T09:06:10Z',
+      latest_run: {
+        ...(baseCandidate.latest_run ?? {}),
+        id: `fq_factory_search_${index + 1}_run`,
+        status: 'COMPLETED',
+        created_at: '2026-05-27T09:06:10Z',
+        completed_at: '2026-05-27T09:06:10Z',
+      },
+      reason_summary: '批量工厂候选检疫失败。',
+      publish_eligibility: {
+        status: 'BLOCKED',
+        reason: '批量工厂候选检疫失败。',
+      },
+    }));
+    const overviewPayload = factoryOverview({
+      latest_run: {
+        ...overview.latest_run!,
+        mining_job_id: 'mine_op_search_001',
+      },
+      quarantine: {
+        ...overview.quarantine,
+        items: [monthlyCandidate, ...overview.quarantine.items],
+        summary: {
+          ...overview.quarantine.summary,
+          total: 10005,
+          page: 1,
+          page_size: 50,
+          total_pages: 201,
+        },
+      },
+      external_import_quarantine: {
+        items: [monthlyCandidate],
+        summary: {
+          total: 1,
+          page: 1,
+          page_size: 12,
+          total_pages: 1,
+          passed_count: 1,
+        },
+      },
+      scoring_candidates: [],
+      quarantine_result_rows: [{
+        candidate_id: monthlyCandidate.id,
+        submitted_at: '2026-05-27T08:53:53Z',
+        factor_name: monthlyDisplayName,
+        display_name_cn: monthlyDisplayName,
+        target_layer: 'L2',
+        quarantine_result: 'PASS',
+        reason_summary: '外部公开因子源文件已物化并完成 B3 源数据检疫。',
+        detail_modal_enabled: true,
+      }, ...(overview.quarantine_result_rows ?? [])],
+    });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes('/factor-quarantine/candidates')) {
+        return jsonResponse({
+          items: apiSearchCandidates,
+          summary: {
+            total: 10005,
+            page: 1,
+            page_size: 50,
+            total_pages: 201,
+            passed_count: 7,
+            published_count: 0,
+            rejected_count: 43,
+            needs_review_count: 9955,
+          },
+        });
+      }
+      return jsonResponse(overviewPayload);
+    });
+
+    renderFactory();
+
+    await waitFor(() => expect((document.querySelector('.factor-factory-filter-row input[type="date"]') as HTMLInputElement)?.value).toBe('2026-05-27'));
+    fireEvent.click(screen.getByRole('button', { name: '查询' }));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledWith(expect.stringContaining('/factor-quarantine/candidates?'), expect.any(Object)));
+    await waitFor(() => expect(screen.getAllByText(monthlyDisplayName).length).toBeGreaterThan(0));
+
+    const resultRows = document.querySelectorAll('.factor-factory-result-row:not(.factor-factory-result-row--head)');
+    expect(resultRows).toHaveLength(50);
+    expect(resultRows[0]).toHaveTextContent(monthlyDisplayName);
+    expect(screen.queryByText('工厂候选 50')).not.toBeInTheDocument();
   });
 
   it('renders quarantine reason fallbacks instead of unreadable placeholders', async () => {
@@ -947,6 +1157,16 @@ describe('FactorFactoryPage', () => {
       },
       scoring_candidates: [],
       quarantine: { ...overview.quarantine, items: [], summary: { total: currentRows.length + olderRows.length } },
+      batch_lineage: {
+        ...overview.batch_lineage!,
+        raw_f2_total: 10,
+        refined_f2_total: 24,
+        total_candidates: 10,
+        ledger_total: 24,
+        quarantine_total: currentRows.length + olderRows.length,
+        publishable_total: 0,
+        page_count: 1,
+      },
       quarantine_result_rows: [...currentRows, ...olderRows],
       publishable_factors: [],
     };
@@ -1045,6 +1265,8 @@ describe('FactorFactoryPage', () => {
     expect(metricValue('quarantine_pass')).toHaveTextContent('0');
     expect(metricValue('alpha_concentration')).toHaveTextContent('0.000');
     expect(metricValue('failure_candidate')).toHaveTextContent('0');
+    expect(document.querySelectorAll('.factor-factory-task-card')).toHaveLength(0);
+    expect(screen.getByText('所选日期没有因子任务。')).toBeInTheDocument();
   });
 
   it('keeps submitted factors in quarantine history instead of sending them back to scoring', async () => {
@@ -1292,9 +1514,19 @@ describe('FactorFactoryPage', () => {
       },
       task_rows: (overview.task_rows ?? []).map((task) => (
         task.kind === 'mining'
-          ? { ...task, metric_value: 24, current_candidate_count: 24, delivered_candidate_count: 24, secondary_metric_value: 24 }
-          : { ...task, metric_value: 0, current_candidate_count: 0, delivered_candidate_count: 0 }
+          ? { ...task, task_date: '2026-05-20', metric_value: 24, current_candidate_count: 24, delivered_candidate_count: 24, secondary_metric_value: 24 }
+          : { ...task, task_date: '2026-05-20', metric_value: 0, current_candidate_count: 0, delivered_candidate_count: 0 }
       )),
+      batch_lineage: {
+        ...overview.batch_lineage!,
+        raw_f2_total: 24,
+        refined_f2_total: 24,
+        total_candidates: 24,
+        ledger_total: 24,
+        quarantine_total: 28,
+        publishable_total: 0,
+        page_count: 1,
+      },
     }));
 
     renderFactory();

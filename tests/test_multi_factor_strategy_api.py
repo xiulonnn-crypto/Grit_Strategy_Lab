@@ -50,12 +50,14 @@ def _composite_payload(
     cap_redistribution_mode: str = "cash",
     sector_cap_pct: float = 20.0,
     top_n: int = 50,
+    rebalance_frequency: str = "monthly",
+    rebalance_logic_frequency: str | None = None,
 ) -> dict:
     return {
         "strategy_type": "COMPOSITE_FACTOR",
         "name": "Composite factor strategy",
         "universe": "SP500",
-        "rebalance_frequency": "monthly",
+        "rebalance_frequency": rebalance_frequency,
         "top_n": top_n,
         "scoring_method": "zscore_weighted",
         "components": [
@@ -79,7 +81,7 @@ def _composite_payload(
             "cap_redistribution_mode": cap_redistribution_mode,
         },
         "rebalance_logic": {
-            "frequency": "monthly",
+            "frequency": rebalance_logic_frequency or rebalance_frequency,
             "calendar_rule": "first_trading_day",
             "exit_rank_percentile": 20,
             "min_trade_notional_usd": 10_000,
@@ -925,6 +927,25 @@ def test_factor_model_create_preserves_selected_rebalance_frequency(tmp_path) ->
     assert detail["rebalance_frequency"] == "yearly"
     assert detail["parameters"]["rebalance_frequency"] == "yearly"
     assert detail["multi_factor_profile"]["rebalance_frequency"] == "yearly"
+
+
+def test_composite_factor_create_preserves_extended_rebalance_frequency(tmp_path, monkeypatch) -> None:
+    client, _db_path = create_test_client(tmp_path)
+    seed_ready_pit_data(client)
+    _seed_sp500_industry_pit_metadata(client)
+    _patch_composite_factor_admission(client, monkeypatch)
+
+    for frequency in ("quarterly", "semiannual", "yearly"):
+        preview = assert_ok(client.post("/factor-models/preview", json=_composite_payload(rebalance_frequency=frequency)))
+        assert preview["strategy_type"] == "COMPOSITE_FACTOR"
+
+    created = assert_ok(client.post("/factor-models", json=_composite_payload(rebalance_frequency="semiannual")))
+
+    assert created["strategy_type"] == "COMPOSITE_FACTOR"
+    assert created["rebalance_frequency"] == "semiannual"
+    assert created["parameters"]["rebalance_frequency"] == "semiannual"
+    assert created["parameters"]["rebalance_logic"]["frequency"] == "semiannual"
+    assert created["multi_factor_profile"]["rebalance_frequency"] == "semiannual"
 
 
 def test_multi_factor_strategy_detail_uses_lightweight_factor_index(tmp_path, monkeypatch) -> None:

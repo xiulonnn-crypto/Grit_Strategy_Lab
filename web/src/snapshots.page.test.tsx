@@ -751,9 +751,12 @@ describe('SnapshotsPage operations console', () => {
     expect(screen.getByRole('button', { name: '更换 key' })).toBeTruthy();
     expect(screen.getAllByText('CRSP_DATA_PATH').length).toBeGreaterThan(0);
     expect(screen.getAllByRole('button', { name: '配置路径' }).length).toBeGreaterThan(0);
+    await waitFor(() => {
+      const loadedNorgateRow = screen.getByTestId('credential-row-norgate');
+      expect(within(loadedNorgateRow).getByText('已配置')).toHaveClass('snapshots-ops-status--ready');
+      expect(within(loadedNorgateRow).getByText('已配置，导入未接入')).toHaveClass('snapshots-ops-status--warning');
+    });
     const norgateRow = screen.getByTestId('credential-row-norgate');
-    expect(within(norgateRow).getByText('已配置')).toHaveClass('snapshots-ops-status--ready');
-    expect(within(norgateRow).getByText('已配置，导入未接入')).toHaveClass('snapshots-ops-status--warning');
     expect(screen.getByText('TIINGO_API_TOKEN')).toBeTruthy();
     expect(screen.getAllByRole('button', { name: '查看窗口' }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole('button', { name: '查看来源' }).length).toBeGreaterThan(0);

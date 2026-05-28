@@ -338,9 +338,12 @@ function mapExternalFactorJob(job: ApiExternalFactorImportJob): Partial<PublicFa
   const mappingRows = Array.isArray(job.mapping_rows) ? job.mapping_rows : [];
   const nextActions = Array.isArray(job.next_actions) ? job.next_actions : [];
   const reviewStatus = String(job.review_status || '');
-  const sourceManifestReviewReady = reviewStatus === 'PENDING_REVIEW' &&
-    nextActions.includes('inspect_manifest') &&
-    !nextActions.includes('complete_semantic_mapping');
+  const rowCount = Number(job.manifest?.row_count ?? 0);
+  const hasMaterializedFile = rowCount > 0 && Boolean(
+    job.artifact_paths?.uploaded_file_id ||
+    job.artifact_paths?.raw_file_ref ||
+    job.artifact_paths?.download_url
+  );
   const mappings: PublicFactorImportViewModel['mappings'] = mappingRows.map((row) => ({
     externalColumn: row.source_field || row.target_field,
     fullName: row.target_field || row.source_field,
@@ -358,12 +361,12 @@ function mapExternalFactorJob(job: ApiExternalFactorImportJob): Partial<PublicFa
     asOfDate: job.as_of_date || job.updated_at || job.created_at,
     parserVersion: job.manifest?.template_key || 'public_us_factor_template_v1',
     rawFileHash: hash,
-    rowCount: Number(job.manifest?.row_count ?? 0),
+    rowCount,
     artifactPath: job.artifact_paths?.manifest_ref || job.artifact_paths?.raw_file_ref || '等待 manifest',
     reviewNote: `${reviewStatus} · ${job.governance_gate} · ${nextActions.join(' / ')}`,
     reviewStatus,
     nextActions,
-    submitReady: (reviewStatus === 'READY_FOR_REVIEW' && nextActions.includes('submit_review')) || sourceManifestReviewReady,
+    submitReady: reviewStatus === 'READY_FOR_REVIEW' && nextActions.includes('submit_review') && hasMaterializedFile,
   };
   return {
     activeSourceId: job.source_id,

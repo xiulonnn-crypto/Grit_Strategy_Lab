@@ -437,6 +437,7 @@ FACTOR_DISPLAY_NAME_V4_OVERRIDES = {
     "s_beta_market_252d_raw": "市场 Beta (252d) [Raw]",
     "s_size_cur_log": "对数市值 (当前) [Raw]",
     "s_f2_mom_raw_cur_external_fama_french_us_research_factors_daily": "[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]",
+    "s_f2_mom_raw_cur_external_fama_french_us_research_factors_monthly": "[外部] - Fama-French 美股研究月频因子 (Monthly) [Raw]",
     "s_alpha_ffblend_resid_mkt_rank": "[综合] - FF3 风格复合基石 (等权) [Beta-Free]",
     VALUE_VOL_WNZT_F3_FACTOR_ID: VALUE_VOL_WNZT_F3_FACTOR_NAME,
     "s_alpha_vol_downsiderev_std_rk": "[风险] - 反向下行风险 Alpha (252d) [Refined-Rank]",
@@ -2319,6 +2320,32 @@ def factor_publish_metadata_v4(
     }
 
 
+FAMA_FRENCH_EXTERNAL_DATASET_DISPLAY_PROJECTIONS: dict[str, dict[str, str]] = {
+    "fama_french_us_research_factors_daily": {
+        "core_semantic": "Fama-French 美股研究日频因子",
+        "short_name": "Fama-French 美股日频因子",
+        "frequency_label": "Daily",
+        "source_dataset": "external:fama_french_us_research_factors_daily",
+        "frequency_reason": "源数据标注为 daily，表示日频收益暴露。",
+    },
+    "fama_french_us_research_factors_monthly": {
+        "core_semantic": "Fama-French 美股研究月频因子",
+        "short_name": "Fama-French 美股月频因子",
+        "frequency_label": "Monthly",
+        "source_dataset": "external:fama_french_us_research_factors_monthly",
+        "frequency_reason": "对应原始数据的 monthly 月频特性。",
+    },
+}
+
+
+def _external_fama_french_dataset_key(*values: Any) -> str:
+    lookup_text = "|".join(str(value or "").lower() for value in values)
+    for dataset_key in FAMA_FRENCH_EXTERNAL_DATASET_DISPLAY_PROJECTIONS:
+        if dataset_key in lookup_text:
+            return dataset_key
+    return ""
+
+
 def external_factor_import_display_projection_v1(
     *,
     source_id: Any = None,
@@ -2337,17 +2364,18 @@ def external_factor_import_display_projection_v1(
     frequency_text = str(frequency or "").strip().upper()
     metric_map = metrics if isinstance(metrics, Mapping) else {}
     governance_level = "Refined" if _factor_display_has_complete_wnzt(op_status) else "Raw"
-    if source_key == "fama_french" and dataset_lower == "fama_french_us_research_factors_daily":
-        display_name = f"[外部] - Fama-French 美股研究日频因子 (Daily) [{governance_level}]"
-        short_name = "Fama-French 美股日频因子"
+    fama_french_projection = FAMA_FRENCH_EXTERNAL_DATASET_DISPLAY_PROJECTIONS.get(dataset_lower)
+    if source_key == "fama_french" and fama_french_projection:
+        core_semantic = fama_french_projection["core_semantic"]
+        frequency_label = fama_french_projection["frequency_label"]
+        display_name = f"[外部] - {core_semantic} ({frequency_label}) [{governance_level}]"
+        short_name = fama_french_projection["short_name"]
         style_family = "[外部]"
-        core_semantic = "Fama-French 美股研究日频因子"
-        frequency_label = "Daily"
         source_label = "French-Data Library"
-        source_dataset = "external:fama_french_us_research_factors_daily"
-        style_reason = "来自学术公开因子库，作为外部 Beta 与风格暴露参照，不与自研 Alpha 混同。"
-        semantic_reason = "保留 Fama-French 学术来源语义，便于实盘归因识别其 Beta/风格解释角色。"
-        frequency_reason = "源数据标注为 daily，表示日频收益暴露。"
+        source_dataset = fama_french_projection["source_dataset"]
+        style_reason = "该数据源来自外部公开上传，与自研 Alpha 通过前缀区分，防止策略合成时产生误导。"
+        semantic_reason = "保留 Fama-French 学术来源语义，让研究员一眼识别其学术标准 Beta/风格暴露角色。"
+        frequency_reason = fama_french_projection["frequency_reason"]
     else:
         frequency_label = "Daily" if frequency_text == "DAILY" else ("Monthly" if frequency_text == "MONTHLY" else (frequency_text.title() or "当前"))
         source_label = str(source_name or source_id or "外部来源").strip()
@@ -2456,6 +2484,29 @@ def _external_import_publish_metadata_projection(
         if not display_name:
             continue
         name_audit = publish_metadata.get("name_audit") if isinstance(publish_metadata.get("name_audit"), Mapping) else {}
+        components = name_audit.get("structured_components") if isinstance(name_audit.get("structured_components"), Mapping) else {}
+        op_status = factor.get("op_status") if isinstance(factor.get("op_status"), Mapping) else None
+        dataset_key = _external_fama_french_dataset_key(
+            factor.get("id"),
+            factor.get("expression"),
+            factor.get("stored_name"),
+            factor.get("name"),
+            display_name,
+            publish_metadata.get("name_collision_key"),
+            publish_metadata.get("base_display_name_cn"),
+            components.get("source_dataset"),
+            components.get("core_semantic"),
+        )
+        if dataset_key:
+            return external_factor_import_display_projection_v1(
+                source_id="fama_french",
+                dataset_key=dataset_key,
+                frequency="DAILY" if dataset_key.endswith("_daily") else "MONTHLY",
+                factor_id=factor.get("id"),
+                factor_name=factor.get("stored_name") or factor.get("name") or display_name,
+                previous_display_name=display_name,
+                op_status=op_status,
+            )
         previous_name = str(factor.get("stored_name") or factor.get("name") or "").strip()
         aliases = [
             item
@@ -2489,7 +2540,6 @@ def _external_import_publish_metadata_projection(
             "legacy_name_aliases": list(dict.fromkeys(aliases)),
             "name_audit": dict(name_audit or {}),
         }
-        op_status = factor.get("op_status") if isinstance(factor.get("op_status"), Mapping) else None
         return _factor_display_apply_completed_external_governance(projection, op_status=op_status)
     return None
 
@@ -2506,12 +2556,13 @@ def _external_import_factor_display_projection(
     metadata_projection = _external_import_publish_metadata_projection(factor)
     if metadata_projection is not None:
         return metadata_projection
-    if "fama_french_us_research_factors_daily" not in lookup_text:
+    dataset_key = _external_fama_french_dataset_key(lookup_text)
+    if not dataset_key:
         return None
     return external_factor_import_display_projection_v1(
         source_id="fama_french",
-        dataset_key="fama_french_us_research_factors_daily",
-        frequency=factor.get("frequency") or "DAILY",
+        dataset_key=dataset_key,
+        frequency=factor.get("frequency") or ("DAILY" if dataset_key.endswith("_daily") else "MONTHLY"),
         factor_id=factor_id,
         factor_name=factor.get("stored_name") or factor.get("name") or factor_id,
         previous_display_name=factor.get("stored_name") or factor.get("name"),
@@ -7766,6 +7817,10 @@ class FactorResearchService:
         mapping_rows = loads(row.get("mapping_rows_json"), [])
         if self._external_review_status_from_mapping(mapping_rows) == "NEEDS_MAPPING":
             raise ValueError("semantic mapping must cover date, factor_id, and value before review submission")
+        manifest = loads(row.get("manifest_json"), {})
+        risk_flags = loads(row.get("risk_flags_json"), [])
+        if self._external_import_source_manifest_blocked(row, manifest, risk_flags):
+            raise ValueError("外部因子源文件尚未物化，不能提交 B3 检疫；请先完成真实文件下载或本地上传。")
         now = iso_now()
         self.storage.execute(
             """
@@ -7897,6 +7952,11 @@ class FactorResearchService:
             current_job_id = str(row.get("id") or "")
             if not current_job_id:
                 continue
+            manifest = loads(row.get("manifest_json"), {})
+            risk_flags = loads(row.get("risk_flags_json"), [])
+            if self._external_import_source_manifest_blocked(row, manifest, risk_flags):
+                skipped.append(current_job_id)
+                continue
             try:
                 row = self._ensure_external_import_auto_download_materialized(row)
             except ValueError:
@@ -7967,12 +8027,25 @@ class FactorResearchService:
             """
             SELECT job.*
             FROM external_factor_import_jobs AS job
-            WHERE job.status = 'REVIEW_GATED'
-              AND job.review_status IN ('PENDING_REVIEW', 'NEEDS_MAPPING', 'READY_FOR_REVIEW')
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM factor_quarantine_candidates AS candidate
-                  WHERE candidate.source_mining_job_id = job.id
+            WHERE (
+                (
+                    job.status = 'REVIEW_GATED'
+                    AND job.review_status IN ('PENDING_REVIEW', 'NEEDS_MAPPING', 'READY_FOR_REVIEW')
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM factor_quarantine_candidates AS candidate
+                        WHERE candidate.source_mining_job_id = job.id
+                    )
+                )
+                OR (
+                    job.status = 'REVIEW_SUBMITTED'
+                    AND UPPER(COALESCE(job.import_mode, '')) = 'SOURCE_MANIFEST'
+                    AND COALESCE(job.file_id, '') = ''
+                    AND (
+                        job.manifest_json LIKE '%source_file_not_materialized%'
+                        OR job.risk_flags_json LIKE '%SOURCE_FILE_NOT_MATERIALIZED%'
+                    )
+                )
               )
             ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, id DESC
             LIMIT ?
@@ -7983,12 +8056,25 @@ class FactorResearchService:
             """
             SELECT COUNT(*) AS total
             FROM external_factor_import_jobs AS job
-            WHERE job.status = 'REVIEW_GATED'
-              AND job.review_status IN ('PENDING_REVIEW', 'NEEDS_MAPPING', 'READY_FOR_REVIEW')
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM factor_quarantine_candidates AS candidate
-                  WHERE candidate.source_mining_job_id = job.id
+            WHERE (
+                (
+                    job.status = 'REVIEW_GATED'
+                    AND job.review_status IN ('PENDING_REVIEW', 'NEEDS_MAPPING', 'READY_FOR_REVIEW')
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM factor_quarantine_candidates AS candidate
+                        WHERE candidate.source_mining_job_id = job.id
+                    )
+                )
+                OR (
+                    job.status = 'REVIEW_SUBMITTED'
+                    AND UPPER(COALESCE(job.import_mode, '')) = 'SOURCE_MANIFEST'
+                    AND COALESCE(job.file_id, '') = ''
+                    AND (
+                        job.manifest_json LIKE '%source_file_not_materialized%'
+                        OR job.risk_flags_json LIKE '%SOURCE_FILE_NOT_MATERIALIZED%'
+                    )
+                )
               )
             """
         )
@@ -8012,6 +8098,14 @@ class FactorResearchService:
             FROM factor_quarantine_candidates AS candidate
             JOIN external_factor_import_jobs AS job
               ON job.id = candidate.source_mining_job_id
+            WHERE NOT (
+                UPPER(COALESCE(job.import_mode, '')) = 'SOURCE_MANIFEST'
+                AND COALESCE(job.file_id, '') = ''
+                AND (
+                    job.manifest_json LIKE '%source_file_not_materialized%'
+                    OR job.risk_flags_json LIKE '%SOURCE_FILE_NOT_MATERIALIZED%'
+                )
+            )
             ORDER BY datetime(candidate.updated_at) DESC, candidate.id DESC
             LIMIT ?
             """,
@@ -8028,6 +8122,14 @@ class FactorResearchService:
             FROM factor_quarantine_candidates AS candidate
             JOIN external_factor_import_jobs AS job
               ON job.id = candidate.source_mining_job_id
+            WHERE NOT (
+                UPPER(COALESCE(job.import_mode, '')) = 'SOURCE_MANIFEST'
+                AND COALESCE(job.file_id, '') = ''
+                AND (
+                    job.manifest_json LIKE '%source_file_not_materialized%'
+                    OR job.risk_flags_json LIKE '%SOURCE_FILE_NOT_MATERIALIZED%'
+                )
+            )
             """
         ) or {}
         return {
@@ -8285,6 +8387,18 @@ class FactorResearchService:
             int(manifest.get("row_count") or 0) <= 0
             or "SOURCE_FILE_NOT_MATERIALIZED" in normalized_flags
             or "SOURCE_FILE_NOT_MATERIALIZED" in warnings
+        )
+
+    @staticmethod
+    def _external_import_source_manifest_blocked(
+        row: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+        risk_flags: Sequence[Any],
+    ) -> bool:
+        return (
+            str(row.get("import_mode") or "").upper() == "SOURCE_MANIFEST"
+            and not str(row.get("file_id") or "").strip()
+            and FactorResearchService._external_import_requires_manifest_block(manifest, risk_flags)
         )
 
     def _external_import_normalized_rows(self, row: Mapping[str, Any]) -> list[dict[str, str]]:
@@ -8959,6 +9073,15 @@ class FactorResearchService:
         artifact_paths = loads(row.get("artifact_paths_json"), {})
         risk_flags = loads(row.get("risk_flags_json"), [])
         next_actions = loads(row.get("next_actions_json"), [])
+        source_manifest_blocked = self._external_import_source_manifest_blocked(row, manifest, risk_flags)
+        status = row.get("status") or "REVIEW_GATED"
+        review_status = row.get("review_status") or "PENDING_REVIEW"
+        submitted_at = row.get("submitted_at")
+        if source_manifest_blocked:
+            status = "REVIEW_GATED"
+            review_status = "PENDING_REVIEW"
+            submitted_at = None
+            next_actions = ["upload_source_file", "inspect_manifest"]
         return {
             "id": row.get("id"),
             "source_id": row.get("source_id"),
@@ -8966,14 +9089,14 @@ class FactorResearchService:
             "source_name": row.get("source_name") or "",
             "dataset_name": row.get("dataset_name") or "",
             "import_mode": row.get("import_mode") or "LOCAL_FILE",
-            "status": row.get("status") or "REVIEW_GATED",
-            "review_status": row.get("review_status") or "PENDING_REVIEW",
+            "status": status,
+            "review_status": review_status,
             "frequency": row.get("frequency") or "MONTHLY",
             "as_of_date": row.get("as_of_date"),
             "created_by": row.get("created_by") or "researcher",
             "created_at": row.get("created_at") or iso_now(),
             "updated_at": row.get("updated_at") or iso_now(),
-            "submitted_at": row.get("submitted_at"),
+            "submitted_at": submitted_at,
             "manifest": manifest,
             "mapping_rows": mapping_rows,
             "artifact_paths": artifact_paths,
@@ -8992,7 +9115,7 @@ class FactorResearchService:
                     for item in mapping_rows
                     if isinstance(item, Mapping) and item.get("target_field")
                 },
-                review_submitted=str(row.get("review_status") or "").upper() == "SUBMITTED",
+                review_submitted=str(review_status or "").upper() == "SUBMITTED",
             ),
         }
 
@@ -9002,6 +9125,17 @@ class FactorResearchService:
         artifact_paths = loads(row.get("artifact_paths_json"), {})
         risk_flags = loads(row.get("risk_flags_json"), [])
         next_actions = loads(row.get("next_actions_json"), [])
+        source_manifest_blocked = FactorResearchService._external_import_source_manifest_blocked(row, manifest, risk_flags)
+        status = row.get("status") or "REVIEW_SUBMITTED"
+        review_status = row.get("review_status") or "SUBMITTED"
+        submitted_at = row.get("submitted_at")
+        queue_state = "AWAITING_D2_REVIEW"
+        if source_manifest_blocked:
+            status = "REVIEW_GATED"
+            review_status = "PENDING_REVIEW"
+            submitted_at = None
+            next_actions = ["upload_source_file", "inspect_manifest"]
+            queue_state = "AWAITING_SOURCE_FILE"
         return {
             "id": row.get("id"),
             "source_id": row.get("source_id"),
@@ -9009,10 +9143,10 @@ class FactorResearchService:
             "source_name": row.get("source_name") or "",
             "dataset_name": row.get("dataset_name") or "",
             "import_mode": row.get("import_mode") or "LOCAL_FILE",
-            "status": row.get("status") or "REVIEW_SUBMITTED",
-            "review_status": row.get("review_status") or "SUBMITTED",
+            "status": status,
+            "review_status": review_status,
             "frequency": row.get("frequency") or "MONTHLY",
-            "submitted_at": row.get("submitted_at"),
+            "submitted_at": submitted_at,
             "updated_at": row.get("updated_at"),
             "manifest": {
                 "row_count": int(manifest.get("row_count") or 0),
@@ -9025,7 +9159,7 @@ class FactorResearchService:
             "risk_flags": list(risk_flags or []),
             "next_actions": list(next_actions or []),
             "governance_gate": "REVIEW_BEFORE_QUARANTINE",
-            "queue_state": "AWAITING_D2_REVIEW",
+            "queue_state": queue_state,
             "direct_publish_allowed": False,
         }
 

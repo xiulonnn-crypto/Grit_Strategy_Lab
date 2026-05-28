@@ -793,6 +793,47 @@ def test_factor_quarantine_explicit_job_intake_preserves_source_batch_when_expre
     assert second_queue["summary"]["total"] == 1
 
 
+def test_factor_quarantine_source_job_pagination_summary_uses_full_result_set() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-quarantine-source-pagination"))
+    storage = client.app.state.service.storage
+    source_job_id = "mine_full_source_summary"
+    now = "2026-05-27T09:00:00Z"
+    statuses = ["PASSED"] * 12 + ["REJECTED"] * 8 + ["PENDING"] * 40
+    for index, status in enumerate(statuses):
+        storage.insert_json_row(
+            "factor_quarantine_candidates",
+            {
+                "id": f"fq_full_source_{index:03d}",
+                "mining_candidate_id": f"cand_full_source_{index:03d}",
+                "source_mining_job_id": source_job_id,
+                "expression": f"TS_Rank(Return(Close, {index + 2}), 21)",
+                "status": status,
+                "publish_status": "ELIGIBLE" if status == "PASSED" else "BLOCKED",
+                "gate_summary_json": dumps({}),
+                "cluster_id": f"cluster_{index % 5}",
+                "candidate_metrics_json": dumps({"raw_f2": True, "refined_f2": True}),
+                "failure_samples_json": dumps([]),
+                "pit_evidence_json": dumps({}),
+                "publish_eligibility_json": dumps({"status": "ELIGIBLE" if status == "PASSED" else "BLOCKED"}),
+                "target_factor_id": f"s_f2_full_source_{index:03d}",
+                "created_at": now,
+                "updated_at": f"2026-05-27T09:{index % 60:02d}:00Z",
+                "published_at": None,
+                "rejected_reason": "test rejection" if status == "REJECTED" else None,
+            },
+        )
+
+    page = assert_ok(client.get(f"/factor-quarantine/candidates?source_job_id={source_job_id}&page=2&page_size=10"))
+    assert len(page["items"]) == 10
+    assert page["summary"]["total"] == 60
+    assert page["summary"]["page"] == 2
+    assert page["summary"]["page_size"] == 10
+    assert page["summary"]["total_pages"] == 6
+    assert page["summary"]["passed_count"] == 12
+    assert page["summary"]["rejected_count"] == 8
+    assert page["summary"]["needs_review_count"] == 40
+
+
 def _legacy_factor_quarantine_pit_not_full_ready_enters_review_queue_not_rejected() -> None:
     return
     client, _db_path = create_test_client(_runtime_dir("factor-quarantine-pit-review"))

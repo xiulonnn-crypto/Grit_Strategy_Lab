@@ -90,6 +90,33 @@ FactorGovernanceStatus = Literal['WATCH', 'REVIEW', 'DECAYED', 'CROWDED', 'SUSPE
 FactorFactoryAutomationStatus = Literal['ACTIVE', 'PAUSED']
 FactorFactoryRunStatus = Literal['QUEUED', 'RUNNING', 'CANCEL_REQUESTED', 'CANCELLED', 'COMPLETED', 'FAILED']
 FactorFactoryRunTrigger = Literal['DAILY', 'MANUAL']
+FactorFactoryBatchLineageStatus = Literal['OK', 'WARN', 'BLOCKED']
+Sec424B2ParseStatus = Literal['PARSED', 'REVIEW_REQUIRED', 'FAILED']
+Sec424B2ReparseReason = Literal[
+    'PARSER_CHANGED',
+    'RULEPACK_CHANGED',
+    'HTML_CHANGED',
+    'LOW_CONFIDENCE',
+    'UNSUPPORTED_PAYOFF',
+    'DATA_SOURCE_BLOCKED',
+]
+StructuredNoteReplayStatus = Literal['OK', 'PARTIAL', 'DATA_SOURCE_BLOCKED', 'FAILED']
+StructuredNoteReplayPreflightStatus = Literal[
+    'OK',
+    'WARN',
+    'DATA_SOURCE_BLOCKED',
+    'MEMORY_GUARDRAIL_BLOCKED',
+    'RUNTIME_NOT_READY',
+]
+StructuredNoteAttributionStatus = Literal[
+    'CARRY_BUFFERING',
+    'COUPON_OFFSET_EXHAUSTED',
+    'NEGATIVE_CONVEXITY_ACTIVE',
+    'DATA_SOURCE_BLOCKED',
+]
+StructuredNotePressureRiskState = Literal['NORMAL', 'WATCH', 'REDUCE_BETA', 'DATA_SOURCE_BLOCKED']
+Sec424B2ReparseJobStatus = Literal['DISABLED', 'DRY_RUN_READY', 'DRY_RUN_ONLY', 'NOT_FOUND']
+Sec424B2ReparseJobMode = Literal['dry_run']
 F1AdmissionState = Literal['READY', 'READY_WITH_WARNING', 'OBSERVE', 'DATA_SOURCE_BLOCKED', 'MISSING_TIMING']
 PitPreprocessingMode = Literal['DAILY', 'MANUAL', 'SNAPSHOT_REFRESH']
 CompositionMethodType = Literal[
@@ -389,6 +416,503 @@ class FactorFactoryOnlineRawF2RefinementRequest(BaseModel):
     f1_catalog_snapshot_id: str | None = None
 
 
+class FactorFactoryArtifactManifest(BaseModel):
+    job_id: str | None = None
+    source_job_id: str | None = None
+    formula_count: int | None = None
+    refined_count: int | None = None
+    hash: str | None = None
+    created_at: str | None = None
+
+
+class FactorFactoryArtifactRef(BaseModel):
+    formula_manifest: str | None = None
+    refined_f2_candidate_ledger: str | None = None
+
+
+class FactorFactoryBatchLineage(BaseModel):
+    current_batch_id: str | None = None
+    source_job_id: str | None = None
+    artifact_id: str | None = None
+    artifact_ref: FactorFactoryArtifactRef = Field(default_factory=FactorFactoryArtifactRef)
+    manifest: FactorFactoryArtifactManifest = Field(default_factory=FactorFactoryArtifactManifest)
+    raw_f2_total: int = Field(default=0, ge=0)
+    refined_f2_total: int = Field(default=0, ge=0)
+    total_candidates: int = Field(default=0, ge=0)
+    ledger_total: int = Field(default=0, ge=0)
+    quarantine_total: int = Field(default=0, ge=0)
+    quarantine_status_counts: dict[str, int] = Field(default_factory=dict)
+    quarantine_raw_f2_total: int = Field(default=0, ge=0)
+    quarantine_refined_f2_total: int = Field(default=0, ge=0)
+    publishable_total: int = Field(default=0, ge=0)
+    preview_count: int = Field(default=0, ge=0)
+    is_preview: bool = False
+    page_count: int = Field(default=1, ge=1)
+    source_reason: str = ''
+    status: FactorFactoryBatchLineageStatus = 'OK'
+    warnings: list[str] = Field(default_factory=list)
+    publish_blocked: bool = False
+    publish_blocker_reason_cn: str = ''
+    db_path: str | None = None
+
+
+class Sec424B2EvidenceAnchorModel(BaseModel):
+    field_path: str = ''
+    table_index: int | None = None
+    row_index: int | None = None
+    column_index: int | None = None
+    text: str = ''
+    source_url: str | None = None
+
+
+class Sec424B2ParseRunModel(BaseModel):
+    run_id: str
+    accession_number: str = ''
+    issuer_cik: str = ''
+    source_url: str = ''
+    primary_document_url: str = ''
+    raw_html_sha256: str = ''
+    normalized_text_hash: str = ''
+    table_signature_hash: str = ''
+    parser_rule_hash: str = ''
+    parse_result_hash: str = ''
+    parser_version: str = ''
+    status: Sec424B2ParseStatus = 'REVIEW_REQUIRED'
+    warnings: list[str] = Field(default_factory=list)
+    llm_used: bool = False
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class StructuredNoteUnderlyingModel(BaseModel):
+    note_id: str = ''
+    underlying_index: int | None = None
+    ticker: str
+    initial_value: float | None = None
+    strike_value: float | None = None
+    barrier_ratio: float | None = None
+    barrier_value: float | None = None
+    trigger_ratio: float | None = None
+    trigger_value: float | None = None
+    exchange: str = ''
+    evidence: Sec424B2EvidenceAnchorModel | dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class StructuredNoteTermsModel(BaseModel):
+    note_id: str
+    factor_id: str = ''
+    legacy_factor_id: str | None = None
+    source_url: str = ''
+    issuer_cik: str = ''
+    accession_number: str = ''
+    primary_document: str = ''
+    cusip: str | None = None
+    pricing_date: str | None = None
+    issue_date: str | None = None
+    maturity_date: str | None = None
+    coupon_rate_annual: float | None = None
+    coupon_frequency: str = ''
+    observation_frequency: str = ''
+    autocall_frequency: str = ''
+    memory_feature: bool = False
+    payoff_type: str = 'REVIEW_REQUIRED'
+    review_status: Sec424B2ParseStatus = 'REVIEW_REQUIRED'
+    underlying_tickers: list[str] = Field(default_factory=list)
+    underlying_count: int = 0
+    barrier_percentage: float | None = None
+    definition_version: str = ''
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class StructuredNoteF2ExpressionModel(BaseModel):
+    factor_id: str
+    definition_id: str | None = None
+    name: str
+    expression: str
+    description_cn: str = ''
+    dependencies: list[str] = Field(default_factory=list)
+    missing_policy: str = ''
+    output_dimension: Literal['note_date'] = 'note_date'
+    argument_schema: dict[str, Any] = Field(default_factory=dict)
+    instance_binding: dict[str, Any] = Field(default_factory=dict)
+
+
+class StructuredNoteFactorDefinitionModel(BaseModel):
+    definition_id: str
+    layer: Literal['F1', 'F2']
+    name: str = ''
+    description_cn: str = ''
+    output_dimension: str = ''
+    argument_schema: dict[str, Any] = Field(default_factory=dict)
+    version: str = ''
+    publish_boundary: str = 'sandbox -> quarantine -> publish'
+
+
+class StructuredNoteUnderlyingSlotModel(BaseModel):
+    underlying_index: int
+    ticker: str = ''
+    initial_value: float | None = None
+    strike_value: float | None = None
+    barrier_ratio: float | None = None
+    barrier_value: float | None = None
+    trigger_ratio: float | None = None
+    trigger_value: float | None = None
+    exchange: str = ''
+
+
+class StructuredNoteF1StaticTermBundleModel(BaseModel):
+    note_id: str
+    parse_run_id: str | None = None
+    definition_version: str = ''
+    f1_definition_ids: list[str] = Field(default_factory=list)
+    static_terms: dict[str, Any] = Field(default_factory=dict)
+    underlying_count: int = 0
+    underlying_slots: list[StructuredNoteUnderlyingSlotModel] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    cache_status: str = ''
+    parser_version: str = ''
+    parser_rule_hash: str = ''
+
+
+class StructuredNoteF2ContractModel(BaseModel):
+    contract_id: str
+    note_id: str
+    output_dimension: Literal['note_date'] = 'note_date'
+    definition_version: str = ''
+    source_factor_ids: list[str] = Field(default_factory=list)
+    underlying_tickers: list[str] = Field(default_factory=list)
+    underlying_count: int = 0
+    underlying_slots: list[StructuredNoteUnderlyingSlotModel] = Field(default_factory=list)
+    stable_definition_count: dict[str, int] = Field(default_factory=dict)
+    publish_boundary: str = 'sandbox -> quarantine -> publish'
+    production_llm_policy: Literal['NO_LLM_PROD'] = 'NO_LLM_PROD'
+    expressions: list[StructuredNoteF2ExpressionModel] = Field(default_factory=list)
+
+
+class StructuredNoteFactorDefinitionResponse(BaseModel):
+    definition_version: str
+    definitions: list[StructuredNoteFactorDefinitionModel] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class StructuredNoteDefinitionBindingResponse(BaseModel):
+    note_id: str
+    definition_version: str = ''
+    f1_bundle: StructuredNoteF1StaticTermBundleModel
+    f2_contract: StructuredNoteF2ContractModel
+    calculable_f2_definition_ids: list[str] = Field(default_factory=list)
+    blocked_f2_definition_ids: list[str] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class StructuredNoteF1CacheStatsResponse(BaseModel):
+    cache_entry_count: int = 0
+    cache_hit_count: int = 0
+    cache_miss_count: int = 0
+    cache_hit_rate: float = 0.0
+    eviction_count: int = 0
+    approx_memory_bytes: int = 0
+    approx_memory_mb: float = 0.0
+    max_notes: int = 0
+    policy: str = 'read_through_lru'
+    warn_memory_bytes: int = 0
+    memory_guardrail_state: str = 'OK'
+
+
+class StructuredNoteFcnRuntimeHealthResponse(BaseModel):
+    status: StructuredNoteReplayPreflightStatus = 'RUNTIME_NOT_READY'
+    runtime_ready: bool = False
+    service_ready: bool = False
+    cache_stats: StructuredNoteF1CacheStatsResponse
+    latest_preflight_run: dict[str, Any] | None = None
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class StructuredNoteFcnReplayPreflightRequest(BaseModel):
+    manifest_id: str | None = None
+    manifest_path: str | None = None
+    note_ids: list[str] = Field(default_factory=list)
+    sample_limit: int = Field(default=10, ge=1, le=10_000)
+    max_notes: int = Field(default=100, ge=1, le=10_000)
+    dataset_snapshot_id: str = 'ds-price'
+    start_date: str | None = None
+    end_date: str | None = None
+    replay_mode: Literal['sandbox'] = 'sandbox'
+    price_proxies: dict[str, Any] = Field(default_factory=dict)
+
+
+class StructuredNoteFcnReplayPreflightNoteResultModel(BaseModel):
+    note_id: str = ''
+    parse_run_id: str | None = None
+    status: StructuredNoteReplayPreflightStatus = 'DATA_SOURCE_BLOCKED'
+    underlying_count: int = 0
+    replay_point_count: int = 0
+    ok_point_count: int = 0
+    blocked_point_count: int = 0
+    elapsed_ms: float = 0.0
+    missing_symbols: list[str] = Field(default_factory=list)
+    blocker_code: str | None = None
+
+
+class StructuredNoteFcnReplayPreflightResponse(BaseModel):
+    run_id: str
+    status: StructuredNoteReplayPreflightStatus = 'RUNTIME_NOT_READY'
+    note_count: int = 0
+    replay_point_count: int = 0
+    points_per_second: float = 0.0
+    p50_ms_per_note: float | None = None
+    p95_ms_per_note: float | None = None
+    price_missing_ratio: float = 0.0
+    data_source_blocked_count: int = 0
+    max_underlying_count: int = 0
+    slot_count_histogram: dict[int, int] = Field(default_factory=dict)
+    cache_stats_before: StructuredNoteF1CacheStatsResponse
+    cache_stats_after: StructuredNoteF1CacheStatsResponse
+    note_results: list[StructuredNoteFcnReplayPreflightNoteResultModel] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class Sec424B2ParsePreviewRequest(BaseModel):
+    source_url: str | None = None
+    issuer_cik: str | None = None
+    accession_number: str | None = None
+    primary_document: str | None = None
+    html: str | None = None
+    persist: bool = False
+    parser_options: dict[str, Any] = Field(default_factory=dict)
+
+
+class Sec424B2ParsePreviewResponse(BaseModel):
+    status: Sec424B2ParseStatus = 'REVIEW_REQUIRED'
+    warnings: list[str] = Field(default_factory=list)
+    llm_used: bool = False
+    parse_run: Sec424B2ParseRunModel
+    note: StructuredNoteTermsModel
+    underlyings: list[StructuredNoteUnderlyingModel] = Field(default_factory=list)
+    f2_contract: StructuredNoteF2ContractModel
+
+
+class Sec424B2PilotDiscoverRequest(BaseModel):
+    issuer_cik: str = '0001665650'
+    scan_limit: int = Field(default=100, ge=1, le=200)
+    pilot_limit: int = Field(default=10, ge=5, le=10)
+    parser_options: dict[str, Any] = Field(default_factory=dict)
+
+
+class Sec424B2PilotManifestEntryModel(BaseModel):
+    accession_number: str = ''
+    source_url: str = ''
+    primary_document: str = ''
+    issuer_cik: str = ''
+    raw_html_sha256: str = ''
+    parser_version: str = ''
+    parser_rule_hash: str = ''
+    table_signature_hash: str = ''
+    parse_result_hash: str = ''
+    status: Sec424B2ParseStatus = 'REVIEW_REQUIRED'
+    warnings: list[str] = Field(default_factory=list)
+    note_id: str = ''
+    underlying_tickers: list[str] = Field(default_factory=list)
+    underlying_count: int = 0
+    asset_mix: str = ''
+    coupon_rate_annual: float | None = None
+    barrier_percentage: float | None = None
+    autocall_frequency: str = ''
+    memory_feature: bool = False
+    feature_bucket: str = ''
+    price_proxies: dict[str, Any] = Field(default_factory=dict)
+    last_parse_run_id: str | None = None
+    last_replay_run_id: str | None = None
+    last_status: str | None = None
+    last_validated_at: str | None = None
+
+
+class Sec424B2PilotManifestResponse(BaseModel):
+    manifest_id: str = ''
+    issuer_cik: str = ''
+    pilot_limit: int = 10
+    scan_limit: int = 100
+    selected_count: int = 0
+    blocked_count: int = 0
+    last_validated_at: str | None = None
+    last_replay_run_id: str | None = None
+    validation_status: str | None = None
+    manifest_hash: str | None = None
+    parser_version: str | None = None
+    parser_rule_hash: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    entries: list[Sec424B2PilotManifestEntryModel] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class Sec424B2PilotIngestRequest(BaseModel):
+    manifest_path: str | None = None
+    issuer_cik: str = '0001665650'
+    entries: list[dict[str, Any]] = Field(default_factory=list)
+    scan_limit: int = Field(default=100, ge=1, le=200)
+    pilot_limit: int = Field(default=10, ge=5, le=10)
+    persist: bool = True
+    parser_options: dict[str, Any] = Field(default_factory=dict)
+
+
+class Sec424B2PilotIngestResponse(BaseModel):
+    manifest_id: str
+    manifest_path: str = ''
+    status: str = 'COMPLETED'
+    selected_count: int = 0
+    parse_run_count: int = 0
+    entries: list[Sec424B2PilotManifestEntryModel] = Field(default_factory=list)
+    parse_runs: list[Sec424B2ParsePreviewResponse] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class Sec424B2ReparseCandidateModel(BaseModel):
+    run_id: str
+    accession_number: str = ''
+    issuer_cik: str = ''
+    source_url: str = ''
+    parser_version: str = ''
+    parser_rule_hash: str = ''
+    raw_html_sha256: str = ''
+    parse_result_hash: str = ''
+    status: Sec424B2ParseStatus = 'REVIEW_REQUIRED'
+    reasons: list[Sec424B2ReparseReason] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class Sec424B2ReparseCandidateResponse(BaseModel):
+    candidates: list[Sec424B2ReparseCandidateModel] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class Sec424B2ReparseJobRequest(BaseModel):
+    auto_repair_enabled: bool | None = None
+    mode: Sec424B2ReparseJobMode = 'dry_run'
+    dry_run: bool = True
+    current_parser_version: str | None = None
+    current_rule_hash: str | None = None
+    reasons_allowlist: list[Sec424B2ReparseReason] = Field(
+        default_factory=lambda: ['PARSER_CHANGED', 'RULEPACK_CHANGED']
+    )
+    max_filings: int = Field(default=10, ge=1, le=100)
+
+
+class Sec424B2ReparseJobResponse(BaseModel):
+    job_id: str
+    status: Sec424B2ReparseJobStatus = 'DRY_RUN_READY'
+    mode: Sec424B2ReparseJobMode = 'dry_run'
+    dry_run: bool = True
+    auto_repair_enabled: bool = False
+    reasons_allowlist: list[Sec424B2ReparseReason] = Field(default_factory=list)
+    candidate_count: int = 0
+    selected_count: int = 0
+    candidates: list[Sec424B2ReparseCandidateModel] = Field(default_factory=list)
+    actions: list[dict[str, Any]] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class StructuredNoteFcnReplayRequest(BaseModel):
+    note_id: str | None = None
+    parse_run_id: str | None = None
+    dataset_snapshot_id: str = 'ds-price'
+    replay_mode: Literal['sandbox', 'production'] = 'sandbox'
+    start_date: str | None = None
+    end_date: str | None = None
+    observation_frequency: str | None = None
+    price_proxies: dict[str, Any] = Field(default_factory=dict)
+
+
+class StructuredNoteFcnReplayPointModel(BaseModel):
+    note_date: str
+    status: str = 'OK'
+    worst_performance: float | None = None
+    coupon_eligible: bool = False
+    coupon_signal: float = 0.0
+    autocall_trigger: bool = False
+    distance_to_barrier: float | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class StructuredNoteFcnReplayResponse(BaseModel):
+    run_id: str
+    note_id: str
+    parse_run_id: str | None = None
+    dataset_snapshot_id: str = 'ds-price'
+    replay_mode: str = 'sandbox'
+    status: StructuredNoteReplayStatus = 'DATA_SOURCE_BLOCKED'
+    points: list[StructuredNoteFcnReplayPointModel] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    price_proxies: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class StructuredNoteFcnAttributionPointModel(BaseModel):
+    note_date: str
+    status: StructuredNoteAttributionStatus = 'DATA_SOURCE_BLOCKED'
+    worst_performance: float | None = None
+    cumulative_coupons: float = 0.0
+    drawdown_loss_proxy: float | None = None
+    net_benefit: float | None = None
+    coupon_loss_coverage_ratio: float | None = None
+    coupon_signal: float = 0.0
+    source_replay_status: str = ''
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class StructuredNoteFcnAttributionResponse(BaseModel):
+    run_id: str
+    note_id: str
+    parse_run_id: str | None = None
+    status: StructuredNoteReplayStatus = 'DATA_SOURCE_BLOCKED'
+    points: list[StructuredNoteFcnAttributionPointModel] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class StructuredNoteFcnPilotPressureTestRequest(BaseModel):
+    manifest_id: str | None = None
+    manifest_path: str | None = None
+    near_barrier_threshold: float = Field(default=1.0, ge=0.0)
+    target_symbol: str = 'QQQ'
+
+
+class StructuredNoteFcnPilotPressureNoteResultModel(BaseModel):
+    note_id: str = ''
+    accession_number: str = ''
+    replay_run_id: str | None = None
+    note_date: str | None = None
+    status: str = 'DATA_SOURCE_BLOCKED'
+    distance_to_barrier: float | None = None
+    worst_performance: float | None = None
+    reason: str = ''
+
+
+class StructuredNoteFcnPilotPressureTestResponse(BaseModel):
+    manifest_id: str = ''
+    manifest_path: str | None = None
+    risk_state: StructuredNotePressureRiskState = 'DATA_SOURCE_BLOCKED'
+    evaluated_note_count: int = 0
+    blocked_note_count: int = 0
+    coverage_ratio: float = 0.0
+    average_distance_to_barrier: float | None = None
+    min_distance_to_barrier: float | None = None
+    notes_near_barrier_count: int = 0
+    notes_breached_barrier_count: int = 0
+    advisory_instructions: list[dict[str, Any]] = Field(default_factory=list)
+    note_results: list[StructuredNoteFcnPilotPressureNoteResultModel] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
+
+
 class PitPreprocessingRunRequest(BaseModel):
     as_of_date: str | None = None
     mode: PitPreprocessingMode = 'MANUAL'
@@ -568,7 +1092,7 @@ class CompositeWeightMappingRequest(BaseModel):
 
 
 class CompositeRebalanceLogicRequest(BaseModel):
-    frequency: Literal['daily', 'weekly', 'monthly'] = 'monthly'
+    frequency: Literal['daily', 'weekly', 'monthly', 'quarterly', 'semiannual', 'yearly'] = 'monthly'
     calendar_rule: str = Field(default='first_trading_day')
     exit_rank_percentile: float = Field(default=20.0, ge=0.0, le=100.0)
     min_trade_notional_usd: float = Field(default=10_000.0, ge=0.0)

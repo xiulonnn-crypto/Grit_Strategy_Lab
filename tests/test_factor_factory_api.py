@@ -183,6 +183,11 @@ def test_factor_factory_run_auto_intakes_and_executes_quarantine() -> None:
     wait_for_factor_mining_job(client, mining_job_id)
 
     overview = assert_ok(client.get("/factor-factory/overview"))
+    lineage = overview["batch_lineage"]
+    endpoint_lineage = assert_ok(client.get(f"/factor-factory/batch-lineage?run_id={overview['latest_run']['id']}"))
+    assert {key: value for key, value in endpoint_lineage.items() if key != "source_reason"} == {
+        key: value for key, value in lineage.items() if key != "source_reason"
+    }
     summary = overview["latest_run"]["summary"]
     assert overview["latest_run"]["request"]["generation_mode"] == "HYBRID_COMPOSITION"
     assert summary["generation_mode"] == "OPERATOR_ENGINE"
@@ -197,6 +202,15 @@ def test_factor_factory_run_auto_intakes_and_executes_quarantine() -> None:
     assert operator_summary["top_preview_count"] == 6
     assert Path(operator_summary["artifact_refs"]["formula_manifest"]).exists()
     assert Path(operator_summary["artifact_refs"]["raw_f2_matrix"]).exists()
+    assert lineage["current_batch_id"] == overview["latest_run"]["id"]
+    assert lineage["source_job_id"] == mining_job_id
+    assert lineage["raw_f2_total"] == operator_summary["raw_f2_batch_delivered_count"]
+    assert lineage["refined_f2_total"] == operator_summary["refined_f2_batch_delivered_count"]
+    assert lineage["ledger_total"] == operator_summary["refined_f2_batch_delivered_count"]
+    assert lineage["preview_count"] == operator_summary["top_preview_count"]
+    assert lineage["is_preview"] is False
+    assert lineage["status"] == "OK"
+    assert lineage["warnings"] == []
     assert summary["auto_quarantine_status"] == "COMPLETED"
     delivered_candidate_count = (
         operator_summary["refined_f2_batch_delivered_count"]
@@ -231,6 +245,7 @@ def test_factor_factory_run_auto_intakes_and_executes_quarantine() -> None:
     publishable_factor_ids = [row["factor_id"] for row in overview["publishable_factors"]]
     assert len(publishable_factor_ids) == len(set(publishable_factor_ids))
     assert overview["publishable_factors"]
+    assert lineage["publishable_total"] == len(overview["publishable_factors"])
     publishable_names = [row["display_name_cn"] for row in overview["publishable_factors"]]
     assert len(publishable_names) == len(set(publishable_names))
     assert all(
@@ -249,6 +264,7 @@ def test_factor_factory_run_auto_intakes_and_executes_quarantine() -> None:
     quarantine = assert_ok(client.get(f"/factor-quarantine/candidates?source_job_id={mining_job_id}"))
     assert quarantine["items"]
     assert quarantine["summary"]["total"] == delivered_candidate_count
+    assert lineage["quarantine_total"] == delivered_candidate_count
     assert quarantine["summary"]["page_size"] == 50
     assert len(quarantine["items"]) == min(50, delivered_candidate_count)
     assert {item["status"] for item in quarantine["items"]}.isdisjoint({"PENDING", "RUNNING"})
@@ -462,6 +478,35 @@ def test_factor_factory_overview_does_not_sync_large_existing_quarantine_batch()
     assert refresh_calls == [run_id]
     assert list_mining_job_calls == 1
     assert get_mining_job_calls == 0
+
+
+def test_factor_factory_batch_lineage_blocks_publish_when_manifest_is_not_trustworthy() -> None:
+    client, _db_path = create_test_client(_runtime_dir("factor-factory-lineage-blocked"))
+    seed_factor_mining_price_snapshot(client)
+    payload = _factory_payload_with_operator_snapshot(client, candidate_count=6, daily_formula_budget=12)
+
+    run_now = assert_ok(client.post("/factor-factory/run-now", json=payload))
+    run_id = run_now["manual_run"]["id"]
+    mining_job_id = run_now["manual_run"]["mining_job_id"]
+    wait_for_factor_mining_job(client, mining_job_id)
+
+    overview = assert_ok(client.get("/factor-factory/overview"))
+    manifest_path = Path(overview["batch_lineage"]["artifact_ref"]["formula_manifest"])
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("hash", None)
+    manifest["source_job_id"] = "mine_wrong_source"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    lineage = assert_ok(client.get(f"/factor-factory/batch-lineage?run_id={run_id}"))
+    assert lineage["status"] == "BLOCKED"
+    assert lineage["publish_blocked"] is True
+    assert lineage["publishable_total"] == 0
+    assert any(warning.startswith("manifest_missing:") and "hash" in warning for warning in lineage["warnings"])
+    assert "manifest_source_job_mismatch" in lineage["warnings"]
+
+    blocked_overview = assert_ok(client.get("/factor-factory/overview"))
+    assert blocked_overview["batch_lineage"]["status"] == "BLOCKED"
+    assert blocked_overview["publishable_factors"] == []
 
 
 def test_factor_factory_refines_online_raw_f2_library_factors_to_quarantine() -> None:

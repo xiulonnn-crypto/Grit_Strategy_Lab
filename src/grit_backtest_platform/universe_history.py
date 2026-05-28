@@ -526,9 +526,10 @@ def extract_symbols_from_nasdaq_activity_html(
     )
     raw_symbols: list[str] = []
     for symbol_href, symbol_text in row_matches:
-        candidate = symbol_text or symbol_href
-        if candidate:
-            raw_symbols.append(candidate.upper())
+        href_symbol = normalize_wikipedia_ticker(symbol_href)
+        text_symbol = normalize_wikipedia_ticker(symbol_text)
+        if href_symbol and text_symbol and href_symbol == text_symbol:
+            raw_symbols.append(href_symbol)
     normalized_symbols, unmapped_symbols = _normalize_static_members(raw_symbols)
     if len(normalized_symbols) < minimum_member_count:
         raise ValueError(

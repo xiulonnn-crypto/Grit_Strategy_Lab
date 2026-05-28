@@ -9,6 +9,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from grit_backtest_platform.factor_factory_lineage import build_factor_factory_batch_lineage
+
 
 def _loads(value: Any, default: Any) -> Any:
     if value in (None, ""):
@@ -134,35 +141,37 @@ def main() -> int:
     quarantine_source_factor_count = len(set(quarantine_source_factor_ids))
     ledger_source_factor_count = len(set(ledger_source_factor_ids))
 
-    warnings: list[str] = []
-    if ledger_count and ledger_count != refined_f2_count:
-        warnings.append("ledger_count_mismatch_refined_count")
-    if ledger_count and ledger_count != raw_f2_count:
-        warnings.append("ledger_count_mismatch_raw_count")
-    if top_preview_count and ledger_count and top_preview_count == ledger_count:
-        warnings.append("preview_count_equals_ledger_count_check_budget")
-    if top_preview_count and top_preview_count == raw_f2_count and ledger_count and ledger_count != raw_f2_count:
-        warnings.append("preview_may_be_used_as_batch_total")
-    if (
-        len(quarantine_rows)
-        and len(quarantine_rows) != refined_f2_count
-        and quarantine_source_factor_count != ledger_source_factor_count
-    ):
-        warnings.append("quarantine_count_mismatch_refined_count")
-    if ledger_source_factor_count and quarantine_source_factor_count != ledger_source_factor_count:
-        warnings.append("quarantine_source_factor_mismatch_ledger")
-    if ledger_manifest.get("source_job_id") and ledger_manifest.get("source_job_id") != mining_job_id:
-        warnings.append("ledger_source_job_mismatch")
-    missing_manifest_fields = [
-        key
-        for key in ("job_id", "source_job_id", "formula_count", "refined_count", "hash", "created_at")
-        if ledger_manifest.get(key) in (None, "")
-    ]
-    if missing_manifest_fields:
-        warnings.append("ledger_manifest_missing:" + ",".join(missing_manifest_fields))
+    publishable_row = conn.execute(
+        """
+        SELECT COUNT(*) AS total
+        FROM factor_quarantine_candidates
+        WHERE source_mining_job_id = ?
+          AND status = 'PASSED'
+          AND publish_status = 'ELIGIBLE'
+        """,
+        (mining_job_id,),
+    ).fetchone()
+    lineage = build_factor_factory_batch_lineage(
+        current_batch_id=run["id"],
+        source_job_id=mining_job_id,
+        artifact_ref={
+            "formula_manifest": artifact_refs.get("formula_manifest"),
+            "refined_f2_candidate_ledger": artifact_refs.get("refined_f2_candidate_ledger"),
+        },
+        manifest_payload=manifest_payload,
+        ledger_payload=ledger_payload,
+        manifest_hash=manifest_hash,
+        ledger_hash=ledger_hash,
+        raw_f2_total=raw_f2_count,
+        refined_f2_total=refined_f2_count,
+        preview_count=top_preview_count,
+        quarantine_rows=[dict(row) for row in quarantine_rows],
+        publishable_total=int(publishable_row["total"] if publishable_row else 0),
+        db_path=str(db_path),
+    )
 
     output = {
-        "status": "WARN" if warnings else "OK",
+        **lineage,
         "db_path": str(db_path),
         "current_batch_id": run["id"],
         "source_job_id": mining_job_id,
@@ -172,7 +181,7 @@ def main() -> int:
         "ledger_artifact_path": str(ledger_path) if ledger_path else None,
         "manifest_artifact_path": str(manifest_path) if manifest_path else None,
         "ledger_artifact_count": ledger_count,
-        "ledger_manifest": ledger_manifest,
+        "ledger_manifest": lineage["manifest"],
         "quarantine": {
             "source_job_id": mining_job_id,
             "candidate_count": len(quarantine_rows),
@@ -188,10 +197,10 @@ def main() -> int:
             "publishable": "current source_job_id full eligible set after redundancy pruning",
             "preview_is_canonical": False,
         },
-        "warnings": warnings,
+        "warnings": lineage["warnings"],
     }
     print(json.dumps(output, indent=2, sort_keys=True))
-    return 2 if args.strict and warnings else 0
+    return 2 if args.strict and lineage["warnings"] else 0
 
 
 if __name__ == "__main__":

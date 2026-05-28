@@ -403,6 +403,161 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS sec_424b2_parse_runs (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL UNIQUE,
+        accession_number TEXT NOT NULL DEFAULT '',
+        issuer_cik TEXT NOT NULL DEFAULT '',
+        source_url TEXT NOT NULL DEFAULT '',
+        primary_document_url TEXT NOT NULL DEFAULT '',
+        raw_html_sha256 TEXT NOT NULL DEFAULT '',
+        normalized_text_hash TEXT NOT NULL DEFAULT '',
+        table_signature_hash TEXT NOT NULL DEFAULT '',
+        parser_rule_hash TEXT NOT NULL DEFAULT '',
+        parse_result_hash TEXT NOT NULL DEFAULT '',
+        parser_version TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'REVIEW_REQUIRED',
+        warnings_json TEXT NOT NULL DEFAULT '[]',
+        llm_used INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS structured_note_terms (
+        id TEXT PRIMARY KEY,
+        note_id TEXT NOT NULL UNIQUE,
+        parse_run_id TEXT NOT NULL,
+        source_url TEXT NOT NULL DEFAULT '',
+        issuer_cik TEXT NOT NULL DEFAULT '',
+        accession_number TEXT NOT NULL DEFAULT '',
+        cusip TEXT,
+        pricing_date TEXT,
+        issue_date TEXT,
+        maturity_date TEXT,
+        coupon_rate_annual REAL,
+        coupon_frequency TEXT NOT NULL DEFAULT '',
+        observation_frequency TEXT NOT NULL DEFAULT '',
+        autocall_frequency TEXT NOT NULL DEFAULT '',
+        memory_feature INTEGER NOT NULL DEFAULT 0,
+        payoff_type TEXT NOT NULL DEFAULT 'REVIEW_REQUIRED',
+        review_status TEXT NOT NULL DEFAULT 'REVIEW_REQUIRED',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        evidence_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (parse_run_id) REFERENCES sec_424b2_parse_runs(run_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS structured_note_underlyings (
+        id TEXT PRIMARY KEY,
+        note_id TEXT NOT NULL,
+        ticker TEXT NOT NULL,
+        initial_value REAL,
+        strike_value REAL,
+        barrier_ratio REAL,
+        barrier_value REAL,
+        trigger_ratio REAL,
+        trigger_value REAL,
+        exchange TEXT NOT NULL DEFAULT '',
+        evidence_json TEXT NOT NULL DEFAULT '{}',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(note_id, ticker),
+        FOREIGN KEY (note_id) REFERENCES structured_note_terms(note_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS structured_note_evidence_anchors (
+        id TEXT PRIMARY KEY,
+        note_id TEXT NOT NULL,
+        field_path TEXT NOT NULL,
+        table_index INTEGER,
+        row_index INTEGER,
+        column_index INTEGER,
+        text TEXT NOT NULL DEFAULT '',
+        source_url TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (note_id) REFERENCES structured_note_terms(note_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS structured_note_pilot_manifests (
+        id TEXT PRIMARY KEY,
+        manifest_id TEXT NOT NULL UNIQUE,
+        issuer_cik TEXT NOT NULL DEFAULT '',
+        manifest_path TEXT NOT NULL DEFAULT '',
+        pilot_limit INTEGER NOT NULL DEFAULT 10,
+        scan_limit INTEGER NOT NULL DEFAULT 100,
+        entries_json TEXT NOT NULL DEFAULT '[]',
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sec_424b2_reparse_jobs (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'DRY_RUN_READY',
+        mode TEXT NOT NULL DEFAULT 'dry_run',
+        dry_run INTEGER NOT NULL DEFAULT 1,
+        auto_repair_enabled INTEGER NOT NULL DEFAULT 0,
+        reasons_allowlist_json TEXT NOT NULL DEFAULT '[]',
+        candidates_json TEXT NOT NULL DEFAULT '[]',
+        actions_json TEXT NOT NULL DEFAULT '[]',
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS structured_note_replay_runs (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL UNIQUE,
+        note_id TEXT NOT NULL,
+        parse_run_id TEXT,
+        dataset_snapshot_id TEXT NOT NULL DEFAULT 'ds-price',
+        replay_mode TEXT NOT NULL DEFAULT 'sandbox',
+        status TEXT NOT NULL DEFAULT 'DATA_SOURCE_BLOCKED',
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        price_proxies_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS structured_note_replay_points (
+        id TEXT PRIMARY KEY,
+        replay_run_id TEXT NOT NULL,
+        note_id TEXT NOT NULL,
+        note_date TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'OK',
+        worst_performance REAL,
+        coupon_eligible INTEGER NOT NULL DEFAULT 0,
+        coupon_signal REAL,
+        autocall_trigger INTEGER NOT NULL DEFAULT 0,
+        distance_to_barrier REAL,
+        details_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (replay_run_id) REFERENCES structured_note_replay_runs(run_id) ON DELETE CASCADE
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS structured_note_replay_preflight_runs (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'RUNTIME_NOT_READY',
+        request_json TEXT NOT NULL DEFAULT '{}',
+        note_results_json TEXT NOT NULL DEFAULT '[]',
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS pit_preprocessing_runs (
         id TEXT PRIMARY KEY,
         run_id TEXT NOT NULL UNIQUE,
@@ -987,6 +1142,12 @@ MIGRATION_COLUMNS = {
         ("compute_backend", "TEXT NOT NULL DEFAULT 'pandas_bottleneck'"),
         ("composition_methods_json", "TEXT NOT NULL DEFAULT '[]'"),
     ],
+    "sec_424b2_parse_runs": [
+        ("normalized_text_hash", "TEXT NOT NULL DEFAULT ''"),
+        ("table_signature_hash", "TEXT NOT NULL DEFAULT ''"),
+        ("parser_rule_hash", "TEXT NOT NULL DEFAULT ''"),
+        ("parse_result_hash", "TEXT NOT NULL DEFAULT ''"),
+    ],
 }
 
 
@@ -1065,6 +1226,46 @@ POST_MIGRATION_INDEX_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_external_factor_import_manifests_job
     ON external_factor_import_manifests(job_id, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_sec_424b2_parse_runs_recent
+    ON sec_424b2_parse_runs(issuer_cik, status, updated_at, run_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_sec_424b2_parse_runs_hashes
+    ON sec_424b2_parse_runs(accession_number, raw_html_sha256, parser_version, parser_rule_hash)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_structured_note_pilot_manifests_recent
+    ON structured_note_pilot_manifests(issuer_cik, updated_at, manifest_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_sec_424b2_reparse_jobs_recent
+    ON sec_424b2_reparse_jobs(updated_at, job_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_structured_note_replay_runs_recent
+    ON structured_note_replay_runs(note_id, status, updated_at, run_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_structured_note_replay_points_run_date
+    ON structured_note_replay_points(replay_run_id, note_date)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_structured_note_replay_preflight_runs_recent
+    ON structured_note_replay_preflight_runs(updated_at, run_id, status)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_structured_note_terms_parse_run
+    ON structured_note_terms(parse_run_id, review_status, updated_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_structured_note_underlyings_note
+    ON structured_note_underlyings(note_id, ticker)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_structured_note_evidence_note
+    ON structured_note_evidence_anchors(note_id, field_path)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_pit_preprocessing_runs_recent

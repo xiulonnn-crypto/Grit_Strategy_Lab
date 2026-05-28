@@ -195,7 +195,7 @@ describe('PublicFactorImportCenterPage', () => {
       nextActions: ['b3_quarantine_completed'],
       submitReady: false,
       reviewOutcome: 'B3 检疫通过 · 可发布候选',
-      factorName: '[外部] - US research factors monthly (Monthly) [Refined]',
+      factorName: '[外部] - Fama-French 美股研究月频因子 (Monthly) [Refined]',
       factorStatus: 'B3 通过，待发布准入',
       quarantineCandidateId: 'fq_ext_monthly',
       targetFactorId: 's_f2_mom_raw_cur_external_fama_french_us_research_factors_monthly',
@@ -236,16 +236,16 @@ describe('PublicFactorImportCenterPage', () => {
     const table = screen.getByRole('table', { name: '候选数据集' });
     const auditButton = within(table).getByRole('button', { name: '查看审计' });
     const actionCell = auditButton.closest('td') as HTMLElement;
-    expect(within(actionCell).queryByText('[外部] - US research factors monthly (Monthly) [Refined]')).not.toBeInTheDocument();
+    expect(within(actionCell).queryByText('[外部] - Fama-French 美股研究月频因子 (Monthly) [Refined]')).not.toBeInTheDocument();
     expect(within(actionCell).queryByText('B3 通过，待发布准入')).not.toBeInTheDocument();
 
     const rail = document.querySelector('.pfic-manifest-rail') as HTMLElement;
-    expect(within(rail).getByText('[外部] - US research factors monthly (Monthly) [Refined]')).toBeInTheDocument();
+    expect(within(rail).getByText('[外部] - Fama-French 美股研究月频因子 (Monthly) [Refined]')).toBeInTheDocument();
     expect(within(rail).getByText('B3 通过，待发布准入')).toBeInTheDocument();
 
     fireEvent.click(auditButton);
 
-    expect(screen.getByText(/已打开送检审计/)).toHaveTextContent('[外部] - US research factors monthly (Monthly) [Refined]');
+    expect(screen.getByText(/已打开送检审计/)).toHaveTextContent('[外部] - Fama-French 美股研究月频因子 (Monthly) [Refined]');
     expect(screen.getByText(/已打开送检审计/)).toHaveTextContent('B3 通过，待发布准入');
   });
 
@@ -305,12 +305,9 @@ describe('PublicFactorImportCenterPage', () => {
     expect(tsmomRow).not.toHaveAttribute('data-manifest-job-id', 'extimp_aqr_pending');
 
     const railSubmitButton = document.querySelector('.pfic-manifest-rail .pfic-button-primary') as HTMLButtonElement;
-    expect(railSubmitButton).not.toBeDisabled();
-    await act(async () => {
-      fireEvent.click(railSubmitButton);
-    });
-    expect(submitReview).toHaveBeenCalledWith({ jobId: 'extimp_aqr_pending' });
-    expect(screen.getByText(/已进入 B3 检疫/)).toBeInTheDocument();
+    expect(railSubmitButton).toBeDisabled();
+    fireEvent.click(railSubmitButton);
+    expect(submitReview).not.toHaveBeenCalled();
   });
 
   it('keeps candidate dataset filters aligned with displayed status labels', () => {
@@ -487,8 +484,8 @@ describe('PublicFactorImportCenterPage', () => {
             datasetKey: 'fama_french_us_research_factors_daily',
             asOfDate: '2026-05-22',
             parserVersion: 'public_us_factor_template_v1',
-            rawFileHash: 'waiting',
-            rowCount: 0,
+            rawFileHash: 'sha256:ready',
+            rowCount: 18,
             artifactPath: 'external_factor_import_manifests/extimp_ready',
             reviewNote: 'READY_FOR_REVIEW',
             reviewStatus: 'READY_FOR_REVIEW',
@@ -590,8 +587,8 @@ describe('PublicFactorImportCenterPage', () => {
             datasetKey: 'fama_french_us_research_factors_daily',
             asOfDate: '2026-05-22',
             parserVersion: 'public_us_factor_template_v1',
-            rawFileHash: 'waiting',
-            rowCount: 0,
+            rawFileHash: 'sha256:ready',
+            rowCount: 18,
             artifactPath: 'external_factor_import_manifests/extimp_ready',
             reviewNote: 'READY_FOR_REVIEW',
             reviewStatus: 'READY_FOR_REVIEW',

@@ -10,6 +10,8 @@ param(
     [int]$ArtifactRetentionDays = 21,
     [int]$RecoveryRetentionDays = 14,
     [int]$RecoveryKeepNewest = 5,
+    [int]$RecoveryKeepNewestFullPairs = 1,
+    [int]$RecoveryKeepNewestTargetedPreimages = 1,
     [switch]$IncludePitBulkCache,
     [int]$PitBulkCacheRetentionDays = 30,
     [switch]$ForceScan,
@@ -223,7 +225,8 @@ function Add-Candidate {
         [string]$Policy,
         [string]$Reason,
         [int]$RetentionDays,
-        [int]$Priority
+        [int]$Priority,
+        [switch]$Protected
     )
 
     $relativePath = $null
@@ -239,7 +242,13 @@ function Add-Candidate {
         } elseif (Test-ReparsePoint -Item $Item) {
             $eligible = $false
             $skipReason = 'reparse-point'
-        } elseif ($Item.Name -in @(
+        } elseif ($Item.LastWriteTime -ge (Get-Cutoff -Days $RetentionDays)) {
+            $eligible = $false
+            $skipReason = 'too-new'
+        }
+
+        $relativePath = Get-RelativeRepoPath -FullPath $Item.FullName
+        if ($relativePath -in @(
             '.grit_backtest_platform.sqlite3',
             '.grit_backtest_platform.sqlite3-wal',
             '.grit_backtest_platform.sqlite3-shm',
@@ -249,12 +258,7 @@ function Add-Candidate {
         )) {
             $eligible = $false
             $skipReason = 'runtime-db'
-        } elseif ($Item.LastWriteTime -ge (Get-Cutoff -Days $RetentionDays)) {
-            $eligible = $false
-            $skipReason = 'too-new'
         }
-
-        $relativePath = Get-RelativeRepoPath -FullPath $Item.FullName
         if (-not (Test-RelativePathInScope -RelativePath $relativePath)) {
             return
         }
@@ -262,6 +266,10 @@ function Add-Candidate {
         if ($trackedCount -gt 0) {
             $eligible = $false
             $skipReason = "git-tracked:$trackedCount"
+        }
+        if ($Protected) {
+            $eligible = $false
+            $skipReason = 'protected'
         }
         if ($eligible -or $DetailedSkippedSizes) {
             $sizeBytes = Get-PathSizeBytes -Item $Item
@@ -333,6 +341,61 @@ function Add-DirectPath {
     }
 }
 
+function Test-RecoveryFullPairDir {
+    param([System.IO.DirectoryInfo]$Directory)
+    return (
+        (Test-Path -LiteralPath (Join-Path $Directory.FullName '.grit_backtest_platform.sqlite3')) -and
+        (Test-Path -LiteralPath (Join-Path $Directory.FullName '.grit_backtest_platform_market_data.sqlite3'))
+    )
+}
+
+function Test-RecoveryTargetedPreimageDir {
+    param([System.IO.DirectoryInfo]$Directory)
+    return (
+        (Test-Path -LiteralPath (Join-Path $Directory.FullName 'targeted-preimage-ds-price-symbols.json')) -or
+        (Test-Path -LiteralPath (Join-Path $Directory.FullName 'pit-price-preimage.json'))
+    )
+}
+
+function Test-RecoveryManifestDir {
+    param([System.IO.DirectoryInfo]$Directory)
+    return (
+        (Test-Path -LiteralPath (Join-Path $Directory.FullName 'manifest.json')) -or
+        (Test-Path -LiteralPath (Join-Path $Directory.FullName 'backup-manifest.json'))
+    )
+}
+
+function Get-RecoveryDirLatestWriteTime {
+    param([System.IO.DirectoryInfo]$Directory)
+    $latest = (
+        Get-ChildItem -LiteralPath $Directory.FullName -Force -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+    )
+    if ($null -ne $latest) {
+        return $latest.LastWriteTime
+    }
+    return $Directory.LastWriteTime
+}
+
+function Add-RecoverySqliteFileCandidates {
+    param(
+        [System.Collections.Generic.List[object]]$List,
+        [System.IO.DirectoryInfo]$Directory,
+        [string]$Reason
+    )
+    $dbFiles = @(
+        Get-ChildItem -LiteralPath $Directory.FullName -Force -File -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Name -like '.grit_backtest_platform*.sqlite3' -or
+                $_.Name -like '.grit_backtest_platform*.sqlite3.before'
+            }
+    )
+    foreach ($dbFile in $dbFiles) {
+        Add-Candidate -List $List -Item $dbFile -Policy 'recovery-l1-full-db-superseded' -Reason $Reason -RetentionDays 0 -Priority 1
+    }
+}
+
 function Add-RecoveryCandidates {
     param([System.Collections.Generic.List[object]]$List)
     if (-not (Test-ScanRootMayMatchScope -RelativePath 'artifacts\recovery')) {
@@ -346,14 +409,61 @@ function Add-RecoveryCandidates {
         Get-ChildItem -LiteralPath $recoveryRoot -Force -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending
     )
+    $directories = @($items | Where-Object { $_.PSIsContainer })
+    $protectedFullPairDirs = @(
+        $directories |
+            Where-Object { Test-RecoveryFullPairDir -Directory $_ } |
+            Sort-Object @{ Expression = { Get-RecoveryDirLatestWriteTime -Directory $_ } } -Descending |
+            Select-Object -First $RecoveryKeepNewestFullPairs |
+            ForEach-Object { $_.FullName }
+    )
+    $protectedTargetedPreimageDirs = @(
+        $directories |
+            Where-Object { Test-RecoveryTargetedPreimageDir -Directory $_ } |
+            Sort-Object @{ Expression = { Get-RecoveryDirLatestWriteTime -Directory $_ } } -Descending |
+            Select-Object -First $RecoveryKeepNewestTargetedPreimages |
+            ForEach-Object { $_.FullName }
+    )
     $kept = 0
     foreach ($item in $items) {
+        if ($item.PSIsContainer -and $protectedFullPairDirs -contains $item.FullName) {
+            Add-Candidate -List $List -Item $item -Policy 'recovery-protected-latest-full-pair' -Reason "retained as newest $RecoveryKeepNewestFullPairs full DB backup pair" -RetentionDays 365000 -Priority 40 -Protected
+            continue
+        }
+        if ($item.PSIsContainer -and $protectedTargetedPreimageDirs -contains $item.FullName) {
+            Add-Candidate -List $List -Item $item -Policy 'recovery-protected-targeted-preimage' -Reason "retained as newest $RecoveryKeepNewestTargetedPreimages targeted PIT preimage backup" -RetentionDays 365000 -Priority 40 -Protected
+            continue
+        }
+        if (
+            $item.PSIsContainer -and
+            $item.Name -like 'l1-*' -and
+            (
+                (Test-Path -LiteralPath (Join-Path $item.FullName '.grit_backtest_platform.sqlite3')) -or
+                (Test-Path -LiteralPath (Join-Path $item.FullName '.grit_backtest_platform_market_data.sqlite3')) -or
+                (Test-Path -LiteralPath (Join-Path $item.FullName '.grit_backtest_platform.sqlite3.before')) -or
+                (Test-Path -LiteralPath (Join-Path $item.FullName '.grit_backtest_platform_market_data.sqlite3.before'))
+            )
+        ) {
+            $reason = 'superseded L1 full database backup; active DB, newest full pair, and latest targeted preimage are protected'
+            if (Test-RecoveryManifestDir -Directory $item) {
+                Add-RecoverySqliteFileCandidates -List $List -Directory $item -Reason "$reason; manifest preserved"
+            } else {
+                Add-Candidate -List $List -Item $item -Policy 'recovery-l1-full-db-superseded' -Reason $reason -RetentionDays 0 -Priority 1
+            }
+            continue
+        }
+        if ($item.PSIsContainer -and (Test-RecoveryManifestDir -Directory $item)) {
+            Add-Candidate -List $List -Item $item -Policy 'recovery-protected-manifest-evidence' -Reason 'retained recovery manifest/source evidence; only superseded DB payloads are cleanup targets' -RetentionDays 365000 -Priority 40 -Protected
+            continue
+        }
         $reason = 'artifacts/recovery entry older than retention'
         $retentionDays = $RecoveryRetentionDays
         if ($kept -lt $RecoveryKeepNewest) {
             $kept += 1
             $retentionDays = 365000
             $reason = "retained as one of newest $RecoveryKeepNewest recovery entries"
+            Add-Candidate -List $List -Item $item -Policy 'recovery-retention' -Reason $reason -RetentionDays $retentionDays -Priority 40 -Protected
+            continue
         }
         Add-Candidate -List $List -Item $item -Policy 'recovery-retention' -Reason $reason -RetentionDays $retentionDays -Priority 40
     }
@@ -380,6 +490,8 @@ if (
         forceScan = [bool]$ForceScan
         minFreeGB = $MinFreeGB
         onlyRelativePathPrefix = $OnlyRelativePathPrefix
+        recoveryKeepNewestFullPairs = $RecoveryKeepNewestFullPairs
+        recoveryKeepNewestTargetedPreimages = $RecoveryKeepNewestTargetedPreimages
         scanSkippedReason = $scanSkippedReason
         elapsedSeconds = [math]::Round($script:CleanupStopwatch.Elapsed.TotalSeconds, 2)
         freeBeforeGB = $freeBeforeGB
@@ -513,6 +625,8 @@ $summary = [pscustomobject][ordered]@{
     forceScan = [bool]$ForceScan
     minFreeGB = $MinFreeGB
     onlyRelativePathPrefix = $OnlyRelativePathPrefix
+    recoveryKeepNewestFullPairs = $RecoveryKeepNewestFullPairs
+    recoveryKeepNewestTargetedPreimages = $RecoveryKeepNewestTargetedPreimages
     scanSkippedReason = $scanSkippedReason
     elapsedSeconds = [math]::Round($script:CleanupStopwatch.Elapsed.TotalSeconds, 2)
     freeBeforeGB = $freeBeforeGB

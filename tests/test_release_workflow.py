@@ -393,7 +393,15 @@ def test_gate_self_test_plan_only_writes_non_latest_summary() -> None:
     assert "'-SummaryPath', $selfTestSummaryPath" in fast_script
     assert "validation_content_fingerprint" in fast_script
     assert "Get-ValidationContentFingerprint" in fast_script
+    assert "Invoke-TrackedProcessSmoke" in fast_script
+    assert "tracked process smoke" in fast_script
     assert "$parameters.SummaryPath = $SummaryPath" in impact_script
+
+
+def test_impact_gate_runs_frontend_types_before_backend_targeted_tests() -> None:
+    script = (REPO_ROOT / "scripts" / "codex-validate-fast.ps1").read_text(encoding="utf-8")
+
+    assert script.index("    Invoke-FrontendTypes") < script.index("    Invoke-BackendTests")
 
 
 def test_publish_impact_wrapper_codifies_single_working_tree_gate_flow() -> None:
@@ -416,6 +424,9 @@ def test_publish_impact_wrapper_guards_trace_assets_and_external_push() -> None:
     assert "ConfirmExternalPush" in script
     assert "AllowTraceCandidates" in script
     assert "FAIL|BLOCKED|NOT_CHECKED" in script
+    assert "-AllowCandidates:($PlanOnly -and $AllowTraceCandidates)" in script
+    assert "Publish scope freeze failed" in script
+    assert "JSON evidence assets stay local" in script
     assert "output/ui-artifact-trace/" in script
     assert "id-translation\\.csv" in script
     assert "suggested commit message:" in script

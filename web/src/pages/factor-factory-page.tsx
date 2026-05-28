@@ -3,6 +3,7 @@ import { useApiClient } from '../lib/demoStoreContext';
 import { formatDateTime } from '../lib/format';
 import type {
   ApiFactorAdmissionReportRow,
+  ApiFactorFactoryBatchLineage,
   ApiFactorFactoryOverview,
   ApiFactorFactoryRun,
   ApiFactorFactoryTaskRow,
@@ -394,17 +395,18 @@ function requestFromOverview(overview: ApiFactorFactoryOverview | null): ApiFact
 function buildTaskRows(overview: ApiFactorFactoryOverview | null): ApiFactorFactoryTaskRow[] {
   const rows = asList<ApiFactorFactoryTaskRow>(overview?.task_rows);
   const run = overview?.latest_run;
+  const lineage: ApiFactorFactoryBatchLineage | undefined = overview?.batch_lineage;
   const mining = rows.find((row) => taskKind(row) === 'mining');
   const refinement = rows.find((row) => taskKind(row) === 'refinement');
   const composition = rows.find((row) => taskKind(row) === 'composition');
   const date = shortDate(mining?.task_date ?? composition?.task_date ?? run?.run_date ?? new Date().toISOString());
-  const count = asList(record(run?.mining_job).top_candidates).length;
+  const previewCount = asList(record(run?.mining_job).top_candidates).length;
   const status = run ? statusLabel(run.status) : '待开始';
   const rawCount = numeric(
-    mining?.metric_label === 'Raw_F2因子交付量' ? mining.metric_value : mining?.secondary_metric_value,
-    numeric(mining?.current_candidate_count, count),
+    lineage?.raw_f2_total ?? (mining?.metric_label === 'Raw_F2因子交付量' ? mining.metric_value : mining?.secondary_metric_value),
+    numeric(mining?.current_candidate_count, previewCount),
   );
-  const refinedCount = numeric(refinement?.metric_value ?? mining?.secondary_metric_value, rawCount);
+  const refinedCount = numeric(lineage?.refined_f2_total ?? refinement?.metric_value ?? mining?.secondary_metric_value, rawCount);
   const compositionCount = numeric(
     composition?.metric_label === '检疫完成量' ? composition.current_candidate_count : composition?.metric_value,
     numeric(composition?.current_candidate_count, 0),
@@ -510,6 +512,32 @@ function quarantineRowFromCandidate(candidate: ApiFactorQuarantineCandidate): Ap
     }),
     detail_modal_enabled: true,
   };
+}
+
+function externalImportQuarantineCandidatesForFilters(
+  overview: ApiFactorFactoryOverview | null,
+  filters: QuarantineFilters,
+): ApiFactorQuarantineCandidate[] {
+  return asList<ApiFactorQuarantineCandidate>(overview?.external_import_quarantine?.items)
+    .filter((candidate) => filterQuarantineRows([quarantineRowFromCandidate(candidate)], filters).length > 0);
+}
+
+function mergePinnedFirstPageCandidates(
+  candidates: ApiFactorQuarantineCandidate[],
+  pinnedCandidates: ApiFactorQuarantineCandidate[],
+  page: number,
+  pageSize: number,
+): ApiFactorQuarantineCandidate[] {
+  if (page !== 1 || !pinnedCandidates.length) return candidates;
+  const seen = new Set<string>();
+  const merged: ApiFactorQuarantineCandidate[] = [];
+  for (const candidate of [...pinnedCandidates, ...candidates]) {
+    const id = text(candidate.id, '');
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    merged.push(candidate);
+  }
+  return merged.slice(0, pageSize);
 }
 
 function publishableFromCandidate(candidate: ApiFactorQuarantineCandidate): ApiPublishableFactorRow | null {
@@ -1997,11 +2025,14 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
       : quarantineCandidates.map(quarantineRowFromCandidate);
     return sortQuarantineRowsForFactory(rows);
   }, [overview, quarantineCandidates, quarantineCandidateById]);
+  const batchLineage = overview?.batch_lineage;
+  const batchPublishBlocked = Boolean(batchLineage?.current_batch_id && batchLineage?.source_job_id && batchLineage?.publish_blocked);
   const publishableFactors = useMemo(() => {
+    if (batchPublishBlocked) return [];
     const direct = asList<ApiPublishableFactorRow>(overview?.publishable_factors);
     if (Array.isArray(overview?.publishable_factors)) return direct;
     return quarantineCandidates.map(publishableFromCandidate).filter((item): item is ApiPublishableFactorRow => Boolean(item));
-  }, [overview, quarantineCandidates]);
+  }, [overview, quarantineCandidates, batchPublishBlocked]);
   const dateScopedQuarantineRows = useMemo(
     () => filterQuarantineRowsByDate(quarantineRows, filters.date),
     [filters.date, quarantineRows],
@@ -2012,8 +2043,10 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
   );
   const visibleTaskRows = useMemo(() => {
     if (!filters.date) return taskRows;
+    const dateMatchedTaskRows = taskRows.filter((task) => shortDate(task.task_date) === filters.date);
+    if (!dateMatchedTaskRows.length) return [];
     const dateScopedL3Count = dateScopedQuarantineRows.filter((row) => targetLayerToken(row.target_layer) === 'L3').length;
-    return taskRows.map((task) => {
+    return dateMatchedTaskRows.map((task) => {
       const kind = taskKind(task);
       if (kind === 'refinement') {
         return task;
@@ -2047,13 +2080,15 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
   const quarantineSummary = searchedSummary ?? record(overview?.quarantine?.summary);
   const quarantinePageNumber = Math.max(1, numeric(quarantineSummary.page, quarantinePage));
   const quarantinePageSize = Math.max(1, numeric(quarantineSummary.page_size, QUARANTINE_PAGE_SIZE));
+  const lineageQuarantineTotal = searchedSummary || !batchLineage?.current_batch_id ? undefined : batchLineage?.quarantine_total;
+  const lineagePageCount = searchedSummary || !batchLineage?.current_batch_id ? undefined : batchLineage?.page_count;
   const quarantineTotal = Math.max(
     renderedQuarantineRows.length,
-    numeric(quarantineSummary.total, quarantineRows.length),
+    numeric(lineageQuarantineTotal, numeric(quarantineSummary.total, quarantineRows.length)),
   );
   const quarantineTotalPages = Math.max(
     1,
-    numeric(quarantineSummary.total_pages, Math.ceil(quarantineTotal / quarantinePageSize)),
+    numeric(lineagePageCount, numeric(quarantineSummary.total_pages, Math.ceil(quarantineTotal / quarantinePageSize))),
   );
   const quarantineRangeStart = quarantineTotal > 0 ? ((quarantinePageNumber - 1) * quarantinePageSize) + 1 : 0;
   const quarantineRangeEnd = quarantineTotal > 0
@@ -2088,7 +2123,7 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
     : numeric(overview?.monitor_summary?.failure_candidate_count, metricQuarantineFailCount);
   const metricPublishableCount = filters.date
     ? publishableFactors.filter((item) => (metricFilterActive ? metricScopedCandidateIds : dateScopedCandidateIds).has(text(item.candidate_id ?? item.factor_id, ''))).length
-    : publishableFactors.length;
+    : numeric(batchLineage?.current_batch_id && batchLineage?.source_job_id ? batchLineage.publishable_total : undefined, publishableFactors.length);
   const metricAlphaConcentration = metricFilterActive
     ? Math.max(
       0,
@@ -2357,6 +2392,7 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
 
   const publishAll = (): void => {
     void withBusy('publish', async () => {
+      if (batchPublishBlocked) throw new Error(text(batchLineage?.publish_blocker_reason_cn, '当前批次证据不足，发布已阻断。'));
       if (!api.publishFactorQuarantineCandidate) throw new Error('发布 API 尚未接入。');
       const ids = publishableFactors.map((item) => text(item.candidate_id, '')).filter(Boolean);
       await ids.reduce(
@@ -2379,8 +2415,15 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
           page: nextPage,
           page_size: QUARANTINE_PAGE_SIZE,
         });
-        setSearchedCandidates(payload.items);
-        setSearchedRows(sortByTimeDesc(payload.items.map(quarantineRowFromCandidate), (row) => row.submitted_at));
+        const pinnedExternalCandidates = externalImportQuarantineCandidatesForFilters(overview, queryFilters);
+        const mergedCandidates = mergePinnedFirstPageCandidates(
+          payload.items,
+          pinnedExternalCandidates,
+          nextPage,
+          QUARANTINE_PAGE_SIZE,
+        );
+        setSearchedCandidates(mergedCandidates);
+        setSearchedRows(sortQuarantineRowsForFactory(mergedCandidates.map(quarantineRowFromCandidate)));
         setSearchedSummary(record(payload.summary));
         setQuarantinePage(nextPage);
       } else {
@@ -2437,14 +2480,24 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
       {error ? <div className="factor-phase2-empty factor-phase2-empty--danger">{error}</div> : null}
       {notice ? <div className="factor-phase2-empty factor-factory-notice">{notice}</div> : null}
 
-      {publishableFactors.length > 0 ? (
+      {batchPublishBlocked ? (
+        <section className="factor-phase2-panel factor-factory-publish-queue" aria-label="发布准入阻断">
+          <div className="factor-phase2-panel__header">
+            <div>
+              <p className="factor-phase2-panel__eyebrow">B4 发布准入</p>
+              <h2>发布已阻断</h2>
+              <p>{text(batchLineage?.publish_blocker_reason_cn, '当前批次证据不足，发布已阻断。')}</p>
+            </div>
+          </div>
+        </section>
+      ) : publishableFactors.length > 0 ? (
         <section className="factor-phase2-panel factor-factory-publish-queue" aria-label="可上线发布">
           <div className="factor-phase2-panel__header">
             <div>
               <p className="factor-phase2-panel__eyebrow">B4 发布准入</p>
               <h2>可上线发布</h2>
             </div>
-            <button className="factor-phase2-button factor-phase2-button--primary" disabled={busy !== null} type="button" onClick={publishAll}>
+            <button className="factor-phase2-button factor-phase2-button--primary" disabled={busy !== null || batchPublishBlocked} type="button" onClick={publishAll}>
               {busy === 'publish' ? '发布中...' : '一键发布'}
             </button>
           </div>
@@ -2506,7 +2559,7 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
           ['公式量（所选日期）', numeric(overview?.monitor_summary?.selected_date_formula_count ?? overview?.monitor_summary?.formula_count, 0), 'OperatorEngine 公式空间'],
           ['初筛通过（所选日期交付检疫）', numeric(overview?.monitor_summary?.initial_screen_pass_count, scoringCandidates.length), 'Raw_F2 批次交付'],
           ['检疫通过', numeric(overview?.monitor_summary?.quarantine_pass_count, quarantineRows.filter((row) => row.quarantine_result === 'PASS').length), 'PASS / PUBLISHED'],
-          ['S 级晋升', numeric(overview?.monitor_summary?.s_grade_promotion_count, publishableFactors.length), '发布准入 ELIGIBLE'],
+          ['S 级晋升', numeric(overview?.monitor_summary?.s_grade_promotion_count, metricPublishableCount), '发布准入 ELIGIBLE'],
           ['Alpha 浓度', decimal(overview?.monitor_summary?.alpha_concentration), 'S 级相关性峰值'],
           ['失败', numeric(overview?.monitor_summary?.failure_candidate_count, metricQuarantineFailCount), 'FAIL 候选'],
         ].map(([label, value, hint]) => (
@@ -2523,7 +2576,7 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
           ['任务池', taskRows.length, 'B1/B2/B3 任务'],
           ['候选交付', numeric(overview?.task_summary?.delivered_candidates, scoringCandidates.length), '最终交付候选因子数'],
           ['已送检', numeric(overview?.task_summary?.submitted_to_quarantine, quarantineRows.length), '进入 B3 检疫'],
-          ['发布准入', publishableFactors.length, 'F2/F3 可发布'],
+          ['发布准入', metricPublishableCount, 'F2/F3 可发布'],
           ['历史拒绝', numeric(overview?.task_summary?.rejected_history_count, quarantineRows.filter((row) => row.quarantine_result === 'FAIL').length), '可检索原因'],
           ['硬阻断', numeric(overview?.task_summary?.hard_blocked_count, 0), '不可发布'],
         ].map(([label, value, hint]) => (
@@ -2555,6 +2608,7 @@ export default function FactorFactoryPage({ initialSection: _initialSection = 'o
                 <small>从 Refined_F2 构建 F3 组合候选，发布前仍需检疫通过和人工确认。</small>
               </article>
             </div>
+            {!visibleTaskRows.length ? <div className="factor-phase2-empty">所选日期没有因子任务。</div> : null}
             {visibleTaskRows.map((task) => (
               <article className="factor-factory-task-card" data-task-kind={task.kind} key={task.id}>
                 <div className="factor-phase2-row__top">

@@ -63,6 +63,7 @@ from .models import (
     ExternalFactorLocalFileUploadResponse,
     ExternalFactorSourceRegistryResponse,
     FactorFactoryAutomationRequest,
+    FactorFactoryBatchLineage,
     FactorFactoryOnlineRawF2RefinementRequest,
     FactorFactoryRunNowRequest,
     FactorGovernanceExecuteRequest,
@@ -89,6 +90,25 @@ from .models import (
     PitResearchWaiverRequest,
     ResumeBacktestRunRequest,
     ResumeOptimizationJobRequest,
+    Sec424B2PilotDiscoverRequest,
+    Sec424B2PilotIngestRequest,
+    Sec424B2PilotIngestResponse,
+    Sec424B2ParsePreviewRequest,
+    Sec424B2ParsePreviewResponse,
+    Sec424B2ReparseCandidateResponse,
+    Sec424B2ReparseJobRequest,
+    Sec424B2ReparseJobResponse,
+    StructuredNoteDefinitionBindingResponse,
+    StructuredNoteF1CacheStatsResponse,
+    StructuredNoteFactorDefinitionResponse,
+    StructuredNoteFcnAttributionResponse,
+    StructuredNoteFcnPilotPressureTestRequest,
+    StructuredNoteFcnPilotPressureTestResponse,
+    StructuredNoteFcnReplayPreflightRequest,
+    StructuredNoteFcnReplayPreflightResponse,
+    StructuredNoteFcnReplayRequest,
+    StructuredNoteFcnReplayResponse,
+    StructuredNoteFcnRuntimeHealthResponse,
     PromoteTrialRequest,
     PrepareConfirmationRequest,
     SnapshotProviderAttemptListResponseModel,
@@ -1661,6 +1681,10 @@ def create_app(
     def factor_factory_overview():
         return invoke(service.get_factor_factory_overview)
 
+    @app.get('/factor-factory/batch-lineage', response_model=FactorFactoryBatchLineage)
+    def factor_factory_batch_lineage(run_id: str | None = Query(default=None)):
+        return invoke(service.get_factor_factory_batch_lineage, run_id)
+
     @app.get('/factor-factory/operator-config')
     def factor_factory_operator_config():
         return invoke(service.get_factor_factory_operator_config)
@@ -1718,6 +1742,91 @@ def create_app(
         q: str | None = None,
     ):
         return invoke(service.list_f1_catalog, snapshot_id=snapshot_id, layer=layer, status=status, q=q)
+
+    @app.post('/structured-notes/sec-424b2/parse-preview', response_model=Sec424B2ParsePreviewResponse)
+    def sec_424b2_parse_preview(payload: Sec424B2ParsePreviewRequest):
+        return invoke(service.preview_sec_424b2_structured_note, payload)
+
+    @app.get('/structured-notes/sec-424b2/parse-runs/{run_id}', response_model=Sec424B2ParsePreviewResponse)
+    def sec_424b2_parse_run_detail(run_id: str):
+        return invoke(service.get_sec_424b2_parse_run, run_id)
+
+    @app.post('/structured-notes/sec-424b2/pilot/discover-preview')
+    def sec_424b2_pilot_discover_preview(payload: Sec424B2PilotDiscoverRequest):
+        return invoke(service.discover_sec_424b2_pilot_preview, payload)
+
+    @app.post('/structured-notes/sec-424b2/pilot/ingest', response_model=Sec424B2PilotIngestResponse)
+    def sec_424b2_pilot_ingest(payload: Sec424B2PilotIngestRequest):
+        return invoke(service.ingest_sec_424b2_pilot, payload)
+
+    @app.get('/structured-notes/sec-424b2/reparse-candidates', response_model=Sec424B2ReparseCandidateResponse)
+    def sec_424b2_reparse_candidates(
+        current_parser_version: str | None = Query(default=None),
+        current_rule_hash: str | None = Query(default=None),
+    ):
+        return invoke(
+            service.list_sec_424b2_reparse_candidates,
+            current_parser_version=current_parser_version,
+            current_rule_hash=current_rule_hash,
+        )
+
+    @app.post('/structured-notes/sec-424b2/reparse-jobs/preview', response_model=Sec424B2ReparseJobResponse)
+    def sec_424b2_reparse_job_preview(payload: Sec424B2ReparseJobRequest):
+        return invoke(service.preview_sec_424b2_reparse_job, payload)
+
+    @app.post('/structured-notes/sec-424b2/reparse-jobs', response_model=Sec424B2ReparseJobResponse)
+    def sec_424b2_reparse_job_create(payload: Sec424B2ReparseJobRequest):
+        return invoke(service.create_sec_424b2_reparse_job, payload)
+
+    @app.get('/structured-notes/sec-424b2/reparse-jobs/{job_id}', response_model=Sec424B2ReparseJobResponse)
+    def sec_424b2_reparse_job_detail(job_id: str):
+        return invoke(service.get_sec_424b2_reparse_job, job_id)
+
+    @app.get('/structured-notes/fcn/factor-definitions', response_model=StructuredNoteFactorDefinitionResponse)
+    def structured_note_fcn_factor_definitions():
+        return invoke(service.list_structured_note_fcn_factor_definitions)
+
+    @app.get(
+        '/structured-notes/fcn/instances/{note_id}/definition-bindings',
+        response_model=StructuredNoteDefinitionBindingResponse,
+    )
+    def structured_note_fcn_definition_bindings(note_id: str):
+        return invoke(service.get_structured_note_definition_bindings, note_id)
+
+    @app.get('/structured-notes/fcn/runtime-health', response_model=StructuredNoteFcnRuntimeHealthResponse)
+    def structured_note_fcn_runtime_health():
+        return invoke(service.get_structured_note_fcn_runtime_health)
+
+    @app.get('/structured-notes/fcn/f1-cache-stats', response_model=StructuredNoteF1CacheStatsResponse)
+    def structured_note_fcn_f1_cache_stats():
+        return invoke(service.get_structured_note_f1_cache_stats)
+
+    @app.post('/structured-notes/fcn/replay/preflight', response_model=StructuredNoteFcnReplayPreflightResponse)
+    def structured_note_fcn_replay_preflight(payload: StructuredNoteFcnReplayPreflightRequest):
+        return invoke(service.preflight_structured_note_fcn_replay, payload)
+
+    @app.get(
+        '/structured-notes/fcn/replay/preflight-runs/{run_id}',
+        response_model=StructuredNoteFcnReplayPreflightResponse,
+    )
+    def structured_note_fcn_replay_preflight_detail(run_id: str):
+        return invoke(service.get_structured_note_fcn_replay_preflight_run, run_id)
+
+    @app.post('/structured-notes/fcn/replay', response_model=StructuredNoteFcnReplayResponse)
+    def structured_note_fcn_replay(payload: StructuredNoteFcnReplayRequest):
+        return invoke(service.replay_structured_note_fcn, payload)
+
+    @app.get('/structured-notes/fcn/replay-runs/{run_id}', response_model=StructuredNoteFcnReplayResponse)
+    def structured_note_fcn_replay_detail(run_id: str):
+        return invoke(service.get_structured_note_replay_run, run_id)
+
+    @app.get('/structured-notes/fcn/replay-runs/{run_id}/attribution', response_model=StructuredNoteFcnAttributionResponse)
+    def structured_note_fcn_replay_attribution(run_id: str):
+        return invoke(service.get_structured_note_fcn_attribution, run_id)
+
+    @app.post('/structured-notes/fcn/pilot-pressure-test', response_model=StructuredNoteFcnPilotPressureTestResponse)
+    def structured_note_fcn_pilot_pressure_test(payload: StructuredNoteFcnPilotPressureTestRequest):
+        return invoke(service.pressure_test_structured_note_fcn_pilot, payload)
 
     @app.post('/factor-quarantine/intake')
     def factor_quarantine_intake(payload: FactorQuarantineIntakeRequest):

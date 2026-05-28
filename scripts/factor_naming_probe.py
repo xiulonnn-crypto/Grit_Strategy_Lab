@@ -232,19 +232,32 @@ def probe_factor_naming(
     return probe
 
 
+def _acceptance_surface_keys(acceptance_surface: str) -> set[str]:
+    if acceptance_surface == "factory":
+        return {"factory.display_name_cn"}
+    return set()
+
+
 def analyze_probe(
     probe: dict[str, Any],
     *,
     expected_name: str = "",
     reject_name: str = "",
+    acceptance_surface: str = "all",
 ) -> list[str]:
     warnings: list[str] = []
     names = _surface_names(probe)
-    non_empty = {key: value for key, value in names.items() if value}
+    scoped_keys = _acceptance_surface_keys(acceptance_surface)
+    scoped_names = {key: value for key, value in names.items() if not scoped_keys or key in scoped_keys}
+    non_empty = {key: value for key, value in scoped_names.items() if value}
     if expected_name:
         for key, value in non_empty.items():
             if value != expected_name:
                 warnings.append(f"name_mismatch:{key}")
+        if scoped_keys:
+            for key in sorted(scoped_keys):
+                if not names.get(key):
+                    warnings.append(f"acceptance_surface_missing:{key}")
     comparable = {
         key: value
         for key, value in non_empty.items()
@@ -256,11 +269,12 @@ def analyze_probe(
         for key, value in non_empty.items():
             if reject_name in value:
                 warnings.append(f"rejected_name_present:{key}")
-    for key in ("factory_overview", "factor_list", "factor_detail"):
+    api_scope = ("factory_overview",) if acceptance_surface == "factory" else ("factory_overview", "factor_list", "factor_detail")
+    for key in api_scope:
         surface = probe.get(key)
         if isinstance(surface, dict) and surface.get("ok") is False:
             warnings.append(f"api_surface_unavailable:{key}")
-    if isinstance(probe.get("db"), dict) and probe["db"].get("ok") is False:
+    if acceptance_surface == "all" and isinstance(probe.get("db"), dict) and probe["db"].get("ok") is False:
         warnings.append("db_surface_unavailable")
     return sorted(set(warnings))
 
@@ -272,32 +286,56 @@ def write_trace_matrix(
     warnings: list[str],
     expected_name: str,
     reject_name: str,
+    acceptance_surface: str,
 ) -> None:
     names = _surface_names(probe)
+    scoped_keys = _acceptance_surface_keys(acceptance_surface)
+
+    def row_status(surface_key: str, present_status: str, missing_status: str) -> str:
+        if scoped_keys and surface_key not in scoped_keys:
+            return "OUT_OF_SCOPE"
+        return present_status if names.get(surface_key) else missing_status
+
     rows = [
-        ("DB stored name", names.get("db.stored_name") or "", "PASS" if names.get("db.stored_name") else "BLOCKED"),
+        (
+            "DB stored name",
+            names.get("db.stored_name") or "",
+            row_status("db.stored_name", "PASS", "BLOCKED"),
+        ),
         (
             "DB publish metadata name",
             names.get("db.publish_metadata_display_name_cn") or "",
-            "PASS" if names.get("db.publish_metadata_display_name_cn") else "NOT_CHECKED",
+            row_status("db.publish_metadata_display_name_cn", "PASS", "NOT_CHECKED"),
         ),
         (
             "Factory overview publishable/quarantine name",
             names.get("factory.display_name_cn") or "",
-            "PASS" if names.get("factory.display_name_cn") else "NOT_CHECKED",
+            row_status("factory.display_name_cn", "PASS", "BLOCKED"),
         ),
-        ("Factor list API name", names.get("list.display_name_cn") or "", "PASS" if names.get("list.display_name_cn") else "BLOCKED"),
-        ("Factor detail API name", names.get("detail.display_name_cn") or "", "PASS" if names.get("detail.display_name_cn") else "BLOCKED"),
+        (
+            "Factor list API name",
+            names.get("list.display_name_cn") or "",
+            row_status("list.display_name_cn", "PASS", "BLOCKED"),
+        ),
+        (
+            "Factor detail API name",
+            names.get("detail.display_name_cn") or "",
+            row_status("detail.display_name_cn", "PASS", "BLOCKED"),
+        ),
     ]
     if expected_name:
         rows.append(("Expected name gate", expected_name, "FAIL" if any("name_mismatch:" in item for item in warnings) else "PASS"))
     if reject_name:
         rows.append(("Rejected name gate", reject_name, "FAIL" if any("rejected_name_present:" in item for item in warnings) else "PASS"))
-    status_counts = {status: sum(1 for _, _, row_status in rows if row_status == status) for status in ("PASS", "FAIL", "BLOCKED", "NOT_CHECKED")}
+    status_counts = {
+        status: sum(1 for _, _, row_status_value in rows if row_status_value == status)
+        for status in ("PASS", "FAIL", "BLOCKED", "NOT_CHECKED", "OUT_OF_SCOPE")
+    }
     lines = [
         "# Factor Naming Probe Trace Matrix",
         "",
         f"- Factor ID: `{probe.get('factor_id')}`",
+        f"- Acceptance surface: `{acceptance_surface}`",
         f"- Expected name: `{expected_name or '(not supplied)'}`",
         f"- Rejected name: `{reject_name or '(not supplied)'}`",
         f"- Warnings: `{', '.join(warnings) if warnings else 'none'}`",
@@ -333,6 +371,12 @@ def main() -> int:
     parser.add_argument("--skip-api", action="store_true")
     parser.add_argument("--expected-name", default="")
     parser.add_argument("--reject-name", default="")
+    parser.add_argument(
+        "--acceptance-surface",
+        choices=("all", "factory"),
+        default="all",
+        help="Use 'factory' for not-yet-published Factor Factory candidates where DB/list/detail are expected to be absent.",
+    )
     parser.add_argument("--out", default="")
     parser.add_argument("--trace-matrix", default="")
     parser.add_argument("--strict", action="store_true")
@@ -348,7 +392,13 @@ def main() -> int:
         timeout=args.timeout,
         skip_api=args.skip_api,
     )
-    warnings = analyze_probe(probe, expected_name=args.expected_name, reject_name=args.reject_name)
+    warnings = analyze_probe(
+        probe,
+        expected_name=args.expected_name,
+        reject_name=args.reject_name,
+        acceptance_surface=args.acceptance_surface,
+    )
+    probe["acceptance_surface"] = args.acceptance_surface
     probe["warnings"] = warnings
     probe["status"] = "WARN" if warnings else "OK"
 
@@ -363,6 +413,7 @@ def main() -> int:
             warnings=warnings,
             expected_name=args.expected_name,
             reject_name=args.reject_name,
+            acceptance_surface=args.acceptance_surface,
         )
     print(json.dumps(probe, ensure_ascii=False, indent=2, sort_keys=True))
     return 2 if args.strict and warnings else 0
