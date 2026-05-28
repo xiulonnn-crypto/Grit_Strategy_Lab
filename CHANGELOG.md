@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [0.1.1-028] - 2026-05-28 - 新增SEC 424B2 FCN 合同骨架、SEC 424B2 Parser 版本治理与 JPM Pilot 回放等，并优化PIT/L1 备份瘦身
+
 ### 新增 (Added)
 
 - **SEC 424B2 FCN 合同骨架**: 新增结构化票据 `note_date` 影子数据合同、确定性 424B2 解析预览接口和 F2 worst-of/票息/敲出/敲入距离表达式合同，生产路径禁用外部 LLM。
