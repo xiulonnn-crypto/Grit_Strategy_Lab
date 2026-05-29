@@ -3662,6 +3662,9 @@ export type ApiExternalFactorManifest = {
   template_key: string;
   parsing_status: string;
   warnings: string[];
+  catalog_manifest?: Record<string, unknown>;
+  bench_summary?: Record<string, unknown>;
+  raw_f2_batch?: Record<string, unknown>;
 };
 
 export type ApiExternalFactorMappingRow = {
@@ -3735,6 +3738,7 @@ export type ApiExternalFactorImportJob = {
   risk_flags: string[];
   next_actions: string[];
   governance_gate: string;
+  raw_f2_batch?: Record<string, unknown>;
   job_projection?: Record<string, unknown>;
 };
 
@@ -4184,6 +4188,17 @@ export type ApiStructuredNoteFactorDefinitionResponse = {
   summary?: Record<string, unknown>;
 };
 
+export type ApiStructuredNoteFactorFactoryMountContractResponse = {
+  definition_version: string;
+  registration_status?: "CONTRACT_READY" | "REVIEW_REQUIRED";
+  f2_definition_ids?: string[];
+  dimension_schema?: Record<string, unknown>;
+  display_name_cn?: string;
+  publish_boundary?: string;
+  factor_library_write?: "BLOCKED_UNTIL_QUARANTINE_PUBLISH";
+  summary?: Record<string, unknown>;
+};
+
 export type ApiStructuredNoteDefinitionBindingResponse = {
   note_id: string;
   definition_version?: string;
@@ -4228,6 +4243,7 @@ export type ApiStructuredNoteFcnReplayPreflightPayload = {
   end_date?: string | null;
   replay_mode?: "sandbox";
   price_proxies?: Record<string, unknown>;
+  initial_value_proxy_mode?: "none" | "SANDBOX_ONLY_FIRST_PRICE";
 };
 
 export type ApiStructuredNoteFcnReplayPreflightNoteResult = {
@@ -4240,7 +4256,12 @@ export type ApiStructuredNoteFcnReplayPreflightNoteResult = {
   blocked_point_count?: number;
   elapsed_ms?: number;
   missing_symbols?: string[];
+  missing_initial_value_symbols?: string[];
   blocker_code?: string | null;
+  initial_value_proxy_mode?: "none" | "SANDBOX_ONLY_FIRST_PRICE" | null;
+  initial_value_proxy_count?: number;
+  initial_value_proxy_symbols?: string[];
+  initial_value_proxy_evidence?: Record<string, unknown>[];
 };
 
 export type ApiStructuredNoteFcnReplayPreflightResponse = {
@@ -4357,6 +4378,7 @@ export type ApiSec424B2PilotIngestResponse = {
 
 export type ApiSec424B2ReparseCandidate = {
   run_id: string;
+  note_id?: string;
   accession_number?: string;
   issuer_cik?: string;
   source_url?: string;
@@ -4367,6 +4389,7 @@ export type ApiSec424B2ReparseCandidate = {
   status?: "PARSED" | "REVIEW_REQUIRED" | "FAILED" | string;
   reasons?: string[];
   warnings?: string[];
+  missing_initial_value_count?: number;
 };
 
 export type ApiSec424B2ReparseCandidateResponse = {
@@ -4376,7 +4399,7 @@ export type ApiSec424B2ReparseCandidateResponse = {
 
 export type ApiSec424B2ReparseJobPayload = {
   auto_repair_enabled?: boolean | null;
-  mode?: "dry_run";
+  mode?: "dry_run" | "apply_append_only";
   dry_run?: boolean;
   current_parser_version?: string | null;
   current_rule_hash?: string | null;
@@ -4386,7 +4409,7 @@ export type ApiSec424B2ReparseJobPayload = {
 
 export type ApiSec424B2ReparseJobResponse = {
   job_id: string;
-  status?: "DISABLED" | "DRY_RUN_READY" | "DRY_RUN_ONLY" | "NOT_FOUND" | string;
+  status?: "DISABLED" | "DRY_RUN_READY" | "DRY_RUN_ONLY" | "APPLIED" | "PARTIAL" | "NOT_FOUND" | string;
   mode?: "dry_run" | string;
   dry_run?: boolean;
   auto_repair_enabled?: boolean;
@@ -4394,6 +4417,32 @@ export type ApiSec424B2ReparseJobResponse = {
   candidate_count?: number;
   selected_count?: number;
   candidates?: ApiSec424B2ReparseCandidate[];
+  actions?: Record<string, unknown>[];
+  summary?: Record<string, unknown>;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ApiSec424B2IngestionJobPayload = {
+  issuer_cik?: string;
+  manifest_path?: string | null;
+  scan_limit?: number;
+  max_filings?: number;
+  mode?: "dry_run" | "apply_append_only";
+  dry_run?: boolean;
+  rate_limit_rps?: number | null;
+  accessions?: Array<string | Record<string, unknown>>;
+  parser_options?: Record<string, unknown>;
+};
+
+export type ApiSec424B2IngestionJobResponse = {
+  job_id: string;
+  status?: "DRY_RUN_READY" | "COMPLETED" | "PARTIAL" | "DATA_SOURCE_BLOCKED" | "FAILED" | string;
+  mode?: "dry_run" | "apply_append_only" | string;
+  dry_run?: boolean;
+  issuer_cik?: string;
+  selected_count?: number;
+  accessions?: Record<string, unknown>[];
   actions?: Record<string, unknown>[];
   summary?: Record<string, unknown>;
   created_at?: string | null;
@@ -4409,6 +4458,60 @@ export type ApiStructuredNoteFcnReplayPayload = {
   end_date?: string | null;
   observation_frequency?: string | null;
   price_proxies?: Record<string, unknown>;
+};
+
+export type ApiStructuredNoteFcnReplayBatchPayload = {
+  manifest_id?: string | null;
+  manifest_path?: string | null;
+  note_ids?: string[];
+  sample_limit?: number;
+  max_notes?: number;
+  dataset_snapshot_id?: string;
+  replay_mode?: "sandbox";
+  start_date?: string | null;
+  end_date?: string | null;
+  observation_frequency?: string | null;
+  price_proxies?: Record<string, unknown>;
+};
+
+export type ApiStructuredNoteFcnReplayBatchNoteResult = {
+  note_id?: string;
+  parse_run_id?: string | null;
+  replay_run_id?: string | null;
+  status?: "OK" | "PARTIAL" | "DATA_SOURCE_BLOCKED" | "FAILED" | string;
+  point_count?: number;
+  blocked_count?: number;
+  missing_symbols?: string[];
+  error_message?: string | null;
+};
+
+export type ApiStructuredNoteFcnReplayBatchResponse = {
+  batch_id: string;
+  status?: "OK" | "PARTIAL" | "DATA_SOURCE_BLOCKED" | "FAILED" | string;
+  note_count?: number;
+  replay_run_count?: number;
+  replay_point_count?: number;
+  data_source_blocked_count?: number;
+  run_ids?: string[];
+  note_results?: ApiStructuredNoteFcnReplayBatchNoteResult[];
+  summary?: Record<string, unknown>;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type ApiStructuredNoteFcnReplayBatchAttributionSummaryResponse = {
+  batch_id: string;
+  status?: "OK" | "PARTIAL" | "DATA_SOURCE_BLOCKED" | "FAILED" | string;
+  note_count?: number;
+  replay_run_count?: number;
+  latest_net_benefit_sum?: number | null;
+  latest_net_benefit_avg?: number | null;
+  negative_convexity_note_count?: number;
+  data_source_blocked_count?: number;
+  note_results?: Record<string, unknown>[];
+  summary?: Record<string, unknown>;
+  created_at?: string | null;
+  updated_at?: string | null;
 };
 
 export type ApiStructuredNoteFcnReplayPoint = {
@@ -4899,6 +5002,7 @@ export type DemoApi = {
       notes?: string | null;
     },
   ) => Promise<ApiExternalFactorImportJob>;
+  materializeExternalFactorImportSourceFile?: (id: string) => Promise<ApiExternalFactorImportJob>;
   submitExternalFactorImportReview?: (id: string) => Promise<ApiExternalFactorImportJob>;
   backfillFactorDisplayNamesV4?: (
     payload?: { dry_run?: boolean },
@@ -4939,7 +5043,15 @@ export type DemoApi = {
     payload: ApiSec424B2ReparseJobPayload,
   ) => Promise<ApiSec424B2ReparseJobResponse>;
   getSec424B2ReparseJob?: (jobId: string) => Promise<ApiSec424B2ReparseJobResponse>;
+  previewSec424B2IngestionJob?: (
+    payload: ApiSec424B2IngestionJobPayload,
+  ) => Promise<ApiSec424B2IngestionJobResponse>;
+  createSec424B2IngestionJob?: (
+    payload: ApiSec424B2IngestionJobPayload,
+  ) => Promise<ApiSec424B2IngestionJobResponse>;
+  getSec424B2IngestionJob?: (jobId: string) => Promise<ApiSec424B2IngestionJobResponse>;
   listStructuredNoteFcnFactorDefinitions?: () => Promise<ApiStructuredNoteFactorDefinitionResponse>;
+  getStructuredNoteFactorFactoryMountContract?: () => Promise<ApiStructuredNoteFactorFactoryMountContractResponse>;
   getStructuredNoteDefinitionBindings?: (noteId: string) => Promise<ApiStructuredNoteDefinitionBindingResponse>;
   getStructuredNoteFcnRuntimeHealth?: () => Promise<ApiStructuredNoteFcnRuntimeHealthResponse>;
   getStructuredNoteF1CacheStats?: () => Promise<ApiStructuredNoteF1CacheStatsResponse>;
@@ -4950,6 +5062,13 @@ export type DemoApi = {
   replayStructuredNoteFcn?: (
     payload: ApiStructuredNoteFcnReplayPayload,
   ) => Promise<ApiStructuredNoteFcnReplayResponse>;
+  replayStructuredNoteFcnBatch?: (
+    payload: ApiStructuredNoteFcnReplayBatchPayload,
+  ) => Promise<ApiStructuredNoteFcnReplayBatchResponse>;
+  getStructuredNoteFcnReplayBatch?: (batchId: string) => Promise<ApiStructuredNoteFcnReplayBatchResponse>;
+  getStructuredNoteFcnReplayBatchAttributionSummary?: (
+    batchId: string,
+  ) => Promise<ApiStructuredNoteFcnReplayBatchAttributionSummaryResponse>;
   getStructuredNoteFcnReplayRun?: (runId: string) => Promise<ApiStructuredNoteFcnReplayResponse>;
   getStructuredNoteFcnAttribution?: (runId: string) => Promise<ApiStructuredNoteFcnAttributionResponse>;
   pressureTestStructuredNoteFcnPilot?: (

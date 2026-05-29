@@ -249,7 +249,7 @@ describe('PublicFactorImportCenterPage', () => {
     expect(screen.getByText(/已打开送检审计/)).toHaveTextContent('B3 通过，待发布准入');
   });
 
-  it('shows a pending AQR source-manifest precheck as review state after refresh', async () => {
+  it('shows a pending AQR source-manifest precheck as a source-file pull action', async () => {
     const pendingAqrManifest: PublicFactorImportViewModel['manifest'] = {
       jobId: 'extimp_aqr_pending',
       sourceName: 'AQR Data Sets',
@@ -259,30 +259,31 @@ describe('PublicFactorImportCenterPage', () => {
       rawFileHash: '等待文件 hash',
       rowCount: 0,
       artifactPath: 'external_factor_import_manifests/extimp_aqr_pending',
-      reviewNote: 'PENDING_REVIEW · REVIEW_BEFORE_QUARANTINE · upload_source_file / inspect_manifest',
+      reviewNote: '待复核 · 送检前复核 · 拉取或上传源文件 / 查看 manifest',
       reviewStatus: 'PENDING_REVIEW',
       nextActions: ['upload_source_file', 'inspect_manifest'],
       submitReady: false,
     };
-    const submittedAqrManifest: PublicFactorImportViewModel['manifest'] = {
+    const readyAqrManifest: PublicFactorImportViewModel['manifest'] = {
       ...pendingAqrManifest,
-      reviewNote: 'SUBMITTED · REVIEW_BEFORE_QUARANTINE · b3_quarantine_completed',
-      reviewStatus: 'SUBMITTED',
-      nextActions: ['b3_quarantine_completed'],
-      submitReady: false,
-      reviewOutcome: 'B3 检疫阻断 · 等待源文件',
-      factorStatus: '源文件未物化，保留人工复核证据',
+      rawFileHash: 'sha256:aqrready',
+      rowCount: 3,
+      artifactPath: 'external_factor_import_manifests/extimp_aqr_pending',
+      reviewNote: '可送复核 · 送检前复核 · 查看 manifest / 送入复核',
+      reviewStatus: 'READY_FOR_REVIEW',
+      nextActions: ['inspect_manifest', 'submit_review'],
+      submitReady: true,
     };
-    const submitReview = vi.fn().mockResolvedValue({
-      manifest: submittedAqrManifest,
+    const materializeSourceFile = vi.fn().mockResolvedValue({
+      manifest: readyAqrManifest,
       manifestsByDataset: {
-        aqr_public_style_factors: submittedAqrManifest,
+        aqr_public_style_factors: readyAqrManifest,
       },
     });
 
     render(
       <PublicFactorImportCenterPage
-        api={{ submitReview }}
+        api={{ materializeSourceFile }}
         viewModel={{
           activeSourceId: 'aqr',
           activeDatasetId: 'aqr-qmj',
@@ -300,14 +301,20 @@ describe('PublicFactorImportCenterPage', () => {
 
     expect(qmjRow).toHaveAttribute('data-manifest-job-id', 'extimp_aqr_pending');
     expect(within(qmjRow).getByText('待送检')).toBeInTheDocument();
-    expect(within(qmjRow).getByRole('button', { name: '查看 manifest' })).toBeInTheDocument();
+    expect(within(qmjRow).getByRole('button', { name: '拉取源文件' })).toBeInTheDocument();
     expect(within(qmjRow).queryByRole('button', { name: '新建预检' })).not.toBeInTheDocument();
     expect(tsmomRow).not.toHaveAttribute('data-manifest-job-id', 'extimp_aqr_pending');
 
     const railSubmitButton = document.querySelector('.pfic-manifest-rail .pfic-button-primary') as HTMLButtonElement;
-    expect(railSubmitButton).toBeDisabled();
-    fireEvent.click(railSubmitButton);
-    expect(submitReview).not.toHaveBeenCalled();
+    expect(railSubmitButton).not.toBeDisabled();
+    expect(railSubmitButton).toHaveTextContent('拉取源文件');
+    await act(async () => {
+      fireEvent.click(railSubmitButton);
+    });
+    expect(materializeSourceFile).toHaveBeenCalledWith({ jobId: 'extimp_aqr_pending' });
+    expect(screen.getByText(/真实源文件已拉取/)).toBeInTheDocument();
+    const railReadyButton = document.querySelector('.pfic-manifest-rail .pfic-button-primary') as HTMLButtonElement;
+    expect(railReadyButton).toHaveTextContent('送入复核');
   });
 
   it('keeps candidate dataset filters aligned with displayed status labels', () => {
@@ -533,7 +540,7 @@ describe('PublicFactorImportCenterPage', () => {
     );
   });
 
-  it('uses a source-manifest precheck for AQR instead of automatic download', async () => {
+  it('uses automatic download for AQR QMJ precheck', async () => {
     const createPrecheck = vi.fn().mockResolvedValue({});
     render(<PublicFactorImportCenterPage api={{ createPrecheck }} />);
 
@@ -551,8 +558,8 @@ describe('PublicFactorImportCenterPage', () => {
       expect.objectContaining({
         sourceId: 'aqr',
         datasetId: 'aqr-qmj',
-        importMode: 'SOURCE_MANIFEST',
-        parserMode: '来源 manifest 预检',
+        importMode: 'AUTO_DOWNLOAD',
+        parserMode: '公开下载后解析',
       }),
     );
   });
@@ -644,5 +651,74 @@ describe('PublicFactorImportCenterPage', () => {
     expect(screen.getAllByText('Custom Dataset').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('待确认').length).toBeGreaterThanOrEqual(1);
     expect(document.body.textContent || '').not.toContain('undefined');
+  });
+
+  it('renders Vibe Alpha Zoo Raw_F2 manifest evidence without B3 publish language', () => {
+    const manifest: PublicFactorImportViewModel['manifest'] = {
+      jobId: 'extimp_vibe_raw',
+      sourceName: 'Vibe Alpha Zoo',
+      datasetKey: 'vibe_qlib158',
+      asOfDate: '2026-05-29T08:00:00Z',
+      parserVersion: 'vibe_alpha_zoo_manifest_v1',
+      rawFileHash: 'sha256:vibe',
+      rowCount: 452,
+      artifactPath: 'external_factor_import_manifests/extimp_vibe_raw',
+      reviewNote: 'SUBMITTED · RAW_F2_BEFORE_D2_QUARANTINE · raw_f2_batch_created',
+      reviewStatus: 'SUBMITTED',
+      nextActions: ['raw_f2_batch_created', 'wnzt_refinement_required'],
+      submitReady: false,
+      catalogFormulaCount: 452,
+      astPassedCount: 448,
+      astBlockedCount: 4,
+      benchAliveCount: 221,
+      benchReversedCount: 57,
+      benchDeadCount: 170,
+      rawF2BatchId: 'ffr_vibe_452',
+      rawF2MiningJobId: 'mine_vibe_452',
+      rawF2FormulaCount: 448,
+      flowNote: 'Catalog -> AST -> IC bench -> Raw_F2 -> WNZT -> Refined_F2 -> D2',
+      factorStatus: 'Raw_F2 staged; WNZT required before D2 quarantine',
+    };
+
+    render(
+      <PublicFactorImportCenterPage
+        viewModel={{
+          activeSourceId: 'vibe_alpha_zoo',
+          activeDatasetId: 'vibe_qlib158',
+          sources: [{
+            id: 'vibe_alpha_zoo',
+            name: 'Vibe Alpha Zoo',
+            kind: 'auto',
+            tone: 'ready',
+            frequency: '452 alpha catalog',
+            badges: ['Raw_F2 only', 'AST scan'],
+            description: 'Formula catalog staged as Raw_F2.',
+          }],
+          datasets: [{
+            id: 'vibe_qlib158',
+            name: 'Vibe Qlib158 Alpha Zoo',
+            key: 'vibe_qlib158',
+            sourceName: 'Vibe',
+            frequency: 'formula catalog',
+            coverage: '452 formulas',
+            status: 'review',
+          }],
+          manifest,
+          manifestsByDataset: {
+            vibe_qlib158: manifest,
+          },
+        }}
+      />,
+    );
+
+    const rail = document.querySelector('.pfic-manifest-rail') as HTMLElement;
+    expect(screen.getAllByText('Vibe Alpha Zoo').length).toBeGreaterThanOrEqual(1);
+    expect(within(rail).getAllByText('Raw_F2 staged').length).toBeGreaterThanOrEqual(1);
+    expect(within(rail).getAllByText('452').length).toBeGreaterThanOrEqual(1);
+    expect(within(rail).getByText('448 / 4')).toBeInTheDocument();
+    expect(within(rail).getByText(/221 alive/)).toBeInTheDocument();
+    expect(within(rail).getByText('ffr_vibe_452')).toBeInTheDocument();
+    expect(document.body.textContent || '').toContain('WNZT');
+    expect(document.body.textContent || '').not.toContain('b3_quarantine_completed');
   });
 });

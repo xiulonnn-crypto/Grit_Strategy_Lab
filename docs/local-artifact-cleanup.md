@@ -32,7 +32,9 @@ The helper writes its report to `harness/reports/smoke/latest-local-artifact-cle
 `-Json` prints the summary only; pass `-FullJson` when the terminal needs the full
 planned/removed/skipped detail. The full detail is always written to the report file.
 The summary includes `elapsedSeconds` so scheduled runs and review passes can compare
-cleanup overhead without wrapping the script in a separate timer.
+cleanup overhead without wrapping the script in a separate timer. For recovery-only
+runs, pass `-OnlyRelativePathPrefix artifacts/recovery` and a task report path such as
+`output/logs/grit-coder/<task-slug>/recovery-cleanup-summary.json`.
 
 ## Safety Contract
 
@@ -43,9 +45,14 @@ cleanup overhead without wrapping the script in a separate timer.
   `.grit_backtest_platform.sqlite3`,
   `.grit_backtest_platform_market_data.sqlite3`,
   and their WAL/SHM companions.
+- Also protects the active `GRIT_BACKTEST_DB` path and its derived
+  `<stem>_market_data.sqlite3` companion, including WAL/SHM files.
+- Refuses to scan or delete when `GRIT_BACKTEST_DB` or its companion resolves under
+  `artifacts/recovery`; recovery archives are not a valid active runtime DB location.
 - Keeps PIT bulk cache unless `-IncludePitBulkCache` is explicitly passed.
-- Keeps the newest `artifacts/recovery` entries and deletes only entries older than the
-  configured recovery retention window.
+- Keeps the newest `artifacts/recovery` entries, the newest full DB backup pair, the
+  newest targeted PIT preimage, and manifest/source evidence. Superseded `l1-*` full
+  DB payloads are eligible for cleanup only after those protection rules are applied.
 - Defaults to dry-run; deletion requires `-Apply`.
 - Uses a single cached `git ls-files` snapshot for tracking checks instead of one Git
   command per cleanup candidate.

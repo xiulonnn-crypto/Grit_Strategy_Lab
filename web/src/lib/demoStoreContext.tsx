@@ -851,6 +851,11 @@ function createHttpApiClient(): DemoApi {
         `/factor-sources/import-jobs/${encodeURIComponent(id)}/mapping`,
         withJsonBody(payload, { method: 'PUT' }),
       ),
+    materializeExternalFactorImportSourceFile: (id: string) =>
+      requestJson<ApiExternalFactorImportJob>(
+        `/factor-sources/import-jobs/${encodeURIComponent(id)}/materialize-source-file`,
+        { method: 'POST' },
+      ),
     submitExternalFactorImportReview: (id: string) =>
       requestJson<ApiExternalFactorImportJob>(
         `/factor-sources/import-jobs/${encodeURIComponent(id)}/submit-review`,

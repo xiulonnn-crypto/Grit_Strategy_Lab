@@ -36,6 +36,7 @@ if (-not [string]::IsNullOrWhiteSpace($OnlyRelativePathPrefix)) {
     $script:NormalizedOnlyRelativePathPrefix = $OnlyRelativePathPrefix.Replace('\', '/').Trim('/')
 }
 $script:TrackedPathPrefixes = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+$script:ProtectedRuntimeRelativePaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
 
 function Initialize-TrackedPathCache {
     $trackedPaths = @(& git -C $repoRoot ls-files 2>$null)
@@ -116,6 +117,68 @@ function Test-WithinRepo {
     $normalizedRepo = Get-NormalizedFullPath -PathValue $repoRoot
     $normalizedPath = Get-NormalizedFullPath -PathValue $FullPath
     return $normalizedPath.StartsWith($normalizedRepo, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Resolve-RepoRelativeOrAbsolutePath {
+    param([string]$PathValue)
+    if ([string]::IsNullOrWhiteSpace($PathValue)) {
+        return $null
+    }
+    $expanded = [System.Environment]::ExpandEnvironmentVariables($PathValue)
+    if ([System.IO.Path]::IsPathRooted($expanded)) {
+        return Get-NormalizedFullPath -PathValue $expanded
+    }
+    return Get-NormalizedFullPath -PathValue (Join-Path $repoRoot $expanded)
+}
+
+function Get-CompanionMarketDataPath {
+    param([string]$WorkspaceDbPath)
+    if ([string]::IsNullOrWhiteSpace($WorkspaceDbPath)) {
+        return $null
+    }
+    $directory = Split-Path -Parent $WorkspaceDbPath
+    $stem = [System.IO.Path]::GetFileNameWithoutExtension($WorkspaceDbPath)
+    return Get-NormalizedFullPath -PathValue (Join-Path $directory ("{0}_market_data.sqlite3" -f $stem))
+}
+
+function Test-PathUnderRepoRelativeRoot {
+    param(
+        [string]$FullPath,
+        [string]$RelativeRoot
+    )
+    if ([string]::IsNullOrWhiteSpace($FullPath)) {
+        return $false
+    }
+    $root = Get-NormalizedFullPath -PathValue (Join-Path $repoRoot $RelativeRoot)
+    $path = Get-NormalizedFullPath -PathValue $FullPath
+    return (
+        $path -eq $root -or
+        $path.StartsWith(($root + [System.IO.Path]::DirectorySeparatorChar), [System.StringComparison]::OrdinalIgnoreCase)
+    )
+}
+
+function Add-ProtectedRuntimePath {
+    param([string]$FullPath)
+    if ([string]::IsNullOrWhiteSpace($FullPath)) {
+        return
+    }
+    foreach ($candidate in @($FullPath, "$FullPath-wal", "$FullPath-shm")) {
+        if (Test-WithinRepo -FullPath $candidate) {
+            $relative = Get-RelativeRepoPath -FullPath $candidate
+            if (-not [string]::IsNullOrWhiteSpace($relative)) {
+                [void]$script:ProtectedRuntimeRelativePaths.Add($relative.Trim('/'))
+            }
+        }
+    }
+}
+
+function Get-FileSizeGBOrNull {
+    param([string]$FullPath)
+    if ([string]::IsNullOrWhiteSpace($FullPath) -or -not (Test-Path -LiteralPath $FullPath -PathType Leaf)) {
+        return $null
+    }
+    $item = Get-Item -LiteralPath $FullPath -Force
+    return [math]::Round(($item.Length / 1GB), 3)
 }
 
 function Test-ReparsePoint {
@@ -256,6 +319,10 @@ function Add-Candidate {
             '.grit_backtest_platform_market_data.sqlite3-wal',
             '.grit_backtest_platform_market_data.sqlite3-shm'
         )) {
+            $eligible = $false
+            $skipReason = 'runtime-db'
+        }
+        if ($script:ProtectedRuntimeRelativePaths.Contains($relativePath.Trim('/'))) {
             $eligible = $false
             $skipReason = 'runtime-db'
         }
@@ -469,11 +536,87 @@ function Add-RecoveryCandidates {
     }
 }
 
+$activeWorkspaceDbSource = if ([string]::IsNullOrWhiteSpace($env:GRIT_BACKTEST_DB)) { 'default-root' } else { 'GRIT_BACKTEST_DB' }
+$activeWorkspaceDbPath = if ([string]::IsNullOrWhiteSpace($env:GRIT_BACKTEST_DB)) {
+    Get-NormalizedFullPath -PathValue (Join-Path $repoRoot '.grit_backtest_platform.sqlite3')
+} else {
+    Resolve-RepoRelativeOrAbsolutePath -PathValue $env:GRIT_BACKTEST_DB
+}
+$activeMarketDbPath = Get-CompanionMarketDataPath -WorkspaceDbPath $activeWorkspaceDbPath
+$activeWorkspaceDbInRecovery = Test-PathUnderRepoRelativeRoot -FullPath $activeWorkspaceDbPath -RelativeRoot 'artifacts\recovery'
+$activeMarketDbInRecovery = Test-PathUnderRepoRelativeRoot -FullPath $activeMarketDbPath -RelativeRoot 'artifacts\recovery'
+$activeDbGuardStatus = if ($activeWorkspaceDbInRecovery -or $activeMarketDbInRecovery) {
+    'blocked-active-db-under-recovery'
+} else {
+    'ok'
+}
+Add-ProtectedRuntimePath -FullPath $activeWorkspaceDbPath
+Add-ProtectedRuntimePath -FullPath $activeMarketDbPath
+
 New-Item -ItemType Directory -Path (Split-Path -Parent $ReportPath) -Force | Out-Null
 
 $freeBeforeGB = Get-CurrentFreeGB
 $targetFreeGB = [decimal]$MinFreeGB
 $scanSkippedReason = $null
+
+if ($activeDbGuardStatus -ne 'ok') {
+    $summary = [pscustomobject][ordered]@{
+        generatedAt = (Get-Date).ToString('o')
+        repoRoot = $repoRoot
+        apply = [bool]$Apply
+        pruneExpired = [bool]$PruneExpired
+        forceScan = [bool]$ForceScan
+        minFreeGB = $MinFreeGB
+        onlyRelativePathPrefix = $OnlyRelativePathPrefix
+        recoveryKeepNewestFullPairs = $RecoveryKeepNewestFullPairs
+        recoveryKeepNewestTargetedPreimages = $RecoveryKeepNewestTargetedPreimages
+        activeDbGuardStatus = $activeDbGuardStatus
+        activeWorkspaceDbSource = $activeWorkspaceDbSource
+        activeWorkspaceDbPath = $activeWorkspaceDbPath
+        activeMarketDbPath = $activeMarketDbPath
+        activeWorkspaceDbInRecovery = $activeWorkspaceDbInRecovery
+        activeMarketDbInRecovery = $activeMarketDbInRecovery
+        activeWorkspaceDbSizeGB = Get-FileSizeGBOrNull -FullPath $activeWorkspaceDbPath
+        activeMarketDbSizeGB = Get-FileSizeGBOrNull -FullPath $activeMarketDbPath
+        scanSkippedReason = 'active-db-under-recovery'
+        elapsedSeconds = [math]::Round($script:CleanupStopwatch.Elapsed.TotalSeconds, 2)
+        freeBeforeGB = $freeBeforeGB
+        freeAfterGB = $freeBeforeGB
+        candidateCount = 0
+        eligibleCount = 0
+        plannedCount = 0
+        plannedGB = 0
+        removedCount = 0
+        removedGB = 0
+        failedCount = 1
+        failedGB = 0
+        reportPath = $ReportPath
+    }
+    $report = [pscustomobject][ordered]@{
+        summary = $summary
+        removed = @()
+        failed = @(
+            [pscustomobject][ordered]@{
+                path = $activeWorkspaceDbPath
+                policy = 'active-db-guard'
+                sizeGB = Get-FileSizeGBOrNull -FullPath $activeWorkspaceDbPath
+                error = 'GRIT_BACKTEST_DB or its companion market-data DB points under artifacts/recovery'
+            }
+        )
+        planned = @()
+        skipped = @()
+    }
+    $reportJson = $report | ConvertTo-Json -Depth 8
+    $reportJson | Set-Content -LiteralPath $ReportPath -Encoding utf8
+    if ($Json -and $FullJson) {
+        $reportJson
+    } elseif ($Json) {
+        $summary | ConvertTo-Json -Depth 4
+    } else {
+        $summary | Format-List
+    }
+    exit 2
+}
 
 if (
     -not $PruneExpired `
@@ -492,6 +635,14 @@ if (
         onlyRelativePathPrefix = $OnlyRelativePathPrefix
         recoveryKeepNewestFullPairs = $RecoveryKeepNewestFullPairs
         recoveryKeepNewestTargetedPreimages = $RecoveryKeepNewestTargetedPreimages
+        activeDbGuardStatus = $activeDbGuardStatus
+        activeWorkspaceDbSource = $activeWorkspaceDbSource
+        activeWorkspaceDbPath = $activeWorkspaceDbPath
+        activeMarketDbPath = $activeMarketDbPath
+        activeWorkspaceDbInRecovery = $activeWorkspaceDbInRecovery
+        activeMarketDbInRecovery = $activeMarketDbInRecovery
+        activeWorkspaceDbSizeGB = Get-FileSizeGBOrNull -FullPath $activeWorkspaceDbPath
+        activeMarketDbSizeGB = Get-FileSizeGBOrNull -FullPath $activeMarketDbPath
         scanSkippedReason = $scanSkippedReason
         elapsedSeconds = [math]::Round($script:CleanupStopwatch.Elapsed.TotalSeconds, 2)
         freeBeforeGB = $freeBeforeGB
@@ -627,6 +778,14 @@ $summary = [pscustomobject][ordered]@{
     onlyRelativePathPrefix = $OnlyRelativePathPrefix
     recoveryKeepNewestFullPairs = $RecoveryKeepNewestFullPairs
     recoveryKeepNewestTargetedPreimages = $RecoveryKeepNewestTargetedPreimages
+    activeDbGuardStatus = $activeDbGuardStatus
+    activeWorkspaceDbSource = $activeWorkspaceDbSource
+    activeWorkspaceDbPath = $activeWorkspaceDbPath
+    activeMarketDbPath = $activeMarketDbPath
+    activeWorkspaceDbInRecovery = $activeWorkspaceDbInRecovery
+    activeMarketDbInRecovery = $activeMarketDbInRecovery
+    activeWorkspaceDbSizeGB = Get-FileSizeGBOrNull -FullPath $activeWorkspaceDbPath
+    activeMarketDbSizeGB = Get-FileSizeGBOrNull -FullPath $activeMarketDbPath
     scanSkippedReason = $scanSkippedReason
     elapsedSeconds = [math]::Round($script:CleanupStopwatch.Elapsed.TotalSeconds, 2)
     freeBeforeGB = $freeBeforeGB

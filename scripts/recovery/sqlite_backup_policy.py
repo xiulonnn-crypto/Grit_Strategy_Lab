@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import sqlite3
 import sys
@@ -152,6 +151,7 @@ def create_full_pair_backup(
         destination = destination_dir / source.name
         sqlite_online_backup(source, destination)
         outputs[str(source)] = str(destination)
+    market_baseline = snapshot_baseline(market_db)
     manifest = {
         "kind": "full-pair",
         "generated_at": utc_now(),
@@ -168,7 +168,9 @@ def create_full_pair_backup(
             "path": str(workspace_db),
             "size_bytes": workspace_db.stat().st_size,
         },
-        "market_db": snapshot_baseline(market_db),
+        "market_db": market_baseline,
+        "row_count": market_baseline.get("snapshot_row_count"),
+        "l1_missing_count": market_baseline.get("missing_symbols_count"),
         "restore_instructions": [
             "Stop the backend before restoring.",
             "Copy the backed-up .grit_backtest_platform.sqlite3 and companion market-data DB back to the repository root.",
@@ -249,6 +251,7 @@ def create_pit_price_preimage(
     preimage_path.write_text(json.dumps(preimage, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     price_bar_counts = {symbol: len(rows) for symbol, rows in price_rows_by_symbol.items()}
     coverage_counts = {symbol: len(rows) for symbol, rows in coverage_rows_by_symbol.items()}
+    market_baseline = snapshot_baseline(market_db)
     manifest = {
         "kind": "pit-price-preimage",
         "generated_at": utc_now(),
@@ -256,7 +259,9 @@ def create_pit_price_preimage(
         "source_dbs": {
             "market": str(market_db),
         },
-        "market_db": snapshot_baseline(market_db),
+        "market_db": market_baseline,
+        "row_count": market_baseline.get("snapshot_row_count"),
+        "l1_missing_count": market_baseline.get("missing_symbols_count"),
         "symbols": symbols,
         "outputs": {
             "preimage": str(preimage_path),

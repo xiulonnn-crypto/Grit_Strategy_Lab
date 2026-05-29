@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from grit_backtest_platform.market_data_repository import DATASET_PRICE_SNAPSHOT_ID
 from tests.api_test_support import assert_ok, create_test_client
+from tests.test_sec_424b2_parser import JPM_PRICING_SUPPLEMENT_INITIAL_VALUES_HTML
 
 
 def _runtime_dir(name: str) -> Path:
@@ -82,6 +83,18 @@ def _seed_price_snapshot(service, symbols: list[str], dates: list[str]) -> None:
         },
         price_bars=rows,
     )
+
+
+def _clear_underlying_initial_values(service, note_id: str) -> None:
+    service.storage.execute(
+        """
+        UPDATE structured_note_underlyings
+        SET initial_value = NULL, strike_value = NULL
+        WHERE note_id = ?
+        """,
+        (note_id,),
+    )
+    service._invalidate_structured_note_f1_static_cache(note_id)
 
 
 def test_f1_static_cache_lru_eviction_logs_debug_note_id_and_bytes(monkeypatch, caplog) -> None:
@@ -188,3 +201,97 @@ def test_replay_preflight_stops_on_memory_guardrail(monkeypatch) -> None:
 
     assert response["status"] == "MEMORY_GUARDRAIL_BLOCKED"
     assert "f1_static_cache_memory_guardrail_exceeded" in response["summary"]["warnings"]
+
+
+def test_replay_preflight_sandbox_initial_value_proxy_is_explicit_and_audited() -> None:
+    client, _db_path = create_test_client(_runtime_dir("structured-note-preflight-initial-proxy"))
+    parsed = _persist_note(client, accession_suffix=15401, tickers=["AAPL", "MSFT"])
+    note_id = parsed["note"]["note_id"]
+    service = client.app.state.service
+    _clear_underlying_initial_values(service, note_id)
+    _seed_price_snapshot(service, ["AAPL", "MSFT"], ["2026-01-30", "2026-02-27"])
+
+    blocked = assert_ok(
+        client.post(
+            "/structured-notes/fcn/replay/preflight",
+            json={
+                "note_ids": [note_id],
+                "start_date": "2026-01-01",
+                "end_date": "2026-02-28",
+            },
+        )
+    )
+    assert blocked["status"] == "DATA_SOURCE_BLOCKED"
+    assert blocked["note_results"][0]["blocker_code"] == "missing_initial_value"
+    assert set(blocked["note_results"][0]["missing_initial_value_symbols"]) == {"AAPL", "MSFT"}
+    assert blocked["note_results"][0]["initial_value_proxy_count"] == 0
+
+    proxied = assert_ok(
+        client.post(
+            "/structured-notes/fcn/replay/preflight",
+            json={
+                "note_ids": [note_id],
+                "start_date": "2026-01-01",
+                "end_date": "2026-02-28",
+                "initial_value_proxy_mode": "SANDBOX_ONLY_FIRST_PRICE",
+            },
+        )
+    )
+
+    assert proxied["status"] == "WARN"
+    assert proxied["data_source_blocked_count"] == 0
+    assert proxied["summary"]["preflight_only"] is True
+    assert proxied["summary"]["sandbox_initial_value_proxy_used"] is True
+    assert proxied["summary"]["initial_value_proxy_count"] == 2
+    assert "SANDBOX_ONLY_INITIAL_VALUE_PROXY_USED" in proxied["summary"]["warnings"]
+    note_result = proxied["note_results"][0]
+    assert note_result["status"] == "OK"
+    assert note_result["blocker_code"] is None
+    assert note_result["initial_value_proxy_mode"] == "SANDBOX_ONLY_FIRST_PRICE"
+    assert note_result["initial_value_proxy_count"] == 2
+    assert set(note_result["initial_value_proxy_symbols"]) == {"AAPL", "MSFT"}
+    assert {item["source"] for item in note_result["initial_value_proxy_evidence"]} == {
+        "dataset_price_bars.adj_close"
+    }
+    underlyings = service.storage.fetch_all(
+        "SELECT ticker, initial_value, strike_value FROM structured_note_underlyings WHERE note_id = ?",
+        (note_id,),
+    )
+    assert all(row["initial_value"] is None and row["strike_value"] is None for row in underlyings)
+    replay_rows = service.storage.fetch_all("SELECT * FROM structured_note_replay_runs")
+    assert replay_rows == []
+
+
+def test_replay_preflight_uses_parser_initial_values_without_sandbox_proxy() -> None:
+    client, _db_path = create_test_client(_runtime_dir("structured-note-preflight-parser-initial-values"))
+    parsed = assert_ok(
+        client.post(
+            "/structured-notes/sec-424b2/parse-preview",
+            json={
+                "issuer_cik": "0001665650",
+                "accession_number": "0001918704-26-014078",
+                "html": JPM_PRICING_SUPPLEMENT_INITIAL_VALUES_HTML,
+                "persist": True,
+            },
+        )
+    )
+    service = client.app.state.service
+    _seed_price_snapshot(service, ["RTY", "SPX", "KRE"], ["2026-01-30", "2026-02-27"])
+
+    response = assert_ok(
+        client.post(
+            "/structured-notes/fcn/replay/preflight",
+            json={
+                "note_ids": [parsed["note"]["note_id"]],
+                "start_date": "2026-01-01",
+                "end_date": "2026-02-28",
+            },
+        )
+    )
+
+    assert response["status"] == "OK"
+    assert response["summary"]["initial_value_proxy_count"] == 0
+    assert response["summary"]["sandbox_initial_value_proxy_used"] is False
+    assert "SANDBOX_ONLY_INITIAL_VALUE_PROXY_USED" not in response["summary"]["warnings"]
+    assert response["data_source_blocked_count"] == 0
+    assert response["note_results"][0]["initial_value_proxy_count"] == 0

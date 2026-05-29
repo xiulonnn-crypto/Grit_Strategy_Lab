@@ -8,13 +8,16 @@ domain contract stays review-gated.
 from __future__ import annotations
 
 import csv
+import datetime as _dt
 import hashlib
 import io
 import json
+import posixpath
 import re
 import zipfile
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
+from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
 
@@ -80,6 +83,15 @@ FAMA_FRENCH_DATASET_DOWNLOADS: Mapping[str, str] = {
     ),
 }
 
+AQR_DATASET_DOWNLOADS: Mapping[str, str] = {
+    "aqr_public_style_factors": (
+        "https://www.aqr.com/-/media/AQR/Documents/Insights/Data-Sets/"
+        "Quality-Minus-Junk-Factors-Daily.xlsx"
+    ),
+}
+
+AQR_QMJ_SHEET_NAME = "QMJ Factors"
+
 FAMA_FRENCH_FACTOR_NAMES: Mapping[str, str] = {
     "Mkt-RF": "Market excess return",
     "SMB": "Size factor",
@@ -93,6 +105,10 @@ FIELD_ALIASES: Mapping[str, tuple[str, ...]] = {
     "date": ("date", "as_of", "month", "period", "observation_date", "trade_date"),
     "factor_id": ("factor_id", "factor", "factor_code", "code", "signal_id", "name"),
     "factor_name": ("factor_name", "factor_label", "label", "description", "long_name"),
+    "zoo": ("zoo", "alpha_zoo", "library", "catalog"),
+    "formula": ("formula", "expression", "dsl", "alpha_formula"),
+    "rank_ic": ("rank_ic", "ic", "mean_ic", "bench_ic"),
+    "bench_classification": ("bench_classification", "classification", "bench_status", "alive_status"),
     "symbol": ("symbol", "ticker", "permno", "secid", "asset", "security"),
     "value": ("value", "factor_value", "return", "ret", "score", "weight"),
     "frequency": ("frequency", "freq", "periodicity"),
@@ -188,20 +204,22 @@ PUBLIC_FACTOR_SOURCE_REGISTRY: tuple[PublicFactorSource, ...] = (
     PublicFactorSource(
         source_id="aqr",
         label="AQR Data Sets",
-        status="manual_upload_required",
-        license_mode="license/manual_upload",
-        intake_policy="operator_attested_manual_upload_only",
+        status="available",
+        license_mode="public_research/license_required",
+        intake_policy="download_or_manual_upload_review",
         datasets=(
             PublicFactorSourceDataset(
                 dataset_id="aqr_public_style_factors",
                 label="AQR style and alternative factors",
-                frequency="varies",
-                availability="license/manual_upload",
-                allowed_intake_modes=("manual_upload",),
-                review_notes=("Operator must attest source license before review submission.",),
+                frequency="daily",
+                availability="license/public_dataset",
+                allowed_intake_modes=("manual_upload", "reviewed_import"),
+                review_notes=(
+                    "Uses the public AQR Quality Minus Junk daily workbook; operator must keep source/license citation.",
+                ),
             ),
         ),
-        notes=("No automated fetch is implied by this registry entry.",),
+        notes=("AQR QMJ daily can be pulled from the public workbook and remains review-gated before admission.",),
     ),
     PublicFactorSource(
         source_id="msci_facs",
@@ -238,6 +256,51 @@ PUBLIC_FACTOR_SOURCE_REGISTRY: tuple[PublicFactorSource, ...] = (
             ),
         ),
         notes=("Reference-only source; no direct factor data import is enabled.",),
+    ),
+    PublicFactorSource(
+        source_id="vibe_alpha_zoo",
+        label="Vibe Alpha Zoo",
+        status="available",
+        license_mode="open_source_catalog",
+        intake_policy="catalog_manifest_raw_f2_only",
+        datasets=(
+            PublicFactorSourceDataset(
+                dataset_id="vibe_qlib158",
+                label="Vibe Qlib 158 Alpha catalog",
+                frequency="mixed",
+                availability="open_source_catalog",
+                allowed_intake_modes=("manual_upload", "reviewed_import"),
+                review_notes=("Formula catalog only; supported rows enter Raw_F2 and must pass WNZT before D2.",),
+            ),
+            PublicFactorSourceDataset(
+                dataset_id="vibe_alpha101",
+                label="Vibe Alpha101 catalog",
+                frequency="mixed",
+                availability="open_source_catalog",
+                allowed_intake_modes=("manual_upload", "reviewed_import"),
+                review_notes=("Formula catalog only; no direct factor-library writes.",),
+            ),
+            PublicFactorSourceDataset(
+                dataset_id="vibe_gtja191",
+                label="Vibe GTJA 191 catalog",
+                frequency="mixed",
+                availability="open_source_catalog",
+                allowed_intake_modes=("manual_upload", "reviewed_import"),
+                review_notes=("AST scan and bench classification are required before Raw_F2 staging.",),
+            ),
+            PublicFactorSourceDataset(
+                dataset_id="vibe_academic",
+                label="Vibe academic Alpha catalog",
+                frequency="mixed",
+                availability="open_source_catalog",
+                allowed_intake_modes=("manual_upload", "reviewed_import"),
+                review_notes=("Unsupported formulas remain blocked catalog evidence.",),
+            ),
+        ),
+        notes=(
+            "Inspired by HKUDS/Vibe-Trading Alpha Zoo catalog and bench flow.",
+            "Never writes directly to factor_definitions; only Raw_F2 candidates are staged.",
+        ),
     ),
 )
 
@@ -279,6 +342,21 @@ def build_public_factor_xlsx_template() -> TemplateArtifact:
 
 def fama_french_dataset_download_url(dataset_key: str) -> str | None:
     return FAMA_FRENCH_DATASET_DOWNLOADS.get(str(dataset_key or "").strip())
+
+
+def aqr_dataset_download_url(dataset_key: str) -> str | None:
+    return AQR_DATASET_DOWNLOADS.get(str(dataset_key or "").strip())
+
+
+def normalize_aqr_dataset_xlsx(content: bytes, *, dataset_key: str) -> str:
+    if str(dataset_key or "").strip() != "aqr_public_style_factors":
+        raise ValueError(f"AQR automatic normalization is not configured for dataset: {dataset_key}")
+    rows = _parse_aqr_qmj_daily_rows(content, dataset_key=dataset_key)
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=TEMPLATE_COLUMNS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue()
 
 
 def normalize_fama_french_dataset_zip(content: bytes, *, dataset_key: str) -> str:
@@ -338,6 +416,408 @@ def analyze_public_factor_upload_text(
             parsed_format=parsed_format,
         ),
     }
+
+
+VIBE_ALPHA_ZOO_SOURCE_URL = "https://github.com/HKUDS/Vibe-Trading"
+VIBE_ALPHA_ZOO_PARSER_VERSION = "vibe_alpha_zoo_manifest_v1"
+VIBE_ALPHA_ZOO_SUPPORTED_ZOOS = {"qlib158", "alpha101", "gtja191", "academic"}
+VIBE_ALLOWED_FUNCTIONS = {
+    "Abs",
+    "Correlation",
+    "Lag",
+    "Log",
+    "Max",
+    "Mean",
+    "Min",
+    "Neutralize",
+    "Rank",
+    "Residual",
+    "Return",
+    "Std",
+    "TS_Rank",
+    "TS_Return",
+    "TsRank",
+    "Winsorize",
+    "ZScore",
+}
+VIBE_FORBIDDEN_FORMULA_PATTERNS = (
+    "__",
+    "import",
+    "eval",
+    "exec",
+    "open(",
+    "read(",
+    "write(",
+    "to_csv",
+    "to_pickle",
+    "os.",
+    "sys.",
+    "subprocess",
+    ";",
+)
+
+
+def analyze_vibe_alpha_zoo_manifest_text(
+    text: str | bytes,
+    *,
+    filename: str | None = None,
+    dataset_key: str = "vibe_alpha_zoo",
+    min_rank_ic: float = 0.02,
+) -> dict[str, Any]:
+    raw_bytes, decoded = _coerce_upload_text(text)
+    parsed_format, rows, columns = _parse_upload_rows(decoded, filename=filename)
+    normalized_rows = [
+        _normalize_vibe_alpha_row(row, dataset_key=dataset_key, index=index, min_rank_ic=min_rank_ic)
+        for index, row in enumerate(rows, start=1)
+        if isinstance(row, Mapping)
+    ]
+    supported_rows = [row for row in normalized_rows if row["ast_status"] == "PASS"]
+    blocked_rows = [row for row in normalized_rows if row["ast_status"] != "PASS"]
+    classification_counts = _count_vibe_values(row["bench_classification"] for row in normalized_rows)
+    zoo_counts = _count_vibe_values(row["zoo"] for row in normalized_rows)
+    formulas_hash = hashlib.sha256(
+        json.dumps(
+            [
+                {
+                    "zoo": row["zoo"],
+                    "alpha_id": row["alpha_id"],
+                    "formula": row["formula"],
+                    "formula_hash": row["formula_hash"],
+                }
+                for row in normalized_rows
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "schema_version": PUBLIC_FACTOR_IMPORT_SCHEMA_VERSION,
+        "filename": filename or "",
+        "format": parsed_format,
+        "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        "row_count": len(normalized_rows),
+        "columns": columns,
+        "sample_rows": [dict(row) for row in normalized_rows[:5]],
+        "field_mapping_suggestions": suggest_public_factor_field_mapping(columns),
+        "catalog_manifest": {
+            "source": "HKUDS/Vibe-Trading",
+            "source_url": VIBE_ALPHA_ZOO_SOURCE_URL,
+            "dataset_key": dataset_key,
+            "parser_version": VIBE_ALPHA_ZOO_PARSER_VERSION,
+            "formula_count": len(normalized_rows),
+            "supported_formula_count": len(supported_rows),
+            "blocked_formula_count": len(blocked_rows),
+            "zoo_counts": zoo_counts,
+            "formula_hash": formulas_hash,
+            "ast_scan": {
+                "status": "PASS" if supported_rows and not blocked_rows else ("WARN" if supported_rows else "BLOCKED"),
+                "passed_count": len(supported_rows),
+                "blocked_count": len(blocked_rows),
+                "blocked_reasons": _count_vibe_values(
+                    reason
+                    for row in blocked_rows
+                    for reason in row.get("ast_reasons", [])
+                ),
+            },
+            "normalized_formulas": normalized_rows,
+        },
+        "bench_summary": {
+            "method": "vibe_alpha_zoo_rank_ic_manifest_v1",
+            "threshold": min_rank_ic,
+            "alive_count": int(classification_counts.get("alive", 0)),
+            "reversed_count": int(classification_counts.get("reversed", 0)),
+            "dead_count": int(classification_counts.get("dead", 0)),
+            "unbenchable_count": int(classification_counts.get("unbenchable", 0)),
+            "classification_counts": classification_counts,
+        },
+        "precheck": {
+            "status": "PRECHECK_READY" if supported_rows else "NEEDS_MAPPING",
+            "review_gate": PUBLIC_FACTOR_IMPORT_INITIAL_REVIEW_STATE,
+            "can_publish": False,
+            "direct_publish_allowed": False,
+            "parsed_format": parsed_format,
+            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "row_count": len(normalized_rows),
+            "columns": columns,
+            "sample_rows": [dict(row) for row in normalized_rows[:5]],
+            "field_mapping_suggestions": suggest_public_factor_field_mapping(columns),
+            "missing_required_fields": [] if supported_rows else ["formula"],
+            "required_next_steps": ["catalog_ast_review", "raw_f2_staging"],
+        },
+    }
+
+
+def _normalize_vibe_alpha_row(
+    row: Mapping[str, Any],
+    *,
+    dataset_key: str,
+    index: int,
+    min_rank_ic: float,
+) -> dict[str, Any]:
+    lookup = {_normalize_column(key): value for key, value in row.items()}
+
+    def pick(*keys: str) -> str:
+        for key in keys:
+            value = lookup.get(_normalize_column(key))
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return ""
+
+    zoo = pick("zoo", "alpha_zoo", "library", "catalog") or _zoo_from_vibe_dataset_key(dataset_key)
+    alpha_id = pick("alpha_id", "factor_id", "id", "name") or f"{zoo}_{index:03d}"
+    formula = pick("formula", "expression", "dsl", "alpha_formula")
+    formula_name = pick("formula_name", "factor_name", "name", "description") or alpha_id
+    rank_ic = _coerce_vibe_float(pick("rank_ic", "ic", "mean_ic", "bench_ic"))
+    classification = _classify_vibe_alpha(
+        pick("bench_classification", "classification", "bench_status", "alive_status"),
+        rank_ic=rank_ic,
+        min_rank_ic=min_rank_ic,
+    )
+    scan = _scan_vibe_formula(formula)
+    formula_hash = hashlib.sha256(formula.encode("utf-8")).hexdigest()[:16] if formula else ""
+    return {
+        "zoo": _normalize_factor_token(zoo),
+        "alpha_id": _normalize_factor_token(alpha_id),
+        "formula_name": formula_name,
+        "formula": formula,
+        "formula_hash": formula_hash,
+        "ast_status": scan["status"],
+        "ast_reasons": scan["reasons"],
+        "ast_functions": scan["functions"],
+        "rank_ic": rank_ic,
+        "bench_classification": classification,
+        "theme": pick("theme", "family", "category") or "alpha_zoo",
+        "universe": pick("universe", "market") or "US_EQUITY",
+        "notes": pick("notes", "note"),
+    }
+
+
+def _scan_vibe_formula(formula: str) -> dict[str, Any]:
+    text = str(formula or "").strip()
+    reasons: list[str] = []
+    if not text:
+        reasons.append("formula_missing")
+    lowered = text.lower()
+    for pattern in VIBE_FORBIDDEN_FORMULA_PATTERNS:
+        if pattern in lowered:
+            reasons.append(f"forbidden_token:{pattern}")
+    functions = sorted(set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", text)))
+    unknown_functions = [function for function in functions if function not in VIBE_ALLOWED_FUNCTIONS]
+    if unknown_functions:
+        reasons.extend(f"unsupported_function:{function}" for function in unknown_functions)
+    if text.count("(") != text.count(")"):
+        reasons.append("unbalanced_parentheses")
+    if len(text) > 500:
+        reasons.append("formula_too_long")
+    return {
+        "status": "PASS" if not reasons else "BLOCKED",
+        "reasons": reasons,
+        "functions": functions,
+    }
+
+
+def _classify_vibe_alpha(value: str, *, rank_ic: float | None, min_rank_ic: float) -> str:
+    normalized = _normalize_factor_token(value)
+    if normalized in {"alive", "reversed", "dead", "unbenchable"}:
+        return normalized
+    if rank_ic is None:
+        return "unbenchable"
+    if rank_ic >= min_rank_ic:
+        return "alive"
+    if rank_ic <= -min_rank_ic:
+        return "reversed"
+    return "dead"
+
+
+def _zoo_from_vibe_dataset_key(dataset_key: str) -> str:
+    normalized = str(dataset_key or "").lower()
+    for zoo in VIBE_ALPHA_ZOO_SUPPORTED_ZOOS:
+        if zoo in normalized:
+            return zoo
+    return "alpha_zoo"
+
+
+def _coerce_vibe_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _count_vibe_values(values: Iterable[Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        key = _normalize_factor_token(str(value or "")) or "unknown"
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _parse_aqr_qmj_daily_rows(content: bytes, *, dataset_key: str) -> list[dict[str, str]]:
+    headers: list[str] | None = None
+    normalized_rows: list[dict[str, str]] = []
+    for row in _iter_xlsx_sheet_rows(content, sheet_name=AQR_QMJ_SHEET_NAME):
+        cells = [str(cell or "").strip() for cell in row]
+        if not any(cells):
+            if headers and normalized_rows:
+                break
+            continue
+        first = cells[0].lstrip("\ufeff").strip()
+        if headers is None:
+            if first.upper() == "DATE" and any(cell for cell in cells[1:]):
+                headers = ["DATE", *cells[1:]]
+            continue
+        date_value = _normalize_aqr_date(first)
+        if not date_value:
+            if normalized_rows:
+                break
+            continue
+        for index, region in enumerate(headers[1:], start=1):
+            if not region or index >= len(cells):
+                continue
+            raw_value = cells[index]
+            if raw_value == "":
+                continue
+            try:
+                value = float(raw_value)
+            except ValueError:
+                continue
+            region_label = str(region).strip()
+            normalized_rows.append(
+                {
+                    "date": date_value,
+                    "factor_id": f"aqr_qmj_{_normalize_factor_token(region_label)}",
+                    "factor_name": f"AQR Quality Minus Junk {region_label}",
+                    "symbol": region_label,
+                    "value": f"{value:.12g}",
+                    "frequency": "daily",
+                    "source_dataset": dataset_key,
+                    "region": region_label,
+                    "notes": "AQR Quality Minus Junk daily workbook",
+                }
+            )
+    if not normalized_rows:
+        raise ValueError("AQR QMJ workbook did not contain parseable daily factor rows")
+    return normalized_rows
+
+
+def _iter_xlsx_sheet_rows(content: bytes, *, sheet_name: str) -> Iterable[list[str]]:
+    with zipfile.ZipFile(io.BytesIO(content), "r") as workbook:
+        shared_strings = _xlsx_shared_strings(workbook)
+        sheet_path = _xlsx_sheet_path(workbook, sheet_name=sheet_name)
+        with workbook.open(sheet_path) as handle:
+            for _event, row_element in ET.iterparse(handle, events=("end",)):
+                if _strip_xml_namespace(row_element.tag) != "row":
+                    continue
+                values_by_column: dict[int, str] = {}
+                for cell in row_element:
+                    if _strip_xml_namespace(cell.tag) != "c":
+                        continue
+                    ref = str(cell.attrib.get("r") or "")
+                    column_index = _xlsx_column_index(ref)
+                    if column_index <= 0:
+                        continue
+                    values_by_column[column_index] = _xlsx_cell_text(cell, shared_strings)
+                if values_by_column:
+                    max_column = max(values_by_column)
+                    yield [values_by_column.get(index, "") for index in range(1, max_column + 1)]
+                else:
+                    yield []
+                row_element.clear()
+
+
+def _xlsx_shared_strings(workbook: zipfile.ZipFile) -> list[str]:
+    if "xl/sharedStrings.xml" not in workbook.namelist():
+        return []
+    root = ET.fromstring(workbook.read("xl/sharedStrings.xml"))
+    strings: list[str] = []
+    for item in root:
+        if _strip_xml_namespace(item.tag) != "si":
+            continue
+        parts = [
+            text_node.text or ""
+            for text_node in item.iter()
+            if _strip_xml_namespace(text_node.tag) == "t"
+        ]
+        strings.append("".join(parts))
+    return strings
+
+
+def _xlsx_sheet_path(workbook: zipfile.ZipFile, *, sheet_name: str) -> str:
+    workbook_root = ET.fromstring(workbook.read("xl/workbook.xml"))
+    rel_id = ""
+    for sheet in workbook_root.iter():
+        if _strip_xml_namespace(sheet.tag) != "sheet":
+            continue
+        if str(sheet.attrib.get("name") or "") == sheet_name:
+            rel_id = str(sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id") or "")
+            break
+    if not rel_id:
+        return "xl/worksheets/sheet1.xml"
+    rel_root = ET.fromstring(workbook.read("xl/_rels/workbook.xml.rels"))
+    for rel in rel_root:
+        if str(rel.attrib.get("Id") or "") != rel_id:
+            continue
+        target = str(rel.attrib.get("Target") or "worksheets/sheet1.xml")
+        if target.startswith("/"):
+            return target.lstrip("/")
+        return posixpath.normpath(posixpath.join("xl", target))
+    return "xl/worksheets/sheet1.xml"
+
+
+def _xlsx_cell_text(cell: ET.Element, shared_strings: Sequence[str]) -> str:
+    cell_type = str(cell.attrib.get("t") or "")
+    if cell_type == "inlineStr":
+        return "".join(
+            text_node.text or ""
+            for text_node in cell.iter()
+            if _strip_xml_namespace(text_node.tag) == "t"
+        )
+    value_node = next((child for child in cell if _strip_xml_namespace(child.tag) == "v"), None)
+    value = value_node.text if value_node is not None else ""
+    if cell_type == "s":
+        try:
+            return shared_strings[int(value or "0")]
+        except (IndexError, ValueError):
+            return ""
+    return str(value or "")
+
+
+def _xlsx_column_index(ref: str) -> int:
+    letters = re.match(r"([A-Z]+)", ref.upper())
+    if not letters:
+        return 0
+    index = 0
+    for char in letters.group(1):
+        index = index * 26 + (ord(char) - ord("A") + 1)
+    return index
+
+
+def _strip_xml_namespace(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _normalize_aqr_date(value: str) -> str:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return ""
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y"):
+        try:
+            return _dt.datetime.strptime(cleaned, fmt).date().isoformat()
+        except ValueError:
+            continue
+    if cleaned.replace(".", "", 1).isdigit():
+        try:
+            serial = float(cleaned)
+        except ValueError:
+            return ""
+        # Excel's Windows date system uses 1899-12-30 as the serial-day origin.
+        return (_dt.date(1899, 12, 30) + _dt.timedelta(days=int(serial))).isoformat()
+    return ""
+
+
+def _normalize_factor_token(value: str) -> str:
+    token = re.sub(r"[^a-zA-Z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+    return token or "global"
 
 
 def _parse_fama_french_rows(text: str, *, dataset_key: str) -> list[dict[str, str]]:

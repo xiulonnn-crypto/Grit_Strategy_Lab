@@ -48,6 +48,8 @@ const CANONICAL_FACTOR_DISPLAY_NAMES: Record<string, string> = {
   s_size_cur_log: '对数市值 (当前) [Raw]',
   s_f2_mom_raw_cur_external_fama_french_us_research_factors_daily: '[外部] - Fama-French 美股研究日频因子 (Daily) [Refined]',
   s_f2_mom_raw_cur_external_fama_french_us_research_factors_monthly: '[外部] - Fama-French 美股研究月频因子 (Monthly) [Refined]',
+  s_f2_mom_raw_cur_external_aqr_public_style_factors: '[外部] - AQR 学术风格与替代因子 (日频) [精炼]',
+  aqr_public_style_factors: '[外部] - AQR 学术风格与替代因子 (日频) [精炼]',
   s_alpha_ffblend_resid_mkt_rank: '[综合] - FF3 风格复合基石 (等权) [Beta-Free]',
   s_alpha_valvol_blend_resid_std_rk: '[估值] - 下行风险调节-现金流回报比 (LTM/252d) [Refined-Rank]',
   s_alpha_vol_downsiderev_std_rk: '[风险] - 反向下行风险 Alpha (252d) [Refined-Rank]',

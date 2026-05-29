@@ -558,6 +558,34 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS structured_note_replay_batches (
+        id TEXT PRIMARY KEY,
+        batch_id TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'DATA_SOURCE_BLOCKED',
+        request_json TEXT NOT NULL DEFAULT '{}',
+        run_ids_json TEXT NOT NULL DEFAULT '[]',
+        note_results_json TEXT NOT NULL DEFAULT '[]',
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sec_424b2_ingestion_jobs (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'DRY_RUN_READY',
+        mode TEXT NOT NULL DEFAULT 'dry_run',
+        dry_run INTEGER NOT NULL DEFAULT 1,
+        request_json TEXT NOT NULL DEFAULT '{}',
+        accessions_json TEXT NOT NULL DEFAULT '[]',
+        actions_json TEXT NOT NULL DEFAULT '[]',
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS pit_preprocessing_runs (
         id TEXT PRIMARY KEY,
         run_id TEXT NOT NULL UNIQUE,
@@ -1254,6 +1282,14 @@ POST_MIGRATION_INDEX_STATEMENTS = [
     """
     CREATE INDEX IF NOT EXISTS idx_structured_note_replay_preflight_runs_recent
     ON structured_note_replay_preflight_runs(updated_at, run_id, status)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_structured_note_replay_batches_recent
+    ON structured_note_replay_batches(updated_at, batch_id, status)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_sec_424b2_ingestion_jobs_recent
+    ON sec_424b2_ingestion_jobs(updated_at, job_id, status)
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_structured_note_terms_parse_run

@@ -106,6 +106,8 @@ def test_pit_price_preimage_exports_only_target_symbols(tmp_path: Path) -> None:
     assert set(preimage["dataset_symbol_coverage"]) == {"AAA"}
     assert manifest["kind"] == "pit-price-preimage"
     assert manifest["market_db"]["missing_symbols_count"] == 2
+    assert manifest["row_count"] == 3
+    assert manifest["l1_missing_count"] == 2
     assert manifest["row_counts"]["price_bars_by_symbol"] == {"AAA": 1}
     assert manifest["row_counts"]["price_bars_total"] == 1
     assert manifest["row_counts"]["coverage_by_symbol"] == {"AAA": 1}
@@ -150,5 +152,7 @@ def test_full_pair_writes_manifest_with_restore_contract(tmp_path: Path) -> None
     assert manifest["kind"] == "full-pair"
     assert len(manifest["outputs"]) == 2
     assert manifest["market_db"]["snapshot_row_count"] == 3
+    assert manifest["row_count"] == 3
+    assert manifest["l1_missing_count"] == 2
     assert manifest["space_gate"]["min_free_after_gb"] == 0
     assert "Stop the backend before restoring." in manifest["restore_instructions"]

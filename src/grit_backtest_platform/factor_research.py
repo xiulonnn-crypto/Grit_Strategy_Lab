@@ -17,6 +17,8 @@ from uuid import uuid4
 
 from .external_factor_imports import (
     TEMPLATE_COLUMNS,
+    aqr_dataset_download_url,
+    analyze_vibe_alpha_zoo_manifest_text,
     build_public_factor_csv_template,
     build_public_factor_import_job_projection,
     build_public_factor_xlsx_template,
@@ -24,6 +26,7 @@ from .external_factor_imports import (
     get_public_factor_source,
     list_public_factor_source_registry,
     analyze_public_factor_upload_text,
+    normalize_aqr_dataset_xlsx,
     normalize_fama_french_dataset_zip,
 )
 from .factor_mining import factor_ir_from_rank_ic, infer_holding_period_from_expression
@@ -410,6 +413,7 @@ FACTOR_FAMILY_LABELS = {
     "val": "\u4f30\u503c",
     "vol": "\u98ce\u9669",
 }
+STANDARD_FRONTSTAGE_FACTOR_FAMILY_LABELS = {"动量", "规模", "估值", "质量", "风险", "情绪"}
 FACTOR_DISPLAY_NAME_V4_OVERRIDES = {
     "f1_price_close": "交易所 - 前复权收盘价 (原始)",
     "f1_price_adjclose": "交易所 - 前复权收盘价 (原始)",
@@ -438,6 +442,8 @@ FACTOR_DISPLAY_NAME_V4_OVERRIDES = {
     "s_size_cur_log": "对数市值 (当前) [Raw]",
     "s_f2_mom_raw_cur_external_fama_french_us_research_factors_daily": "[外部] - Fama-French 美股研究日频因子 (Daily) [Raw]",
     "s_f2_mom_raw_cur_external_fama_french_us_research_factors_monthly": "[外部] - Fama-French 美股研究月频因子 (Monthly) [Raw]",
+    "s_f2_mom_raw_cur_external_aqr_public_style_factors": "[外部] - AQR 学术风格与替代因子 (日频) [原始]",
+    "aqr_public_style_factors": "[外部] - AQR 学术风格与替代因子 (日频) [原始]",
     "s_alpha_ffblend_resid_mkt_rank": "[综合] - FF3 风格复合基石 (等权) [Beta-Free]",
     VALUE_VOL_WNZT_F3_FACTOR_ID: VALUE_VOL_WNZT_F3_FACTOR_NAME,
     "s_alpha_vol_downsiderev_std_rk": "[风险] - 反向下行风险 Alpha (252d) [Refined-Rank]",
@@ -1467,6 +1473,27 @@ def _descriptor_from_factor_id(factor_id: str, source: str = "") -> dict[str, st
     }
 
 
+def _factor_frontstage_family_label(
+    factor: Mapping[str, Any],
+    naming_projection: Mapping[str, Any] | None = None,
+) -> str:
+    projection = naming_projection if isinstance(naming_projection, Mapping) else factor
+    audit = projection.get("name_audit") if isinstance(projection.get("name_audit"), Mapping) else {}
+    components = audit.get("structured_components") if isinstance(audit.get("structured_components"), Mapping) else {}
+    style_family = str(components.get("style_family") or "").strip()
+    if style_family in STANDARD_FRONTSTAGE_FACTOR_FAMILY_LABELS:
+        return style_family
+    if style_family:
+        return "其他"
+    descriptor = factor.get("descriptor") if isinstance(factor.get("descriptor"), Mapping) else _descriptor_from_factor_id(
+        str(factor.get("id") or factor.get("factor_id") or ""),
+        str(factor.get("source") or ""),
+    )
+    category = str(descriptor.get("category") or "").strip()
+    category_label = FACTOR_FAMILY_LABELS.get(category, category or "自定义")
+    return category_label if category_label in STANDARD_FRONTSTAGE_FACTOR_FAMILY_LABELS else "其他"
+
+
 def _factor_display_window_label(window: Any) -> str:
     token = str(window or "").strip().lower()
     if not token:
@@ -2100,6 +2127,9 @@ def _factor_display_replace_governance_suffix(name: Any, governance_level: str) 
     text = str(name or "").strip()
     if not text:
         return text
+    if re.search(r"\[(?:原始|精炼)\]", text):
+        chinese_level = "精炼" if governance_level == "Refined" else "原始"
+        return re.sub(r"\[(?:原始|精炼)\]", f"[{chinese_level}]", text, count=1)
     pattern = r"\[(?:Raw|Refined)\]"
     if re.search(pattern, text):
         return re.sub(pattern, f"[{governance_level}]", text, count=1)
@@ -2320,27 +2350,51 @@ def factor_publish_metadata_v4(
     }
 
 
-FAMA_FRENCH_EXTERNAL_DATASET_DISPLAY_PROJECTIONS: dict[str, dict[str, str]] = {
+EXTERNAL_DATASET_DISPLAY_PROJECTIONS: dict[str, dict[str, str]] = {
     "fama_french_us_research_factors_daily": {
+        "source_id": "fama_french",
+        "source_label": "French-Data Library",
         "core_semantic": "Fama-French 美股研究日频因子",
         "short_name": "Fama-French 美股日频因子",
         "frequency_label": "Daily",
+        "frequency_key": "daily",
         "source_dataset": "external:fama_french_us_research_factors_daily",
+        "style_reason": "该数据源来自外部公开上传，与自研 Alpha 通过前缀区分，防止策略合成时产生误导。",
+        "semantic_reason": "保留 Fama-French 学术来源语义，让研究员一眼识别其学术标准 Beta/风格暴露角色。",
         "frequency_reason": "源数据标注为 daily，表示日频收益暴露。",
     },
     "fama_french_us_research_factors_monthly": {
+        "source_id": "fama_french",
+        "source_label": "French-Data Library",
         "core_semantic": "Fama-French 美股研究月频因子",
         "short_name": "Fama-French 美股月频因子",
         "frequency_label": "Monthly",
+        "frequency_key": "monthly",
         "source_dataset": "external:fama_french_us_research_factors_monthly",
+        "style_reason": "该数据源来自外部公开上传，与自研 Alpha 通过前缀区分，防止策略合成时产生误导。",
+        "semantic_reason": "保留 Fama-French 学术来源语义，让研究员一眼识别其学术标准 Beta/风格暴露角色。",
         "frequency_reason": "对应原始数据的 monthly 月频特性。",
+    },
+    "aqr_public_style_factors": {
+        "source_id": "aqr",
+        "source_label": "AQR Public Data",
+        "core_semantic": "AQR 学术风格与替代因子",
+        "short_name": "AQR 学术风格因子",
+        "frequency_label": "日频",
+        "frequency_key": "daily",
+        "source_dataset": "external:aqr_public_style_factors",
+        "refined_label": "精炼",
+        "raw_label": "原始",
+        "style_reason": "该数据源来自 AQR 外部公开数据，与自研 Alpha 通过前缀区分，防止策略合成时产生误导。",
+        "semantic_reason": "保留 AQR 学术风格与替代因子语义，让研究员一眼识别其学术 Beta / 风格暴露角色。",
+        "frequency_reason": "源数据为 AQR QMJ daily workbook，按日频收益暴露展示。",
     },
 }
 
 
-def _external_fama_french_dataset_key(*values: Any) -> str:
+def _external_dataset_display_projection_key(*values: Any) -> str:
     lookup_text = "|".join(str(value or "").lower() for value in values)
-    for dataset_key in FAMA_FRENCH_EXTERNAL_DATASET_DISPLAY_PROJECTIONS:
+    for dataset_key in EXTERNAL_DATASET_DISPLAY_PROJECTIONS:
         if dataset_key in lookup_text:
             return dataset_key
     return ""
@@ -2364,18 +2418,20 @@ def external_factor_import_display_projection_v1(
     frequency_text = str(frequency or "").strip().upper()
     metric_map = metrics if isinstance(metrics, Mapping) else {}
     governance_level = "Refined" if _factor_display_has_complete_wnzt(op_status) else "Raw"
-    fama_french_projection = FAMA_FRENCH_EXTERNAL_DATASET_DISPLAY_PROJECTIONS.get(dataset_lower)
-    if source_key == "fama_french" and fama_french_projection:
-        core_semantic = fama_french_projection["core_semantic"]
-        frequency_label = fama_french_projection["frequency_label"]
-        display_name = f"[外部] - {core_semantic} ({frequency_label}) [{governance_level}]"
-        short_name = fama_french_projection["short_name"]
+    dataset_projection = EXTERNAL_DATASET_DISPLAY_PROJECTIONS.get(dataset_lower)
+    if dataset_projection and (not source_key or source_key == dataset_projection.get("source_id")):
+        core_semantic = dataset_projection["core_semantic"]
+        frequency_label = dataset_projection["frequency_label"]
+        governance_display_label = dataset_projection.get(f"{governance_level.lower()}_label", governance_level)
+        display_name = f"[外部] - {core_semantic} ({frequency_label}) [{governance_display_label}]"
+        short_name = dataset_projection["short_name"]
         style_family = "[外部]"
-        source_label = "French-Data Library"
-        source_dataset = fama_french_projection["source_dataset"]
-        style_reason = "该数据源来自外部公开上传，与自研 Alpha 通过前缀区分，防止策略合成时产生误导。"
-        semantic_reason = "保留 Fama-French 学术来源语义，让研究员一眼识别其学术标准 Beta/风格暴露角色。"
-        frequency_reason = fama_french_projection["frequency_reason"]
+        source_label = dataset_projection["source_label"]
+        source_dataset = dataset_projection["source_dataset"]
+        style_reason = dataset_projection["style_reason"]
+        semantic_reason = dataset_projection["semantic_reason"]
+        frequency_reason = dataset_projection["frequency_reason"]
+        frequency_key = dataset_projection.get("frequency_key", frequency_label).lower()
     else:
         frequency_label = "Daily" if frequency_text == "DAILY" else ("Monthly" if frequency_text == "MONTHLY" else (frequency_text.title() or "当前"))
         source_label = str(source_name or source_id or "外部来源").strip()
@@ -2387,6 +2443,7 @@ def external_factor_import_display_projection_v1(
         style_reason = "来自外部公开或上传源，需与自研 Alpha 展示区分。"
         semantic_reason = "沿用来源数据集或字段名称，便于回溯 manifest 与 parser。"
         frequency_reason = "使用导入作业声明的频率作为窗口标签。"
+        frequency_key = frequency_label.lower()
     if governance_level == "Refined":
         governance_reason = "W/N/Z/T 算子灯已全部完成，作为 Refined_F2 展示。"
         governance_badges = ["外部", "B3 检疫", "WNZT"]
@@ -2429,7 +2486,7 @@ def external_factor_import_display_projection_v1(
             "尝试 TS_Mean(..., 5) 等时序平滑，再观察 RankICIR 与换手率是否改善。",
         ],
     }
-    collision_key = f"external:{source_key or source_label.lower()}:{dataset_lower or str(factor_id or '').lower()}:{frequency_label.lower()}"
+    collision_key = f"external:{source_key or source_label.lower()}:{dataset_lower or str(factor_id or '').lower()}:{frequency_key}"
     previous = str(previous_display_name or "").strip()
     aliases = [item for item in (previous, str(factor_name or "").strip(), dataset, source_dataset) if item and item != display_name]
     return {
@@ -2486,7 +2543,7 @@ def _external_import_publish_metadata_projection(
         name_audit = publish_metadata.get("name_audit") if isinstance(publish_metadata.get("name_audit"), Mapping) else {}
         components = name_audit.get("structured_components") if isinstance(name_audit.get("structured_components"), Mapping) else {}
         op_status = factor.get("op_status") if isinstance(factor.get("op_status"), Mapping) else None
-        dataset_key = _external_fama_french_dataset_key(
+        dataset_key = _external_dataset_display_projection_key(
             factor.get("id"),
             factor.get("expression"),
             factor.get("stored_name"),
@@ -2498,10 +2555,11 @@ def _external_import_publish_metadata_projection(
             components.get("core_semantic"),
         )
         if dataset_key:
+            dataset_projection = EXTERNAL_DATASET_DISPLAY_PROJECTIONS[dataset_key]
             return external_factor_import_display_projection_v1(
-                source_id="fama_french",
+                source_id=dataset_projection["source_id"],
                 dataset_key=dataset_key,
-                frequency="DAILY" if dataset_key.endswith("_daily") else "MONTHLY",
+                frequency=dataset_projection.get("frequency_key", dataset_projection["frequency_label"]).upper(),
                 factor_id=factor.get("id"),
                 factor_name=factor.get("stored_name") or factor.get("name") or display_name,
                 previous_display_name=display_name,
@@ -2556,13 +2614,19 @@ def _external_import_factor_display_projection(
     metadata_projection = _external_import_publish_metadata_projection(factor)
     if metadata_projection is not None:
         return metadata_projection
-    dataset_key = _external_fama_french_dataset_key(lookup_text)
+    dataset_key = _external_dataset_display_projection_key(lookup_text)
     if not dataset_key:
         return None
+    dataset_projection = EXTERNAL_DATASET_DISPLAY_PROJECTIONS.get(dataset_key, {})
+    source_id = str(dataset_projection.get("source_id") or factor.get("source_id") or "").strip()
+    default_frequency = str(
+        dataset_projection.get("frequency_key")
+        or ("DAILY" if dataset_key.endswith("_daily") else "MONTHLY")
+    ).upper()
     return external_factor_import_display_projection_v1(
-        source_id="fama_french",
+        source_id=source_id,
         dataset_key=dataset_key,
-        frequency=factor.get("frequency") or ("DAILY" if dataset_key.endswith("_daily") else "MONTHLY"),
+        frequency=factor.get("frequency") or default_frequency,
         factor_id=factor_id,
         factor_name=factor.get("stored_name") or factor.get("name") or factor_id,
         previous_display_name=factor.get("stored_name") or factor.get("name"),
@@ -6808,6 +6872,16 @@ def build_pit_data_overview(
         )
         if ready
     ]
+    pit_admission_covered = int(factor_admission_coverage.get("covered_symbol_count") or 0)
+    pit_admission_total = int(factor_admission_coverage.get("active_universe_symbol_count") or 0)
+    if pit_admission_total <= 0:
+        pit_admission_total = max(
+            pit_admission_covered + int(factor_admission_coverage.get("repair_symbol_count") or 0),
+            coverage_total,
+        )
+    if pit_admission_covered <= 0 and pit_admission_total > 0 and admission_status in {"READY", "REPAIR"}:
+        pit_admission_covered = max(0, pit_admission_total - int(factor_admission_coverage.get("repair_symbol_count") or 0))
+    full_ready_missing_count = max(0, coverage_total - coverage_ready)
     quality_blocked_checks = [
         check_id
         for check_id, ready in (
@@ -6936,16 +7010,22 @@ def build_pit_data_overview(
             ),
             "pit_alignment": "使用复权价、价格历史和收益序列进行 PIT 回放。",
             "metrics": [
-                {"label": "价格行", "value": int(counts.get("price_bars") or 0)},
-                {"label": "覆盖标的", "value": f"{coverage_ready}/{coverage_total}"},
-                {"label": "PIT目标", "value": f"{coverage_ready}/{coverage_total}"},
+                {"metric_id": "price_bar_rows", "label": "价格行", "value": int(counts.get("price_bars") or 0)},
+                {"metric_id": "pit_admission_target", "label": "PIT目标", "value": f"{pit_admission_covered}/{pit_admission_total}"},
                 {
+                    "metric_id": "full_ready_target",
+                    "label": "Full Ready归档",
+                    "value": f"{coverage_ready}/{coverage_total}",
+                    "missing_count": full_ready_missing_count,
+                },
+                {
+                    "metric_id": "benchmark_etf",
                     "label": "基准ETF",
                     "value": f"{benchmark_overlay_ready}/{benchmark_overlay_total}",
                     "symbols": list(benchmark_overlay_symbols),
                     "ready_symbols": benchmark_overlay_ready_symbols,
                 },
-                {"label": "历史锚点", "value": history_summary.historical_count},
+                {"metric_id": "historical_anchor_rows", "label": "历史锚点", "value": history_summary.historical_count},
             ],
             "blockers": [
                 item["message"]
@@ -7561,11 +7641,18 @@ class FactorResearchService:
         content_type: str | None,
         sample_limit: int = 5,
     ) -> dict[str, Any]:
-        analysis = analyze_public_factor_upload_text(
-            content_text,
-            filename=filename,
-            sample_limit=sample_limit,
-        )
+        if self._normalize_external_source_id(source_id) == "vibe_alpha_zoo":
+            analysis = analyze_vibe_alpha_zoo_manifest_text(
+                content_text,
+                filename=filename,
+                dataset_key=dataset_key,
+            )
+        else:
+            analysis = analyze_public_factor_upload_text(
+                content_text,
+                filename=filename,
+                sample_limit=sample_limit,
+            )
         manifest = self._external_manifest_from_analysis(analysis, template_key=dataset_key)
         mapping_rows = self._external_mapping_rows_from_analysis(analysis)
         file_id = f"extfile_{uuid4().hex[:12]}"
@@ -7609,17 +7696,26 @@ class FactorResearchService:
         dataset_key: str,
     ) -> dict[str, str]:
         source_id = str(source.get("source_id") or "")
-        if source_id != "fama_french":
+        if source_id == "fama_french":
+            download_url = fama_french_dataset_download_url(dataset_key)
+            source_label = "Fama-French"
+            timeout = 20
+            normalizer = normalize_fama_french_dataset_zip
+        elif source_id == "aqr":
+            download_url = aqr_dataset_download_url(dataset_key)
+            source_label = "AQR"
+            timeout = 90
+            normalizer = normalize_aqr_dataset_xlsx
+        else:
             raise ValueError(f"automatic download is not implemented for external source: {source_id}")
-        download_url = fama_french_dataset_download_url(dataset_key)
         if not download_url:
             raise ValueError(f"automatic download is not configured for external dataset: {dataset_key}")
         try:
-            with urllib.request.urlopen(download_url, timeout=20) as response:
+            with urllib.request.urlopen(download_url, timeout=timeout) as response:
                 archive_bytes = response.read()
         except Exception as exc:  # pragma: no cover - exact urllib failures vary by host policy.
-            raise ValueError(f"Fama-French source download failed: {exc}") from exc
-        normalized_csv = normalize_fama_french_dataset_zip(archive_bytes, dataset_key=dataset_key)
+            raise ValueError(f"{source_label} source download failed: {exc}") from exc
+        normalized_csv = normalizer(archive_bytes, dataset_key=dataset_key)
         return {
             "filename": f"{dataset_key}.csv",
             "content_text": normalized_csv,
@@ -7708,9 +7804,15 @@ class FactorResearchService:
         job_id = f"extimp_{uuid4().hex[:12]}"
         now = iso_now()
         review_status = self._external_review_status_from_mapping(mapping_rows)
+        if source_id == "vibe_alpha_zoo":
+            review_status = self._vibe_alpha_zoo_review_status(manifest)
         frequency = self._external_frequency(dataset.get("frequency"), fallback=payload.get("frequency"))
         risk_flags = self._external_import_risk_flags(source, manifest, mapping_rows)
-        next_actions = self._external_import_next_actions(review_status)
+        next_actions = (
+            ["inspect_manifest", "submit_review"]
+            if source_id == "vibe_alpha_zoo" and review_status == "READY_FOR_REVIEW"
+            else self._external_import_next_actions(review_status)
+        )
         if import_mode == "SOURCE_MANIFEST":
             review_status = "PENDING_REVIEW"
             next_actions = ["upload_source_file", "inspect_manifest"]
@@ -7791,13 +7893,21 @@ class FactorResearchService:
         mapping_rows = payload.get("mapping_rows")
         if not isinstance(mapping_rows, list):
             raise ValueError("mapping_rows must be a list")
+        source_id = self._normalize_external_source_id(row.get("source_id"))
+        manifest = loads(row.get("manifest_json"), {})
         review_status = str(payload.get("review_status") or self._external_review_status_from_mapping(mapping_rows))
+        if source_id == "vibe_alpha_zoo":
+            review_status = self._vibe_alpha_zoo_review_status(manifest)
         risk_flags = self._external_import_risk_flags(
             {"license_mode": row.get("source_id"), "status": ""},
-            loads(row.get("manifest_json"), {}),
+            manifest,
             mapping_rows,
         )
-        next_actions = self._external_import_next_actions(review_status)
+        next_actions = (
+            ["inspect_manifest", "submit_review"]
+            if source_id == "vibe_alpha_zoo" and review_status == "READY_FOR_REVIEW"
+            else self._external_import_next_actions(review_status)
+        )
         now = iso_now()
         self.storage.execute(
             """
@@ -7815,13 +7925,18 @@ class FactorResearchService:
         if not row:
             raise KeyError(f"External factor import job not found: {job_id}")
         mapping_rows = loads(row.get("mapping_rows_json"), [])
-        if self._external_review_status_from_mapping(mapping_rows) == "NEEDS_MAPPING":
-            raise ValueError("semantic mapping must cover date, factor_id, and value before review submission")
+        source_id = self._normalize_external_source_id(row.get("source_id"))
         manifest = loads(row.get("manifest_json"), {})
+        is_vibe_alpha_zoo = source_id == "vibe_alpha_zoo"
+        if not is_vibe_alpha_zoo and self._external_review_status_from_mapping(mapping_rows) == "NEEDS_MAPPING":
+            raise ValueError("semantic mapping must cover date, factor_id, and value before review submission")
+        if is_vibe_alpha_zoo and self._vibe_alpha_zoo_supported_formula_count(manifest) <= 0:
+            raise ValueError("Vibe Alpha Zoo manifest must include at least one AST-supported formula before Raw_F2 staging")
         risk_flags = loads(row.get("risk_flags_json"), [])
         if self._external_import_source_manifest_blocked(row, manifest, risk_flags):
             raise ValueError("外部因子源文件尚未物化，不能提交 B3 检疫；请先完成真实文件下载或本地上传。")
         now = iso_now()
+        next_actions = ["raw_f2_batch_created", "wnzt_refinement_required"] if is_vibe_alpha_zoo else ["b3_quarantine_intake", "b3_quarantine_run"]
         self.storage.execute(
             """
             UPDATE external_factor_import_jobs
@@ -7833,18 +7948,28 @@ class FactorResearchService:
             (
                 now,
                 now,
-                dumps(["b3_quarantine_intake", "b3_quarantine_run"]),
+                dumps(next_actions),
                 str(job_id),
             ),
         )
-        self.materialize_external_factor_import_review_submissions(job_id=str(job_id), limit=1)
+        if is_vibe_alpha_zoo:
+            refreshed = self.storage.fetch_one("SELECT * FROM external_factor_import_jobs WHERE id = ?", (str(job_id),))
+            if refreshed:
+                self._materialize_vibe_alpha_zoo_raw_f2_batch(refreshed)
+        else:
+            self.materialize_external_factor_import_review_submissions(job_id=str(job_id), limit=1)
         return self.get_external_factor_import_job(job_id)
 
-    def _ensure_external_import_auto_download_materialized(self, row: Mapping[str, Any]) -> Mapping[str, Any]:
+    def materialize_external_factor_import_source_file(self, job_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one("SELECT * FROM external_factor_import_jobs WHERE id = ?", (str(job_id),))
+        if not row:
+            raise KeyError(f"External factor import job not found: {job_id}")
         if str(row.get("file_id") or "").strip():
-            return row
-        if str(row.get("import_mode") or "").upper() != "AUTO_DOWNLOAD":
-            return row
+            return self.get_external_factor_import_job(str(job_id))
+        materialized = self._materialize_external_import_download_for_row(row)
+        return self.get_external_factor_import_job(str(materialized.get("id") or job_id))
+
+    def _materialize_external_import_download_for_row(self, row: Mapping[str, Any]) -> Mapping[str, Any]:
         source_id = self._normalize_external_source_id(row.get("source_id"))
         dataset_key = str(row.get("dataset_key") or "").strip()
         source, dataset = self._external_factor_source_and_dataset(source_id, dataset_key)
@@ -7879,25 +8004,34 @@ class FactorResearchService:
             "download_url": download_payload.get("download_url"),
         }
         risk_flags = self._external_import_risk_flags(source, manifest, mapping_rows)
+        review_status = self._external_review_status_from_mapping(mapping_rows)
+        next_actions = self._external_import_next_actions(review_status)
         now = iso_now()
         with self.storage.connection() as conn:
             conn.execute(
                 """
                 UPDATE external_factor_import_jobs
                 SET file_id = ?,
+                    import_mode = 'AUTO_DOWNLOAD',
+                    status = 'REVIEW_GATED',
+                    review_status = ?,
+                    submitted_at = NULL,
                     manifest_json = ?,
                     mapping_rows_json = ?,
                     artifact_paths_json = ?,
                     risk_flags_json = ?,
+                    next_actions_json = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
                 (
                     file_id,
+                    review_status,
                     dumps(manifest),
                     dumps(mapping_rows),
                     dumps(artifact_paths),
                     dumps(risk_flags),
+                    dumps(next_actions),
                     now,
                     row.get("id"),
                 ),
@@ -7923,6 +8057,313 @@ class FactorResearchService:
                 ),
             )
         return self.storage.fetch_one("SELECT * FROM external_factor_import_jobs WHERE id = ?", (row.get("id"),)) or row
+
+    def _ensure_external_import_auto_download_materialized(self, row: Mapping[str, Any]) -> Mapping[str, Any]:
+        if str(row.get("file_id") or "").strip():
+            return row
+        if str(row.get("import_mode") or "").upper() != "AUTO_DOWNLOAD":
+            return row
+        return self._materialize_external_import_download_for_row(row)
+
+    @staticmethod
+    def _vibe_alpha_zoo_supported_formula_count(manifest: Mapping[str, Any]) -> int:
+        catalog = manifest.get("catalog_manifest") if isinstance(manifest.get("catalog_manifest"), Mapping) else {}
+        if not isinstance(catalog, Mapping):
+            return 0
+        normalized = catalog.get("normalized_formulas")
+        if isinstance(normalized, Sequence) and not isinstance(normalized, (str, bytes)):
+            supported = [
+                row
+                for row in normalized
+                if isinstance(row, Mapping)
+                and str(row.get("ast_status") or "").upper() == "PASS"
+                and str(row.get("formula") or "").strip()
+            ]
+            return len(supported)
+        return int(_coerce_float(catalog.get("supported_formula_count"), 0.0))
+
+    @classmethod
+    def _vibe_alpha_zoo_review_status(cls, manifest: Mapping[str, Any]) -> str:
+        return "READY_FOR_REVIEW" if cls._vibe_alpha_zoo_supported_formula_count(manifest) > 0 else "NEEDS_MAPPING"
+
+    def _materialize_vibe_alpha_zoo_raw_f2_batch(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        manifest = loads(row.get("manifest_json"), {})
+        catalog = manifest.get("catalog_manifest") if isinstance(manifest.get("catalog_manifest"), Mapping) else {}
+        bench_summary = manifest.get("bench_summary") if isinstance(manifest.get("bench_summary"), Mapping) else {}
+        normalized = catalog.get("normalized_formulas") if isinstance(catalog, Mapping) else []
+        supported_rows = [
+            dict(item)
+            for item in normalized
+            if isinstance(item, Mapping)
+            and str(item.get("ast_status") or "").upper() == "PASS"
+            and str(item.get("formula") or "").strip()
+        ]
+        if not supported_rows:
+            raise ValueError("Vibe Alpha Zoo manifest has no AST-supported formulas to stage as Raw_F2")
+
+        job_id = str(row.get("id") or "").strip()
+        source_id = self._normalize_external_source_id(row.get("source_id"))
+        dataset_key = str(row.get("dataset_key") or "vibe_alpha_zoo").strip()
+        batch_hash = hashlib.sha1(f"{job_id}|{dataset_key}|{catalog.get('formula_hash') or ''}".encode("utf-8")).hexdigest()[:12]
+        mining_job_id = f"mine_vibe_{batch_hash}"
+        run_id = f"ffr_vibe_{batch_hash}"
+        now = iso_now()
+        artifact_dir = Path("artifacts") / "factor-factory" / "external-alpha-zoo" / job_id
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        raw_ledger_path = artifact_dir / "raw-f2-candidates.json"
+        manifest_path = artifact_dir / "formula-manifest.json"
+        artifact_refs = {
+            "formula_manifest": str(manifest_path),
+            "raw_f2_candidate_ledger": str(raw_ledger_path),
+        }
+
+        candidates: list[dict[str, Any]] = []
+        for index, formula_row in enumerate(supported_rows, start=1):
+            formula = str(formula_row.get("formula") or "").strip()
+            alpha_id = str(formula_row.get("alpha_id") or f"alpha_{index:03d}").strip()
+            formula_hash = str(formula_row.get("formula_hash") or hashlib.sha256(formula.encode("utf-8")).hexdigest()[:16])
+            candidate_id = f"cand_vibe_{hashlib.sha1(f'{job_id}|{alpha_id}|{formula_hash}'.encode('utf-8')).hexdigest()[:12]}"
+            rank_ic = _safe_round(_coerce_float(formula_row.get("rank_ic"), 0.0), 6) or 0.0
+            holding_period = infer_holding_period_from_expression(formula)
+            score = abs(rank_ic) if abs(rank_ic) > 0 else 0.001
+            candidates.append(
+                {
+                    "id": candidate_id,
+                    "candidate_id": candidate_id,
+                    "rank": index,
+                    "expression": formula,
+                    "raw_expression": formula,
+                    "score": _safe_round(score, 6) or score,
+                    "rank_ic": rank_ic,
+                    "pure_rank_ic": rank_ic,
+                    "ir": _safe_round(factor_ir_from_rank_ic(rank_ic, holding_period), 6) or 0.0,
+                    "holding_period": holding_period,
+                    "newey_west_lags": max(0, holding_period - 1),
+                    "turnover": 0.0,
+                    "coverage": 100.0,
+                    "depth": 1,
+                    "fitness_score": _safe_round(score, 6) or score,
+                    "max_style_correlation": 0.0,
+                    "correlation_penalty": 0.0,
+                    "max_drawdown_pct": 0.0,
+                    "benchmark_max_drawdown_pct": 0.0,
+                    "drawdown_vs_benchmark_ratio": 0.0,
+                    "raw_f2": True,
+                    "refined_f2": False,
+                    "wnzt_complete": False,
+                    "wnzt_missing": ["winsorize", "neutralize", "zscore", "ts_rank"],
+                    "wnzt_evidence": {
+                        "complete": False,
+                        "source": "VIBE_ALPHA_ZOO_RAW_F2",
+                        "reason": "External formula catalog is staged as Raw_F2 and must pass WNZT before D2 quarantine.",
+                    },
+                    "pipeline_version": "external_alpha_zoo_raw_f2_v1",
+                    "generation_mode": "EXTERNAL_ALPHA_ZOO",
+                    "source": "PUBLIC_FACTOR_IMPORT",
+                    "external_import_job_id": job_id,
+                    "external_source_id": source_id,
+                    "external_dataset_key": dataset_key,
+                    "catalog_source": "vibe_alpha_zoo",
+                    "zoo": str(formula_row.get("zoo") or ""),
+                    "alpha_id": alpha_id,
+                    "formula_name": str(formula_row.get("formula_name") or alpha_id),
+                    "formula_hash": formula_hash,
+                    "ast_metadata": {
+                        "status": formula_row.get("ast_status"),
+                        "functions": list(formula_row.get("ast_functions") or []),
+                        "reasons": list(formula_row.get("ast_reasons") or []),
+                    },
+                    "bench_classification": str(formula_row.get("bench_classification") or "unbenchable"),
+                    "theme": str(formula_row.get("theme") or "alpha_zoo"),
+                    "universe": str(formula_row.get("universe") or "US_EQUITY"),
+                    "target_layer": "L2",
+                    "source_factor_ids": [f"vibe_alpha_zoo:{dataset_key}:{alpha_id}"],
+                    "publish_boundary": "D2_QUARANTINE_ONLY",
+                    "persisted_to_factor_definitions": False,
+                    "processing_status": "RAW_F2_STAGED",
+                    "processing_status_label": "Raw_F2 pending WNZT",
+                    "artifact_refs": artifact_refs,
+                }
+            )
+
+        formula_count = int(catalog.get("formula_count") or len(normalized) or len(candidates))
+        ledger_hash = hashlib.sha256(
+            dumps(
+                {
+                    "job_id": mining_job_id,
+                    "source_job_id": job_id,
+                    "candidate_ids": [candidate["id"] for candidate in candidates],
+                    "formula_hash": catalog.get("formula_hash"),
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        batch_manifest = {
+            "job_id": mining_job_id,
+            "source_job_id": job_id,
+            "run_id": run_id,
+            "formula_count": formula_count,
+            "raw_f2_count": len(candidates),
+            "refined_count": 0,
+            "hash": ledger_hash,
+            "created_at": now,
+            "source": "HKUDS/Vibe-Trading",
+            "dataset_key": dataset_key,
+        }
+        manifest_path.write_text(dumps(batch_manifest), encoding="utf-8")
+        raw_ledger_path.write_text(
+            dumps(
+                {
+                    **batch_manifest,
+                    "candidate_count": len(candidates),
+                    "candidates": candidates,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        top_candidates = candidates[:50]
+        operator_engine = {
+            "backend": "vibe_alpha_zoo_manifest",
+            "source": "vibe_alpha_zoo",
+            "source_url": catalog.get("source_url") or "https://github.com/HKUDS/Vibe-Trading",
+            "parser_version": catalog.get("parser_version") or "vibe_alpha_zoo_manifest_v1",
+            "generated_formula_count": formula_count,
+            "deduped_formula_count": len(candidates),
+            "raw_f2_batch_delivered_count": len(candidates),
+            "refined_f2_batch_delivered_count": 0,
+            "top_preview_count": len(top_candidates),
+            "bench_summary": dict(bench_summary),
+            "ast_scan": dict(catalog.get("ast_scan") or {}),
+            "artifact_refs": artifact_refs,
+        }
+        progress = {
+            "total_candidates": len(candidates),
+            "evaluated_candidates": len(candidates),
+            "failed_candidates": max(0, formula_count - len(candidates)),
+            "throughput_per_second": float(len(candidates)),
+            "percent": 100.0,
+        }
+        self.storage.insert_json_row(
+            "factor_mining_jobs",
+            {
+                "id": mining_job_id,
+                "status": "COMPLETED",
+                "request_json": dumps(
+                    {
+                        "universe": "US_EQUITY",
+                        "operators": ["EXTERNAL_ALPHA_ZOO"],
+                        "generation_mode": "EXTERNAL_ALPHA_ZOO",
+                        "source_factor_ids": [f"vibe_alpha_zoo:{dataset_key}"],
+                        "external_import_job_id": job_id,
+                        "candidate_count": len(candidates),
+                        "operator_engine": operator_engine,
+                    }
+                ),
+                "progress_json": dumps(progress),
+                "summary_json": dumps(
+                    {
+                        "generation_mode": "EXTERNAL_ALPHA_ZOO",
+                        "persisted_to_factor_definitions": False,
+                        "top_candidate_count": len(top_candidates),
+                        "failed_sample_count": 0,
+                        "operator_engine": operator_engine,
+                    }
+                ),
+                "top_candidates_json": dumps(top_candidates),
+                "failed_samples_json": dumps([]),
+                "created_at": now,
+                "updated_at": now,
+                "completed_at": now,
+                "error_message": None,
+            },
+        )
+        candidate_rows = [
+            (
+                str(candidate["id"]),
+                mining_job_id,
+                str(candidate["expression"]),
+                _coerce_float(candidate.get("fitness_score"), _coerce_float(candidate.get("rank_ic"))),
+                _coerce_float(candidate.get("rank_ic")),
+                _coerce_float(candidate.get("turnover")),
+                _coerce_float(candidate.get("coverage")),
+                int(_coerce_float(candidate.get("depth"), 1.0)),
+                dumps([]),
+                dumps(candidate),
+                now,
+            )
+            for candidate in candidates
+        ]
+        self.storage.executemany(
+            """
+            INSERT OR REPLACE INTO factor_mining_candidates (
+                id, job_id, expression, score, rank_ic, turnover, coverage,
+                depth, risk_flags_json, summary_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            candidate_rows,
+        )
+        self.storage.insert_json_row(
+            "factor_factory_runs",
+            {
+                "id": run_id,
+                "profile_id": "default",
+                "run_date": now[:10],
+                "trigger": "MANUAL",
+                "status": "COMPLETED",
+                "request_json": dumps({"generation_mode": "EXTERNAL_ALPHA_ZOO", "external_import_job_id": job_id}),
+                "gate_policy_json": dumps({"raw_f2_only": True, "d2_quarantine_requires_refined_f2": True}),
+                "config_signature": f"vibe_alpha_zoo:{job_id}:{ledger_hash[:12]}",
+                "mining_job_id": mining_job_id,
+                "summary_json": dumps(
+                    {
+                        "operator_engine": operator_engine,
+                        "mining_job_id": mining_job_id,
+                        "raw_f2_batch": batch_manifest,
+                        "auto_intake_skipped_raw_f2_needs_refinement_count": len(candidates),
+                        "auto_intake_count": 0,
+                        "auto_quarantine_count": 0,
+                    }
+                ),
+                "started_at": now,
+                "completed_at": now,
+                "created_at": now,
+                "updated_at": now,
+                "error_message": None,
+            },
+        )
+        self.storage.insert_json_row(
+            "factor_factory_run_items",
+            {
+                "id": f"ffri_vibe_{batch_hash}",
+                "run_id": run_id,
+                "stage": "RAW_F2",
+                "source_id": job_id,
+                "target_id": mining_job_id,
+                "status": "COMPLETED",
+                "summary_json": dumps({"raw_f2_count": len(candidates), "requires_wnzt": True}),
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        raw_f2_batch = {
+            **batch_manifest,
+            "batch_id": run_id,
+            "mining_job_id": mining_job_id,
+            "candidate_count": len(candidates),
+            "artifact_refs": artifact_refs,
+            "next_stage": "WNZT",
+        }
+        updated_manifest = dict(manifest)
+        updated_manifest["raw_f2_batch"] = raw_f2_batch
+        self.storage.execute(
+            """
+            UPDATE external_factor_import_jobs
+            SET manifest_json = ?, next_actions_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (dumps(updated_manifest), dumps(["raw_f2_batch_created", "wnzt_refinement_required"]), now, job_id),
+        )
+        return raw_f2_batch
 
     def materialize_external_factor_import_review_submissions(
         self,
@@ -8314,7 +8755,7 @@ class FactorResearchService:
         mapping_rows: Sequence[Any],
     ) -> list[dict[str, str]]:
         if (
-            str(row.get("source_id") or "") == "fama_french"
+            str(row.get("source_id") or "") in {"fama_french", "aqr"}
             and str(row.get("import_mode") or "").upper() == "AUTO_DOWNLOAD"
         ):
             factor_id = str(row.get("dataset_key") or row.get("id") or "external_factor")
@@ -8800,6 +9241,10 @@ class FactorResearchService:
             "fama_french": "fama_french",
             "aqr_data_sets": "aqr",
             "aqr_data_library": "aqr",
+            "vibe": "vibe_alpha_zoo",
+            "vibe_trading": "vibe_alpha_zoo",
+            "vibe_alpha_zoo": "vibe_alpha_zoo",
+            "hkuds_vibe_trading": "vibe_alpha_zoo",
             "msci_facs": "msci_facs",
             "portfolio_visualizer": "portfolio_visualizer",
         }
@@ -8840,6 +9285,8 @@ class FactorResearchService:
             return "ACADEMIC_LIBRARY"
         if source_id == "aqr":
             return "INSTITUTIONAL_LIBRARY"
+        if source_id == "vibe_alpha_zoo":
+            return "ACADEMIC_LIBRARY"
         if source_id == "portfolio_visualizer":
             return "BACKTEST_TOOL"
         if source_id == "msci_facs":
@@ -8862,9 +9309,15 @@ class FactorResearchService:
     def _external_factor_source_to_api(self, source: Mapping[str, Any]) -> dict[str, Any]:
         access_policy = self._external_source_access_policy(source)
         supported_import_modes = ["REFERENCE_ONLY"] if access_policy == "REFERENCE_ONLY" else ["LOCAL_FILE"]
+        has_configured_download = any(
+            fama_french_dataset_download_url(str(dataset.get("dataset_id") or ""))
+            or aqr_dataset_download_url(str(dataset.get("dataset_id") or ""))
+            for dataset in source.get("datasets") or []
+            if isinstance(dataset, Mapping)
+        )
         if access_policy in {"PUBLIC_DOWNLOAD", "MANUAL_UPLOAD", "LICENSE_REQUIRED"}:
             supported_import_modes.insert(0, "SOURCE_MANIFEST")
-        if access_policy == "PUBLIC_DOWNLOAD":
+        if access_policy == "PUBLIC_DOWNLOAD" or has_configured_download:
             supported_import_modes.insert(0, "AUTO_DOWNLOAD")
         return {
             "id": str(source.get("source_id") or ""),
@@ -8903,6 +9356,8 @@ class FactorResearchService:
             return "style_premia"
         if "aqr" in dataset_id:
             return "quality_momentum"
+        if "vibe" in dataset_id:
+            return "alpha_zoo_raw_f2"
         return "reference"
 
     @staticmethod
@@ -8912,6 +9367,8 @@ class FactorResearchService:
             return "F2 style baseline for value, size, profitability, and investment sleeves."
         if "aqr" in dataset_id:
             return "Manual benchmark for quality-minus-junk and time-series momentum research."
+        if "vibe" in dataset_id:
+            return "External formula catalog staged as Raw_F2 candidates before WNZT and D2 quarantine."
         return "Reference-only taxonomy and parameter calibration."
 
     @staticmethod
@@ -8921,6 +9378,8 @@ class FactorResearchService:
             return "valuation_quality"
         if "aqr" in dataset_id:
             return "quality_risk_adjusted"
+        if "vibe" in dataset_id:
+            return "external_alpha_zoo_raw_f2"
         if "msci" in dataset_id:
             return "style_exposure_reference"
         return "factor_regression_reference"
@@ -8941,7 +9400,7 @@ class FactorResearchService:
         row_count = int(analysis.get("row_count") or 0)
         if row_count <= 0:
             warnings.append("empty_or_unparsed_file")
-        return {
+        manifest = {
             "row_count": row_count,
             "column_count": len(columns),
             "columns": columns,
@@ -8951,6 +9410,11 @@ class FactorResearchService:
             "parsing_status": "READY" if row_count > 0 and columns else "NEEDS_DATA",
             "warnings": warnings,
         }
+        if isinstance(analysis.get("catalog_manifest"), Mapping):
+            manifest["catalog_manifest"] = dict(analysis["catalog_manifest"])
+        if isinstance(analysis.get("bench_summary"), Mapping):
+            manifest["bench_summary"] = dict(analysis["bench_summary"])
+        return manifest
 
     @staticmethod
     def _external_manifest_from_source_dataset(
@@ -8963,7 +9427,7 @@ class FactorResearchService:
             for field in (dataset.get("fields") or TEMPLATE_COLUMNS)
             if str(field).strip()
         ]
-        return {
+        manifest = {
             "row_count": 0,
             "column_count": len(columns),
             "columns": columns,
@@ -8973,6 +9437,25 @@ class FactorResearchService:
             "parsing_status": "SOURCE_MANIFEST_READY" if columns else "NEEDS_DATA",
             "warnings": ["source_file_not_materialized"] if columns else ["source_manifest_missing_fields"],
         }
+        if str(template_key or "").startswith("vibe_"):
+            manifest["catalog_manifest"] = {
+                "source": "HKUDS/Vibe-Trading",
+                "source_url": "https://github.com/HKUDS/Vibe-Trading",
+                "dataset_key": template_key,
+                "parser_version": "vibe_alpha_zoo_manifest_v1",
+                "formula_count": 0,
+                "supported_formula_count": 0,
+                "blocked_formula_count": 0,
+                "ast_scan": {"status": "AWAITING_SOURCE_FILE", "passed_count": 0, "blocked_count": 0},
+            }
+            manifest["bench_summary"] = {
+                "method": "vibe_alpha_zoo_rank_ic_manifest_v1",
+                "alive_count": 0,
+                "reversed_count": 0,
+                "dead_count": 0,
+                "unbenchable_count": 0,
+            }
+        return manifest
 
     @staticmethod
     def _external_mapping_rows_from_analysis(analysis: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -9057,6 +9540,13 @@ class FactorResearchService:
             flags.append("MAPPING_REVIEW_REQUIRED")
         if "license" in str(source.get("license_mode") or "").lower():
             flags.append("LICENSE_ATTESTATION_REQUIRED")
+        catalog = manifest.get("catalog_manifest") if isinstance(manifest.get("catalog_manifest"), Mapping) else {}
+        if isinstance(catalog, Mapping) and str(catalog.get("source") or "").lower().startswith("hkuds/vibe"):
+            flags.append("RAW_F2_ONLY_NO_DIRECT_PUBLISH")
+            if int(_coerce_float(catalog.get("blocked_formula_count"), 0.0)) > 0:
+                flags.append("AST_SCAN_BLOCKED_FORMULAS")
+            if FactorResearchService._vibe_alpha_zoo_supported_formula_count(manifest) <= 0:
+                flags.append("NO_SUPPORTED_RAW_F2_FORMULAS")
         return list(dict.fromkeys(flags))
 
     @staticmethod
@@ -9102,7 +9592,8 @@ class FactorResearchService:
             "artifact_paths": artifact_paths,
             "risk_flags": risk_flags,
             "next_actions": next_actions,
-            "governance_gate": "REVIEW_BEFORE_QUARANTINE",
+            "governance_gate": "RAW_F2_BEFORE_D2_QUARANTINE" if self._normalize_external_source_id(row.get("source_id")) == "vibe_alpha_zoo" else "REVIEW_BEFORE_QUARANTINE",
+            "raw_f2_batch": manifest.get("raw_f2_batch") if isinstance(manifest.get("raw_f2_batch"), Mapping) else {},
             "job_projection": build_public_factor_import_job_projection(
                 job_id=str(row.get("id") or ""),
                 source_id=str(row.get("source_id") or ""),
@@ -9136,6 +9627,7 @@ class FactorResearchService:
             submitted_at = None
             next_actions = ["upload_source_file", "inspect_manifest"]
             queue_state = "AWAITING_SOURCE_FILE"
+        is_vibe_alpha_zoo = FactorResearchService._normalize_external_source_id(row.get("source_id")) == "vibe_alpha_zoo"
         return {
             "id": row.get("id"),
             "source_id": row.get("source_id"),
@@ -9154,11 +9646,15 @@ class FactorResearchService:
                 "parsing_status": manifest.get("parsing_status") or "",
                 "template_key": manifest.get("template_key") or "",
                 "warnings": list(manifest.get("warnings") or []),
+                "catalog_manifest": manifest.get("catalog_manifest") if isinstance(manifest.get("catalog_manifest"), Mapping) else {},
+                "bench_summary": manifest.get("bench_summary") if isinstance(manifest.get("bench_summary"), Mapping) else {},
+                "raw_f2_batch": manifest.get("raw_f2_batch") if isinstance(manifest.get("raw_f2_batch"), Mapping) else {},
             },
             "artifact_paths": artifact_paths if isinstance(artifact_paths, Mapping) else {},
             "risk_flags": list(risk_flags or []),
             "next_actions": list(next_actions or []),
-            "governance_gate": "REVIEW_BEFORE_QUARANTINE",
+            "governance_gate": "RAW_F2_BEFORE_D2_QUARANTINE" if is_vibe_alpha_zoo else "REVIEW_BEFORE_QUARANTINE",
+            "raw_f2_batch": manifest.get("raw_f2_batch") if isinstance(manifest.get("raw_f2_batch"), Mapping) else {},
             "queue_state": queue_state,
             "direct_publish_allowed": False,
         }
@@ -12145,6 +12641,7 @@ class FactorResearchService:
         )
         factor.update(naming_projection)
         factor["name"] = naming_projection["display_name_cn"]
+        factor["factor_family"] = _factor_frontstage_family_label(factor, naming_projection)
         return factor
 
     def _expression_signature(self, expression: str) -> str:
@@ -17048,8 +17545,7 @@ class FactorResearchService:
         )
         factor.update(naming_projection)
         factor["name"] = naming_projection["display_name_cn"]
-        descriptor_category = str(factor["descriptor"].get("category") or "")
-        factor["factor_family"] = FACTOR_FAMILY_LABELS.get(descriptor_category, descriptor_category or "自定义")
+        factor["factor_family"] = _factor_frontstage_family_label(factor, naming_projection)
         factor["formula_version"] = (
             "system_seed_v2" if str(factor.get("source") or "") == "SYSTEM_SEED" else factor["descriptor"].get("schema_version")
         )

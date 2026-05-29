@@ -12,8 +12,8 @@ from html.parser import HTMLParser
 from typing import Any, Mapping, Sequence
 
 
-SEC_424B2_PARSER_VERSION = "sec_424b2_contract_skeleton_v1"
-SEC_424B2_RULEPACK_ID = "sec_424b2_rulepack_v1"
+SEC_424B2_PARSER_VERSION = "sec_424b2_contract_skeleton_v1_8"
+SEC_424B2_RULEPACK_ID = "sec_424b2_rulepack_v1_8_initial_value_resolver"
 SEC_424B2_PARSER_RULE_HASH = hashlib.sha256(SEC_424B2_RULEPACK_ID.encode("utf-8")).hexdigest()
 STRUCTURED_NOTE_OUTPUT_DIMENSION = "note_date"
 STRUCTURED_NOTE_PUBLISH_BOUNDARY = "sandbox -> quarantine -> publish"
@@ -79,6 +79,9 @@ _MONTH_RE = (
 _DATE_RE = re.compile(rf"{_MONTH_RE}\s+\d{{1,2}},\s+\d{{4}}|\d{{4}}-\d{{2}}-\d{{2}}", re.IGNORECASE)
 _PERCENT_RE = re.compile(r"(?P<number>-?\d+(?:\.\d+)?)\s*%")
 _MONEY_RE = re.compile(r"\$\s*(?P<number>-?\d+(?:,\d{3})*(?:\.\d+)?)")
+_VALUE_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9])\$?\s*(?P<number>-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)(?!\s*%)"
+)
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
 _TICKER_RE = re.compile(r"\b[A-Z]{1,5}(?:[.-][A-Z])?\b")
 _TICKER_EXCLUSIONS = {
@@ -97,10 +100,37 @@ _TICKER_EXCLUSIONS = {
     "NASDAQ",
     "NYSE",
     "SEC",
+    "SYMBOL",
     "THE",
     "US",
     "USD",
 }
+_INITIAL_VALUE_LABELS = (
+    "initial value",
+    "initial level",
+    "initial stock price",
+    "starting value",
+    "starting level",
+    "strike value",
+    "pricing value",
+)
+_INITIAL_VALUE_TABLE_HINTS = (
+    "pricing supplement",
+    "initial value",
+    "initial level",
+    "initial stock price",
+    "starting value",
+    "starting level",
+    "strike value",
+)
+_UNDERLYING_LABELS = (
+    "underlying",
+    "reference asset",
+    "reference stock",
+    "reference stocks",
+    "index",
+    "fund",
+)
 
 
 def normalize_text(value: Any) -> str:
@@ -336,6 +366,8 @@ def parse_sec_424b2_structured_note(
         warnings.append("coupon_rate_annual_missing")
     if all(item.get("barrier_ratio") is None and item.get("barrier_value") is None for item in underlyings):
         warnings.append("barrier_terms_missing")
+    if any(item.get("initial_value") is None and item.get("strike_value") is None for item in underlyings):
+        warnings.append("underlying_initial_values_missing")
     if term_payload.get("payoff_type") == "REVIEW_REQUIRED":
         warnings.append("unsupported_or_uncertain_payoff_type")
 
@@ -626,7 +658,7 @@ def _frequency_from_text(value: Any) -> str:
 def _extract_underlyings(text: str, tables: Sequence[ParsedHtmlTable]) -> list[dict[str, Any]]:
     rows = _underlying_rows_from_tables(tables)
     if rows:
-        return rows
+        return _resolve_initial_values_from_secondary_tables(rows, tables)
     paragraph_tickers = []
     ticker_patterns = (
         r"symbol\s*:?\s*[\"']?(?P<ticker>[A-Z]{1,5}(?:[.-][A-Z])?)[\"']?",
@@ -637,7 +669,7 @@ def _extract_underlyings(text: str, tables: Sequence[ParsedHtmlTable]) -> list[d
             ticker = match.group("ticker").upper()
             if ticker not in paragraph_tickers and ticker not in _TICKER_EXCLUSIONS:
                 paragraph_tickers.append(ticker)
-    return [
+    rows = [
         {
             "ticker": ticker,
             "initial_value": None,
@@ -652,6 +684,7 @@ def _extract_underlyings(text: str, tables: Sequence[ParsedHtmlTable]) -> list[d
         }
         for index, ticker in enumerate(paragraph_tickers)
     ]
+    return _resolve_initial_values_from_secondary_tables(rows, tables)
 
 
 def _underlying_rows_from_tables(tables: Sequence[ParsedHtmlTable]) -> list[dict[str, Any]]:
@@ -705,6 +738,293 @@ def _underlying_rows_from_tables(tables: Sequence[ParsedHtmlTable]) -> list[dict
         if results:
             return results
     return []
+
+
+def _resolve_initial_values_from_secondary_tables(
+    underlyings: Sequence[Mapping[str, Any]],
+    tables: Sequence[ParsedHtmlTable],
+) -> list[dict[str, Any]]:
+    resolved = [dict(item) for item in underlyings]
+    if not resolved:
+        return resolved
+    unresolved = {
+        index
+        for index, item in enumerate(resolved)
+        if item.get("initial_value") is None and item.get("strike_value") is None
+    }
+    if not unresolved:
+        return resolved
+    candidates = _initial_value_candidates_from_tables(tables)
+    if not candidates:
+        return resolved
+
+    ticker_to_index = {
+        str(item.get("ticker") or "").upper(): index
+        for index, item in enumerate(resolved)
+        if str(item.get("ticker") or "").strip()
+    }
+    selected: dict[int, dict[str, Any]] = {}
+    ambiguous: set[int] = set()
+    for candidate in sorted(candidates, key=lambda item: float(item.get("confidence") or 0.0), reverse=True):
+        value = _parse_float(candidate.get("initial_value"))
+        if value is None or value <= 0:
+            continue
+        target_index = None
+        ticker = str(candidate.get("ticker") or "").upper()
+        if ticker and ticker in ticker_to_index:
+            target_index = ticker_to_index[ticker]
+        elif candidate.get("slot_index") is not None:
+            try:
+                slot_index = int(candidate.get("slot_index"))
+            except (TypeError, ValueError):
+                slot_index = -1
+            if slot_index in unresolved:
+                target_index = slot_index
+        if target_index is None or target_index not in unresolved:
+            continue
+        previous = selected.get(target_index)
+        if previous is not None and not math.isclose(float(previous.get("initial_value") or 0.0), value, rel_tol=0.0, abs_tol=1e-9):
+            ambiguous.add(target_index)
+            continue
+        selected.setdefault(target_index, candidate)
+
+    for index, candidate in selected.items():
+        if index in ambiguous:
+            metadata = dict(resolved[index].get("metadata") or {})
+            metadata["initial_value_resolution"] = "REVIEW_REQUIRED"
+            metadata["initial_value_resolution_reason"] = "ambiguous_secondary_table_values"
+            resolved[index]["metadata"] = metadata
+            continue
+        value = _parse_float(candidate.get("initial_value"))
+        if value is None or value <= 0:
+            continue
+        ticker = str(resolved[index].get("ticker") or candidate.get("ticker") or index).upper()
+        resolved[index]["initial_value"] = value
+        resolved[index]["strike_value"] = value
+        evidence = dict(resolved[index].get("evidence") or {})
+        anchor = {
+            "field_path": f"underlyings.{ticker}.initial_value",
+            "table_index": candidate.get("table_index"),
+            "row_index": candidate.get("row_index"),
+            "column_index": candidate.get("column_index"),
+            "text": candidate.get("text"),
+            "resolver": candidate.get("resolver"),
+            "confidence": candidate.get("confidence"),
+        }
+        evidence["initial_value"] = anchor
+        evidence["strike_value"] = {**anchor, "field_path": f"underlyings.{ticker}.strike_value"}
+        resolved[index]["evidence"] = evidence
+        metadata = dict(resolved[index].get("metadata") or {})
+        metadata["initial_value_source"] = candidate.get("resolver")
+        metadata["initial_value_confidence"] = candidate.get("confidence")
+        resolved[index]["metadata"] = metadata
+    return resolved
+
+
+def _initial_value_candidates_from_tables(tables: Sequence[ParsedHtmlTable]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for table in tables:
+        candidates.extend(_initial_value_candidates_from_matrix_table(table))
+        candidates.extend(_initial_value_candidates_from_wide_table(table))
+        candidates.extend(_initial_value_candidates_from_labeled_rows(table))
+    deduped: dict[tuple[str, int | None, float], dict[str, Any]] = {}
+    for candidate in candidates:
+        value = _parse_float(candidate.get("initial_value"))
+        if value is None or value <= 0:
+            continue
+        key = (
+            str(candidate.get("ticker") or ""),
+            candidate.get("slot_index") if candidate.get("slot_index") is not None else None,
+            round(value, 8),
+        )
+        existing = deduped.get(key)
+        if existing is None or float(candidate.get("confidence") or 0.0) > float(existing.get("confidence") or 0.0):
+            deduped[key] = candidate
+    return list(deduped.values())
+
+
+def _initial_value_candidates_from_wide_table(table: ParsedHtmlTable) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for header_index, header in enumerate(table.rows):
+        header_text = " ".join(header).lower()
+        if not _contains_any(header_text, _INITIAL_VALUE_LABELS):
+            continue
+        if not (
+            "ticker" in header_text
+            or "symbol" in header_text
+            or "bloomberg" in header_text
+            or _contains_any(header_text, _UNDERLYING_LABELS)
+        ):
+            continue
+        ticker_col = _column_index(header, ("ticker", "symbol", "bloomberg"))
+        value_col = _initial_value_column_index(header)
+        if value_col is None:
+            continue
+        for row_index, row in enumerate(table.rows[header_index + 1 :], start=header_index + 1):
+            row_text = " | ".join(row)
+            if not row_text.strip():
+                continue
+            ticker = _extract_ticker(row[ticker_col]) if ticker_col is not None and ticker_col < len(row) else None
+            ticker = ticker or _extract_ticker(row_text)
+            value_text = row[value_col] if value_col < len(row) else row_text
+            value = _parse_initial_value(value_text)
+            if ticker and value is not None:
+                candidates.append(
+                    _initial_value_candidate(
+                        ticker=ticker,
+                        value=value,
+                        table=table,
+                        row_index=row_index,
+                        column_index=value_col,
+                        text=row_text,
+                        resolver="secondary_initial_value_wide_table",
+                        confidence=0.96,
+                    )
+                )
+    return candidates
+
+
+def _initial_value_candidates_from_matrix_table(table: ParsedHtmlTable) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    ticker_rows: list[tuple[int, dict[int, str]]] = []
+    for row_index, row in enumerate(table.rows):
+        tickers_by_col = {
+            column_index: ticker
+            for column_index, cell in enumerate(row)
+            if (ticker := _extract_ticker(cell))
+        }
+        if len(tickers_by_col) >= 1:
+            ticker_rows.append((row_index, tickers_by_col))
+    if not ticker_rows:
+        return candidates
+    for row_index, row in enumerate(table.rows):
+        row_text = " | ".join(row)
+        if not _contains_any(row_text.lower(), _INITIAL_VALUE_LABELS):
+            continue
+        for ticker_row_index, tickers_by_col in ticker_rows:
+            if ticker_row_index == row_index:
+                continue
+            for slot_index, (column_index, ticker) in enumerate(sorted(tickers_by_col.items())):
+                if column_index >= len(row):
+                    continue
+                value = _parse_initial_value(row[column_index])
+                if value is None:
+                    continue
+                candidates.append(
+                    _initial_value_candidate(
+                        ticker=ticker,
+                        value=value,
+                        table=table,
+                        row_index=row_index,
+                        column_index=column_index,
+                        text=row_text,
+                        resolver="secondary_initial_value_matrix_table",
+                        confidence=0.94,
+                        slot_index=slot_index,
+                    )
+                )
+    return candidates
+
+
+def _initial_value_candidates_from_labeled_rows(table: ParsedHtmlTable) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    table_text = " ".join(" ".join(row) for row in table.rows).lower()
+    table_has_hint = _contains_any(table_text, _INITIAL_VALUE_TABLE_HINTS)
+    for row_index, row in enumerate(table.rows):
+        row_text = " | ".join(row)
+        lowered = row_text.lower()
+        if not _contains_any(lowered, _INITIAL_VALUE_LABELS):
+            continue
+        ticker = _extract_ticker(row_text)
+        if not ticker:
+            continue
+        value = None
+        column_index = None
+        for index, cell in enumerate(row):
+            cell_lowered = str(cell or "").lower()
+            if _contains_any(cell_lowered, _INITIAL_VALUE_LABELS):
+                for value_index in range(index + 1, len(row)):
+                    value = _parse_initial_value(row[value_index])
+                    if value is not None:
+                        column_index = value_index
+                        break
+            if value is not None:
+                break
+        if value is None:
+            value = _parse_initial_value(row_text)
+            column_index = 0
+        if value is None:
+            continue
+        candidates.append(
+            _initial_value_candidate(
+                ticker=ticker,
+                value=value,
+                table=table,
+                row_index=row_index,
+                column_index=column_index,
+                text=row_text,
+                resolver="secondary_initial_value_labeled_row",
+                confidence=0.93 if table_has_hint else 0.88,
+            )
+        )
+    return candidates
+
+
+def _initial_value_candidate(
+    *,
+    ticker: str,
+    value: float,
+    table: ParsedHtmlTable,
+    row_index: int,
+    column_index: int | None,
+    text: str,
+    resolver: str,
+    confidence: float,
+    slot_index: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "ticker": str(ticker or "").upper(),
+        "initial_value": value,
+        "table_index": table.table_index,
+        "row_index": row_index,
+        "column_index": column_index,
+        "text": normalize_text(text),
+        "resolver": resolver,
+        "confidence": confidence,
+        "slot_index": slot_index,
+    }
+
+
+def _initial_value_column_index(header: Sequence[str]) -> int | None:
+    lowered = [str(cell or "").lower() for cell in header]
+    for index, cell in enumerate(lowered):
+        if _contains_any(cell, _INITIAL_VALUE_LABELS):
+            return index
+    return None
+
+
+def _contains_any(value: str, needles: Sequence[str]) -> bool:
+    lowered = str(value or "").lower()
+    return any(needle in lowered for needle in needles)
+
+
+def _parse_initial_value(value: Any) -> float | None:
+    text = normalize_text(value)
+    if not text or "%" in text:
+        return None
+    money = parse_money(text)
+    if money is not None:
+        return money
+    lowered = text.lower()
+    if _contains_any(lowered, _INITIAL_VALUE_LABELS):
+        positions = [lowered.find(label) for label in _INITIAL_VALUE_LABELS if lowered.find(label) >= 0]
+        if positions:
+            text = text[min(positions) :]
+    for match in _VALUE_NUMBER_RE.finditer(text):
+        parsed = _parse_float(match.group("number"))
+        if parsed is not None and parsed > 0:
+            return parsed
+    return None
 
 
 def _find_underlying_header(table: ParsedHtmlTable) -> tuple[int | None, tuple[str, ...] | None]:

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ApiBondSnapshotEligibleInstrument,
   ApiDatasetSnapshot,
@@ -643,7 +643,8 @@ function getLayerReadiness(overview: ApiSnapshotOverview | null, layerId: string
 function getMetricValue(metrics: unknown, labels: string[]): string | null {
   for (const item of asArray(metrics)) {
     const metric = asRecord(item);
-    if (!labels.includes(String(metric.label ?? ''))) {
+    const identifiers = [metric.metric_id, metric.id, metric.key, metric.label].map((value) => String(value ?? ''));
+    if (!identifiers.some((identifier) => labels.includes(identifier))) {
       continue;
     }
     const value = metric.value;
@@ -678,8 +679,8 @@ function getL1CoverageMetric(
   bondCoverage: string,
 ): { metric: string; lines?: string[] } {
   const l1Layer = getLayerReadiness(overview, 'l1_market_data');
-  const pitTarget = getLayerPitMetricValue(l1Layer, ['PIT目标', '覆盖标的']);
-  const benchmarkOverlay = getLayerPitMetricValue(l1Layer, ['基准ETF']);
+  const pitTarget = getLayerPitMetricValue(l1Layer, ['pit_admission_target', 'PIT目标', '覆盖标的']);
+  const benchmarkOverlay = getLayerPitMetricValue(l1Layer, ['benchmark_etf', '基准ETF']);
   if (pitTarget && benchmarkOverlay) {
     return {
       metric: `股票 PIT ${pitTarget} + ETF ${benchmarkOverlay} · 债券 ${bondCoverage}`,
@@ -1439,6 +1440,8 @@ export function SnapshotOperationsConsole({
   const [isRefreshLogOpen, setIsRefreshLogOpen] = useState(false);
   const [activeCredentialId, setActiveCredentialId] = useState<string | null>(null);
   const [credentialCopyStatus, setCredentialCopyStatus] = useState<'idle' | 'copied' | 'manual'>('idle');
+  const highlightedLayerTimerRef = useRef<number | null>(null);
+  const highlightedLedgerLayerTimerRef = useRef<number | null>(null);
 
   const layerCards = useMemo(() => buildLayerCards(overview), [overview]);
   const sourceDrillModules = useMemo(() => buildDataSourceDrillModules(overview), [overview]);
@@ -1472,6 +1475,36 @@ export function SnapshotOperationsConsole({
   const activeDrillTone = statusTone(activeDrillModule?.status ?? activeLayerCard?.status);
   const latestJob = overview?.latest_job ?? null;
 
+  function clearHighlightTimer(timerRef: { current: number | null }): void {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }
+
+  function scheduleHighlightedLayerReset(): void {
+    clearHighlightTimer(highlightedLayerTimerRef);
+    highlightedLayerTimerRef.current = window.setTimeout(() => {
+      highlightedLayerTimerRef.current = null;
+      setHighlightedLayer(null);
+    }, 2400);
+  }
+
+  function scheduleHighlightedLedgerLayerReset(): void {
+    clearHighlightTimer(highlightedLedgerLayerTimerRef);
+    highlightedLedgerLayerTimerRef.current = window.setTimeout(() => {
+      highlightedLedgerLayerTimerRef.current = null;
+      setHighlightedLedgerLayer(null);
+    }, 2400);
+  }
+
+  useEffect(() => {
+    return () => {
+      clearHighlightTimer(highlightedLayerTimerRef);
+      clearHighlightTimer(highlightedLedgerLayerTimerRef);
+    };
+  }, []);
+
   useEffect(() => {
     if (!highlightTarget) {
       return;
@@ -1482,8 +1515,7 @@ export function SnapshotOperationsConsole({
       setActiveDrillSourceId(sourceModule.sourceId);
     }
     setHighlightedLayer(layerId);
-    const timer = window.setTimeout(() => setHighlightedLayer(null), 2400);
-    return () => window.clearTimeout(timer);
+    scheduleHighlightedLayerReset();
   }, [highlightTarget, sourceDrillModules]);
 
   useEffect(() => {
@@ -1502,13 +1534,13 @@ export function SnapshotOperationsConsole({
       scrollIntoViewIfAvailable(document.querySelector('[data-testid="snapshots-drilldown-row"]'), { block: 'center', behavior: 'smooth' });
     }
     setHighlightedLayer(layerId);
-    window.setTimeout(() => setHighlightedLayer(null), 2400);
+    scheduleHighlightedLayerReset();
   }
 
   function handleViewEvidence(layerId: LayerId): void {
     setHighlightedLedgerLayer(layerId);
     scrollIntoViewIfAvailable(document.getElementById('snapshot-ledger'), { block: 'start', behavior: 'smooth' });
-    window.setTimeout(() => setHighlightedLedgerLayer(null), 2400);
+    scheduleHighlightedLedgerLayerReset();
   }
 
   function selectCredential(id: string | null): void {

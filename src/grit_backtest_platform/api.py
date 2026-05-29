@@ -93,6 +93,8 @@ from .models import (
     Sec424B2PilotDiscoverRequest,
     Sec424B2PilotIngestRequest,
     Sec424B2PilotIngestResponse,
+    Sec424B2IngestionJobRequest,
+    Sec424B2IngestionJobResponse,
     Sec424B2ParsePreviewRequest,
     Sec424B2ParsePreviewResponse,
     Sec424B2ReparseCandidateResponse,
@@ -100,10 +102,14 @@ from .models import (
     Sec424B2ReparseJobResponse,
     StructuredNoteDefinitionBindingResponse,
     StructuredNoteF1CacheStatsResponse,
+    StructuredNoteFactorFactoryMountContractResponse,
     StructuredNoteFactorDefinitionResponse,
     StructuredNoteFcnAttributionResponse,
     StructuredNoteFcnPilotPressureTestRequest,
     StructuredNoteFcnPilotPressureTestResponse,
+    StructuredNoteFcnReplayBatchAttributionSummaryResponse,
+    StructuredNoteFcnReplayBatchRequest,
+    StructuredNoteFcnReplayBatchResponse,
     StructuredNoteFcnReplayPreflightRequest,
     StructuredNoteFcnReplayPreflightResponse,
     StructuredNoteFcnReplayRequest,
@@ -1661,6 +1667,10 @@ def create_app(
     def external_factor_import_job_submit_review(job_id: str):
         return invoke(service.submit_external_factor_import_review, job_id)
 
+    @app.post('/factor-sources/import-jobs/{job_id}/materialize-source-file', response_model=ExternalFactorImportJobModel)
+    def external_factor_import_job_materialize_source_file(job_id: str):
+        return invoke(service.materialize_external_factor_import_source_file, job_id)
+
     @app.post('/factor-mining/jobs')
     def create_factor_mining_job(payload: FactorMiningJobCreateRequest):
         return invoke(service.create_factor_mining_job, payload)
@@ -1782,9 +1792,25 @@ def create_app(
     def sec_424b2_reparse_job_detail(job_id: str):
         return invoke(service.get_sec_424b2_reparse_job, job_id)
 
+    @app.post('/structured-notes/sec-424b2/ingestion-jobs/preview', response_model=Sec424B2IngestionJobResponse)
+    def sec_424b2_ingestion_job_preview(payload: Sec424B2IngestionJobRequest):
+        return invoke(service.preview_sec_424b2_ingestion_job, payload)
+
+    @app.post('/structured-notes/sec-424b2/ingestion-jobs', response_model=Sec424B2IngestionJobResponse)
+    def sec_424b2_ingestion_job_create(payload: Sec424B2IngestionJobRequest):
+        return invoke(service.create_sec_424b2_ingestion_job, payload)
+
+    @app.get('/structured-notes/sec-424b2/ingestion-jobs/{job_id}', response_model=Sec424B2IngestionJobResponse)
+    def sec_424b2_ingestion_job_detail(job_id: str):
+        return invoke(service.get_sec_424b2_ingestion_job, job_id)
+
     @app.get('/structured-notes/fcn/factor-definitions', response_model=StructuredNoteFactorDefinitionResponse)
     def structured_note_fcn_factor_definitions():
         return invoke(service.list_structured_note_fcn_factor_definitions)
+
+    @app.get('/structured-notes/fcn/factor-factory-mount-contract', response_model=StructuredNoteFactorFactoryMountContractResponse)
+    def structured_note_fcn_factor_factory_mount_contract():
+        return invoke(service.get_structured_note_fcn_factor_factory_mount_contract)
 
     @app.get(
         '/structured-notes/fcn/instances/{note_id}/definition-bindings',
@@ -1815,6 +1841,25 @@ def create_app(
     @app.post('/structured-notes/fcn/replay', response_model=StructuredNoteFcnReplayResponse)
     def structured_note_fcn_replay(payload: StructuredNoteFcnReplayRequest):
         return invoke(service.replay_structured_note_fcn, payload)
+
+    @app.post('/structured-notes/fcn/replay/run', response_model=StructuredNoteFcnReplayResponse)
+    def structured_note_fcn_replay_run_alias(payload: StructuredNoteFcnReplayRequest):
+        return invoke(service.replay_structured_note_fcn, payload)
+
+    @app.post('/structured-notes/fcn/replay/batch', response_model=StructuredNoteFcnReplayBatchResponse)
+    def structured_note_fcn_replay_batch(payload: StructuredNoteFcnReplayBatchRequest):
+        return invoke(service.replay_structured_note_fcn_batch, payload)
+
+    @app.get('/structured-notes/fcn/replay-batches/{batch_id}', response_model=StructuredNoteFcnReplayBatchResponse)
+    def structured_note_fcn_replay_batch_detail(batch_id: str):
+        return invoke(service.get_structured_note_fcn_replay_batch, batch_id)
+
+    @app.get(
+        '/structured-notes/fcn/replay-batches/{batch_id}/attribution-summary',
+        response_model=StructuredNoteFcnReplayBatchAttributionSummaryResponse,
+    )
+    def structured_note_fcn_replay_batch_attribution_summary(batch_id: str):
+        return invoke(service.get_structured_note_fcn_replay_batch_attribution_summary, batch_id)
 
     @app.get('/structured-notes/fcn/replay-runs/{run_id}', response_model=StructuredNoteFcnReplayResponse)
     def structured_note_fcn_replay_detail(run_id: str):

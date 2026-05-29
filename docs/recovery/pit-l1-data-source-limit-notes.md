@@ -1,14 +1,14 @@
 # PIT L1 数据源限制复用备注
 
-最后更新：2026-05-28
+最后更新：2026-05-29
 
 范围：本备注只记录本轮已经验证过的 PIT L1 日频价格修复数据源限制。L2 基本面、因子队列、全市场发现不在本备注范围内。
 
 ## 当前修复状态
 
-- 最新已验证 L1 调整价覆盖：`1207 / 1224`。
-- 最新剩余 PIT L1 价格缺口：`17` 个 symbol。
-- 最新缺口清单证据：`output/logs/grit-coder/l1-free-source-next-20260527/pit-data-after-public-news-single-batch14-api-20260528.json`、`output/logs/grit-coder/l1-free-source-next-20260527/current-l1-price-queue-symbols-after-public-news-batch14-20260528.txt`。
+- 最新已验证 PIT L1 调整价覆盖：`1219 / 1219`，`coverage_pct=100.0`。
+- 最新剩余 PIT L1 价格缺口：`0` 个 symbol；`full_ready_repair_plan.queue_price_symbols=[]`。
+- 最新缺口清单证据：`output/logs/grit-coder/l1-free-source-next-20260527/pit-data-after-batch22-recovered-20260529.json`、`output/logs/grit-coder/l1-free-source-next-20260527/baseline-after-batch22-cleanup-20260529.json`。
 - 后续所有价格修复调用必须以 `/pit-data.full_ready_repair_plan.queue_price_symbols` 为准。
 - `#/snapshots` 或 snapshot overview 可能使用更宽的分母，不能直接当作 L1 价格缺口调用清单。
 
@@ -19,7 +19,7 @@
 - 两个接口共用同一批价格 bar 事实表证据（2026-05-26 口径排查时 `ds-price.row_count = pit.coverage.price_bar_rows = 6607159`），但目标集合不同：`/data-snapshots/overview` 是 snapshot 库存/全局覆盖读模型，`/pit-data` 是 PIT Full Ready 修复与准入口径。
 - 进一步拆分：`/data-snapshots/overview` 会用当前 `dataset_symbol_coverage` 与 `universe_membership_snapshots`/策略额外标的重算进度；此前排查时为 `1479` 个历史 universe symbol 加 `SPY/QQQ/TLT` 共 `1482`，其中 `1314` 个在当时覆盖表中有记录，batch14 后 snapshot overview 当前读数为 `1367/1482`。`/pit-data` 的当前补数口径见本文顶部，不应从 snapshot overview 分子/分母反推。
 - 2026-05-26 缺口集合不是简单包含关系：overview missing `168` 个，PIT price queue `70` 个；交集 `68` 个，overview-only missing `100` 个，PIT-only missing `2` 个（`LDW`、`SGPPRB`）。因此不要用二者的分子/分母互相推导补数队列。
-- 后续免费源、Xfinlink、Quantiacs、GitHub 公开数据补 L1 时，只能使用 `/pit-data.full_ready_repair_plan.queue_price_symbols` 作为查询清单；当前 symbol 数见本文顶部“当前修复状态”。不要按 `1314/1482` 的 snapshot 分母扩大发起价格查询。
+- 后续免费源、Xfinlink、Quantiacs、GitHub 公开数据补 L1 时，只能使用 `/pit-data.full_ready_repair_plan.queue_price_symbols` 作为查询清单；当前 PIT 队列为空。不要按 `1314/1482`、`1379/1479` 等 snapshot 分母扩大发起价格查询。
 - 产品/UI 已落地：`#/snapshots` L1 健康卡片的股票主指标优先显示 `PIT <covered>/<total> + ETF 3/3`，不再把 snapshot 库存读模型的 `1314/1482` 当作 PIT L1 补数进度；若 PIT 指标缺失，前端才回退到 `快照 <dataset coverage>`。
 - 本次口径排查证据：`output/logs/grit-coder/snapshots-l1-card-coverage-reason-20260526/overview.json`、`output/logs/grit-coder/snapshots-l1-card-coverage-reason-20260526/pit.json`、`output/logs/grit-coder/snapshots-l1-card-coverage-reason-20260526/l1-metrics-final.json`、`output/logs/grit-coder/snapshots-l1-card-coverage-reason-20260526/runtime-preflight-final.json`、`output/logs/grit-coder/snapshots-l1-card-coverage-reason-20260526/snapshots-l1-card-chrome-ready.png`。
 
@@ -266,6 +266,22 @@
 - 清理旧备份时必须保留当前活动根目录 DB、最新一组全量备份 pair、最新 targeted preimage、manifest、source notes 和 `output/logs/grit-coder/` 证据日志。
 - `artifacts/recovery` 是恢复/审计区，不是系统运行热路径；运行路径仍以根目录主库和 companion market-data 库为准。
 
+## 2026-05-29 备份清理前置检查
+
+- 清理前必须确认 `GRIT_BACKTEST_DB` 没有指向 `artifacts/recovery`；如果活动 DB 或 companion market-data DB 落在 recovery 区，`scripts/codex-clean-stale-local-artifacts.ps1` 必须阻断并输出 `activeDbGuardStatus=blocked-active-db-under-recovery`。
+- 清理报告必须记录活动主库路径、活动 market-data companion 路径、两者大小，以及本次 planned/removed/skipped 列表。需要 recovery 专项报告时使用 `-ReportPath output/logs/grit-coder/<task-slug>/recovery-cleanup-summary.json`。
+- 当前活动 market-data baseline 可用 `scripts/recovery/sqlite_backup_policy.py baseline --json` 固化；重点字段是 `snapshot_row_count`、`missing_symbols_count`、`snapshot_updated_at`。
+- 后续 L1 导入仍然只允许按 `/pit-data.full_ready_repair_plan.queue_price_symbols` 缺口名单做 targeted preimage，不因清理释放空间而恢复“小批整库复制”。
+
+## 2026-05-29 备份清理执行验收
+
+- 执行 recovery-only dry-run：`output/logs/grit-coder/backup-policy-slimming-20260529/recovery-cleanup-dry-run-20260529.json`。
+- 执行 recovery-only apply：`output/logs/grit-coder/backup-policy-slimming-20260529/recovery-cleanup-summary.json`。
+- 清理脚本确认 `activeDbGuardStatus=ok`，活动主库为根目录 `.grit_backtest_platform.sqlite3`，活动 market-data companion 为根目录 `.grit_backtest_platform_market_data.sqlite3`；两者均不在 `artifacts/recovery`。
+- 本次 apply 结果为 `plannedCount=0`、`removedCount=0`、`removedGB=0`。含义是：当前没有符合新规则的旧 L1 全量 DB payload 可删；最新全量 pair `artifacts/recovery/l1-public-news-single-close-batch12-20260528-apply/`、最新 targeted preimage `artifacts/recovery/l1-public-news-filings-batch21-20260529-apply/` 与所有 manifest/evidence 被保护。
+- 清理前后活动 market-data baseline 保持一致：`snapshot_row_count=6619322`、`missing_symbols_count=4`、`snapshot_updated_at=2026-05-29T06:41:56Z`。
+- 清理后 runtime preflight：`output/logs/grit-coder/backup-policy-slimming-20260529/runtime-preflight-after-cleanup-20260529.json`，结果为 `quickstartOverall=ready`、`decision=reuse`。
+
 ## 2026-05-28 batch14 公开单点 close 续更
 
 - 本批只使用当前 `/pit-data.full_ready_repair_plan.queue_price_symbols` 缺口名单，未调用 Xfinlink、Tiingo、Alpha Vantage 等限额源。
@@ -287,3 +303,55 @@
 - targeted preimage：`artifacts/recovery/l1-public-news-single-close-batch15-20260528-apply/backup-manifest.json`；本批 preimage 的目标 symbols 是 `IFMX`、`OSSI`、`NLI`。
 - 剩余价格缺口：`AGREA`、`DZB`、`FDLNB`、`GMSTE`、`INFOQUOTE`、`LDW`、`MTEL`、`MUEI`、`NLTI`、`RPOW`、`SGPPRB`、`SYBS`、`VCELA`、`WMTT`。其中 `INFOQUOTE` 已确认是历史 Nasdaq activity 页面工具链接解析伪码；解析器已修复为不再新增该伪码，但现有 DB 元数据清理需另走 targeted metadata preimage。
 - 证据：`public-news-single-close-batch15-current-l1-dry-run-20260528.json`、`public-news-single-close-batch15-import-report-20260528.json`、`public-news-single-close-batch15-post-apply-db-check-20260528.json`、`pit-data-after-public-news-single-batch15-api-20260528.json`、`data-snapshots-overview-after-batch15-20260528.json`、`pit-data-during-quickstart-batch15-api-20260528.json`、`data-snapshots-overview-during-quickstart-batch15-20260528.json`、`current-l1-price-queue-symbols-after-public-news-batch15-20260528.txt`、`runtime-preflight-during-quickstart-batch15-20260528.json`。
+
+## 2026-05-29 batch18 RCR Wireless 公开单点 close 续更
+
+- 本批继续只使用当前 L1 价格缺口名单，未调用 Xfinlink；导入前使用 `pit-price-preimage` 生成 `MTEL` targeted preimage，没有复制完整 DB。
+- 新增导入 `MTEL` 1 条 close-only PIT 价格行：`1996-01-22` close=`14.12`，`open/high/low/volume=NULL`，metadata 标记 `not_daily_ohlcv=true`。
+- 来源为 RCR Wireless News 1997-03-03 公开报道，文中说明 `Mtel` 股票在 1996-01-22 跌至 `$14.12`；成员窗口依据项目本地 Nasdaq-100 historical seed 的 1996 anchor。
+- 覆盖结果：活动 market DB `ds-price.row_count` 从 `6615096` 提升到 `6615097`，`missing_symbols_count` 从 `12` 降到 `11`；`dataset_snapshots.ds-price.metadata.covered_symbol_count=1213`，`total_symbol_count=1224`。
+- targeted preimage：`artifacts/recovery/l1-rcrwireless-mtel-close-batch18-20260529-apply/backup-manifest.json`；本批 preimage 的目标 symbol 是 `MTEL`。
+- 剩余价格缺口：`AGREA`、`DZB`、`FDLNB`、`GMSTE`、`INFOQUOTE`、`LDW`、`NLTI`、`RPOW`、`SGPPRB`、`VCELA`、`WMTT`。
+- 证据：`mtel-rcrwireless-fetch-20260529.json`、`rcrwireless-mtel-batch18-preimage-20260529.json`、`rcrwireless-mtel-batch18-dry-run-20260529.json`、`rcrwireless-mtel-batch18-import-report-20260529.json`、`mtel-db-row-after-batch18-20260529.json`、`pit-data-after-rcrwireless-mtel-batch18-20260529.json`、`current-l1-price-queue-after-rcrwireless-mtel-batch18-20260529.json`。
+
+## 2026-05-29 batch19 无效 L1 缺口元数据清理
+
+- 本批只处理当前 PIT L1 queue 中已经证明不应继续查询价格源的无效 symbol，未调用 Xfinlink，也未复制完整 DB。
+- 从 L1 价格目标集合移除 `INFOQUOTE`、`LDW`、`SGPPRB`：`INFOQUOTE` 是历史 Nasdaq activity 页面工具链接解析残留，已有回归测试确保解析器跳过该工具链接；`LDW`、`SGPPRB` 没有 membership、price、coverage、corporate-action 事实，只剩空白 identity cache 行。
+- 清理动作只删除 `INFOQUOTE` 的 2 行错误 membership row、3 个无效 identity cache row，并同步 `ds-price.metadata_json.missing_symbols`、`existing_missing_symbol_count`、`total_symbol_count` 等读模型字段；未改动任何已有价格 bar。
+- 覆盖结果：`/pit-data.coverage.covered_symbol_count=1213` 保持不变，`total_symbol_count` 从 `1224` 降为 `1221`，`queue_price_symbols` 从 `11` 降为 `8`。
+- targeted metadata preimage：`artifacts/recovery/l1-invalid-gap-metadata-cleanup-batch19-20260529-apply/backup-manifest.json`；preimage 文件为 `metadata-preimage.json`。
+- 剩余价格缺口：`AGREA`、`DZB`、`FDLNB`、`GMSTE`、`NLTI`、`RPOW`、`VCELA`、`WMTT`。
+- 证据：`current-11-symbol-fact-table-20260529.json`、`invalid-l1-gap-candidate-rows-20260529.json`、`invalid-gap-metadata-cleanup-batch19-dry-run-20260529.json`、`invalid-gap-metadata-cleanup-batch19-apply-20260529.json`、`pit-data-api-after-invalid-gap-cleanup-batch19-20260529.json`、`baseline-after-invalid-gap-cleanup-batch19-20260529.json`、`invalid-gap-cleanup-db-check-batch19-20260529.json`。
+
+## 2026-05-29 batch20 CompaniesMarketCap / RPM RPOW close-only 月度图表补点
+
+- 本批继续只使用当前 PIT L1 价格缺口名单，未调用 Xfinlink；导入前使用 `pit-price-preimage` 生成 `RPOW` targeted preimage，没有复制完整 DB。
+- 新增导入 `RPOW` 1 条 close-only PIT 价格行：`1996-01-31` close=`4.751464366912842`，`open/high/low/volume=NULL`，metadata 标记 `not_daily_ohlcv=true`。
+- 来源为 CompaniesMarketCap `RPM International` stock price history 页面内嵌月度图表数据；RPM 官方历史页面确认公司在 Nasdaq 的历史交易符号为 `RPOW`，本地 Nasdaq-100 historical seed 在 1996 与 1997 anchor 中包含 `RPOW`。
+- 覆盖结果：活动 market DB `ds-price.row_count` 从 `6615097` 提升到 `6615098`，`missing_symbols_count` 从 `8` 降到 `7`；`/pit-data.coverage.covered_symbol_count=1214`，`total_symbol_count=1221`。
+- targeted preimage：`artifacts/recovery/l1-companiesmarketcap-rpow-close-batch20-20260529-apply/backup-manifest.json`；本批 preimage 的目标 symbol 是 `RPOW`。
+- 剩余价格缺口：`AGREA`、`DZB`、`FDLNB`、`GMSTE`、`NLTI`、`VCELA`、`WMTT`。
+- 证据：`companiesmarketcap-rpm-page-fetch-20260529.html`、`companiesmarketcap-rpow-rpm-extraction-20260529.json`、`companiesmarketcap-rpow-batch20-dry-run-20260529.json`、`companiesmarketcap-rpow-batch20-preimage-20260529.json`、`companiesmarketcap-rpow-batch20-import-report-20260529.json`、`rpow-db-row-after-batch20-20260529.json`、`baseline-after-companiesmarketcap-rpow-batch20-20260529.json`、`pit-data-after-companiesmarketcap-rpow-batch20-20260529.json`、`data-snapshots-overview-after-rpow-batch20-20260529.json`。
+
+## 2026-05-29 batch21 Public news / SEC filings close-only 补点
+
+- 本批继续只使用当前 PIT L1 价格缺口名单，未调用 Xfinlink；导入前使用 `pit-price-preimage` 生成 `FDLNB`、`GMSTE`、`WMTT` targeted preimage，没有复制完整 DB。
+- `FDLNB`：Washington Post 公开新闻给出 Food Lion Class B after-announcement close=`8.8125`，并说明 Delhaize America `DZA/DZB` 上市后 Food Lion shares 会从 Nasdaq 退市；本地 seed 提供 1996 membership anchor。
+- `GMSTE`：TheStreet 公开报道给出 `GMSTE` 2002-08-26 close=`4.48`；Mondo Visione / Nasdaq-100 替换公告确认 Patterson Dental 于 2002-12-16 替换 Gemstar-TV Guide International (`GMSTE`)。
+- `WMTT`：Willamette Industries 1996 SEC 年报列示 1996 year-end stock price=`69.625`，本地 seed 提供 1996 membership anchor。
+- 覆盖结果：活动 market DB `ds-price.row_count` 从 `6615098` 提升到 `6615101`；`missing_symbols_count` 从 `7` 降到 `4`；`/pit-data.coverage.covered_symbol_count=1217`，`total_symbol_count=1221`，`coverage_pct=99.67`。
+- targeted preimage：`artifacts/recovery/l1-public-news-filings-batch21-20260529-apply/backup-manifest.json`；本批 preimage 的目标 symbols 是 `FDLNB`、`GMSTE`、`WMTT`。
+- 剩余价格缺口：`AGREA`、`DZB`、`NLTI`、`VCELA`。
+- 证据：`public-news-single-close-batch21-dry-run-20260529.json`、`public-news-filings-batch21-preimage-20260529.json`、`public-news-filings-batch21-import-report-20260529.json`、`baseline-after-public-news-filings-batch21-20260529.json`、`pit-data-after-public-news-filings-batch21-20260529.json`、`db-rows-after-public-news-filings-batch21-20260529.json`、`data-snapshots-overview-after-public-news-filings-batch21-20260529.json`。
+
+## 2026-05-29 batch22 SEC filings + metadata cleanup 收尾
+
+- 本批继续只使用当前 PIT L1 价格缺口名单，未调用 Xfinlink；导入前使用 `scripts/recovery/sqlite_backup_policy.py pit-price-preimage --symbol AGREA --symbol VCELA` 生成 targeted preimage，没有复制完整 DB。
+- `AGREA`：American Greetings 1996 Form 10-K 选定财务数据列示 fiscal year-end market price per share=`27.38`，Item 5 确认 Class A common shares 在 Nasdaq 以 `AGREA` 交易；导入 `1996-02-29` close=`27.38`。
+- `VCELA`：Vanguard Cellular 1995 Form 10-K 披露 1996-03-15 非董事/高管持股 aggregate market value=`$693,065,000`，且该值基于 Nasdaq closing sale price；1996 DEF 14A 披露 outstanding shares=`41,313,443` 与 all directors/officers group=`6,875,409`，推导 close=`20.125`；导入 `1996-03-15` close=`20.125`。
+- 导入后剩余 `DZB`、`NLTI` 两个 metadata gap：`DZB` 是 FMP 把 1999-09 以后 Delhaize America 的 `DZA/DZB` 回填到 1996-1999H1 anchor；已有 `FDLNB` 补点覆盖 Food Lion 1996 anchor。`NLTI` 是 Wikipedia current changes table 拼写残留，DB 已有覆盖链路 `NLI`/`NTLI`/`VMED`。
+- metadata cleanup 只删除 `DZB`、`NLTI` 的 membership/identity 行并同步 `ds-price.metadata_json`；未删除任何已有 price bar 或 coverage row。cleanup preimage：`artifacts/recovery/l1-invalid-gap-metadata-cleanup-batch22-20260529-apply/metadata-preimage.json`。
+- 覆盖结果：活动 market DB `ds-price.row_count=6619324`；`dataset_snapshots.ds-price.status=READY`；`/pit-data.coverage.covered_symbol_count=1219`、`total_symbol_count=1219`、`coverage_pct=100.0`、`queue_price_symbols=[]`。
+- 注意：`/data-snapshots/overview.dataset_snapshots[id=ds-price]` 仍是更宽的 snapshot/global 价格库存口径，当前可显示 `1379/1479` 且 `missing_symbols=100`；该数字不是 PIT L1 修复队列，不能用于后续价格源调用。
+- 证据：`public-news-filings-batch22-dry-run-20260529.json`、`sec-filings-batch22-preimage-20260529.json`、`sec-filings-batch22-import-report-20260529.json`、`db-rows-after-sec-filings-batch22-20260529.json`、`invalid-gap-metadata-cleanup-batch22-dry-run-20260529.json`、`invalid-gap-metadata-cleanup-batch22-apply-20260529.json`、`db-check-after-batch22-cleanup-20260529.json`、`baseline-after-batch22-cleanup-20260529.json`、`pit-data-after-batch22-recovered-20260529.json`、`runtime-preflight-after-batch22-recovered-20260529.json`。

@@ -8,7 +8,7 @@ type ModalKind = 'precheck' | 'local-file' | null;
 type EntryMode = 'precheck' | 'local-file';
 type DatasetFilter = 'all' | 'pending-precheck' | 'pending-review' | 'submitted';
 type ViewModelLoadState = 'idle' | 'loading' | 'ready' | 'error';
-type DatasetActionKind = 'audit' | 'precheck' | 'submit-review';
+type DatasetActionKind = 'audit' | 'precheck' | 'submit-review' | 'materialize-source';
 type PrecheckImportMode = 'AUTO_DOWNLOAD' | 'SOURCE_MANIFEST';
 
 const DATASET_STATUS_LABELS = {
@@ -69,6 +69,16 @@ export type PublicFactorImportManifest = {
   factorName?: string;
   quarantineCandidateId?: string;
   targetFactorId?: string;
+  catalogFormulaCount?: number;
+  astPassedCount?: number;
+  astBlockedCount?: number;
+  benchAliveCount?: number;
+  benchReversedCount?: number;
+  benchDeadCount?: number;
+  rawF2BatchId?: string;
+  rawF2MiningJobId?: string;
+  rawF2FormulaCount?: number;
+  flowNote?: string;
 };
 
 export type PublicFactorImportViewModel = {
@@ -104,6 +114,7 @@ export type PublicFactorImportApi = {
     manifestTemplate: boolean;
     mappingTemplate: boolean;
   }) => Promise<Partial<PublicFactorImportViewModel> | null | undefined | unknown>;
+  materializeSourceFile?: (payload: { jobId: string }) => Promise<Partial<PublicFactorImportViewModel> | null | undefined | unknown>;
   submitReview?: (payload: { jobId: string }) => Promise<Partial<PublicFactorImportViewModel> | null | undefined | unknown>;
 };
 
@@ -472,12 +483,25 @@ function manifestCanSubmitReview(manifest: PublicFactorImportManifest): boolean 
   return false;
 }
 
+function manifestCanMaterializeSourceFile(manifest: PublicFactorImportManifest): boolean {
+  const nextActions = (manifest.nextActions || []).map((action) => action.toLowerCase());
+  return Boolean(
+    manifest.jobId.trim() &&
+    !manifestIsSubmitted(manifest) &&
+    manifest.rowCount <= 0 &&
+    nextActions.includes('upload_source_file')
+  );
+}
+
 function manifestIsInReviewPreparation(manifest: PublicFactorImportManifest): boolean {
   const status = manifestReviewStatus(manifest);
   return status === 'PENDING_REVIEW' || status === 'NEEDS_MAPPING' || status === 'READY_FOR_REVIEW';
 }
 
 function manifestRailStatusLabel(manifest: PublicFactorImportManifest): string {
+  if (manifest.rawF2FormulaCount && manifest.rawF2FormulaCount > 0) {
+    return 'Raw_F2 staged';
+  }
   if (manifestIsSubmitted(manifest)) {
     return (manifest.nextActions || []).includes('b3_quarantine_completed') ? 'B3 检疫完成' : '已送检';
   }
@@ -488,6 +512,9 @@ function manifestRailStatusLabel(manifest: PublicFactorImportManifest): string {
 }
 
 function manifestFlowStatusLabel(manifest: PublicFactorImportManifest): string {
+  if (manifest.rawF2FormulaCount && manifest.rawF2FormulaCount > 0) {
+    return 'Raw_F2 -> WNZT pending';
+  }
   if (manifestIsSubmitted(manifest)) {
     return (manifest.nextActions || []).includes('b3_quarantine_completed') ? '已进入 B3 检疫' : 'B3 检疫处理中';
   }
@@ -498,8 +525,14 @@ function manifestFlowStatusLabel(manifest: PublicFactorImportManifest): string {
 }
 
 function submitReviewButtonLabel(manifest: PublicFactorImportManifest): string {
+  if (manifest.rawF2FormulaCount && manifest.rawF2FormulaCount > 0) {
+    return 'Raw_F2 staged';
+  }
   if (manifestIsSubmitted(manifest)) {
     return '已送检';
+  }
+  if (manifestCanMaterializeSourceFile(manifest)) {
+    return '拉取源文件';
   }
   return '送入复核';
 }
@@ -519,6 +552,18 @@ function datasetManifestKeys(dataset: PublicFactorImportDataset | undefined): st
   }
   if (haystack.includes('aqr_public_style_factors') || haystack.includes('qmj')) {
     keys.push('aqr_public_style_factors');
+  }
+  if (haystack.includes('vibe_qlib158') || haystack.includes('qlib158')) {
+    keys.push('vibe_qlib158');
+  }
+  if (haystack.includes('vibe_alpha101') || haystack.includes('alpha101')) {
+    keys.push('vibe_alpha101');
+  }
+  if (haystack.includes('vibe_gtja191') || haystack.includes('gtja191')) {
+    keys.push('vibe_gtja191');
+  }
+  if (haystack.includes('vibe_academic') || haystack.includes('academic zoo')) {
+    keys.push('vibe_academic');
   }
   return Array.from(new Set(keys));
 }
@@ -608,6 +653,9 @@ function datasetDisplayAction(
   }
   if (manifestIsReadyForReview(manifest) && manifest.submitReady && manifest.jobId.trim()) {
     return { label: '送入复核', kind: 'submit-review' };
+  }
+  if (manifestCanMaterializeSourceFile(manifest)) {
+    return { label: '拉取源文件', kind: 'materialize-source' };
   }
   if (manifest.jobId.trim() && manifestIsInReviewPreparation(manifest)) {
     return { label: '查看 manifest', kind: 'audit' };
@@ -758,6 +806,7 @@ export function PublicFactorImportCenterPage({
   const visibleDatasets = model.datasets.filter((dataset) => datasetMatchesFilter(model, dataset, datasetFilter));
   const submittedManifest = manifestIsSubmitted(activeManifest);
   const canSubmitReview = manifestCanSubmitReview(activeManifest);
+  const canMaterializeSourceFile = manifestCanMaterializeSourceFile(activeManifest);
   const waitingForInitialViewModel = Boolean(
     api?.loadViewModel && !viewModel && !remoteViewModel && viewModelLoadState === 'loading',
   );
@@ -825,7 +874,9 @@ export function PublicFactorImportCenterPage({
 
   async function submitPrecheck(): Promise<void> {
     const sourceKind = activeSource?.kind ?? 'auto';
-    const importMode: PrecheckImportMode = sourceKind === 'auto' ? 'AUTO_DOWNLOAD' : 'SOURCE_MANIFEST';
+    const isAqrQmjDataset = `${activeSource?.id || ''} ${activeDataset?.id || ''} ${activeDataset?.key || ''} ${activeDataset?.name || ''}`.toLowerCase().includes('aqr') &&
+      `${activeDataset?.id || ''} ${activeDataset?.key || ''} ${activeDataset?.name || ''}`.toLowerCase().includes('qmj');
+    const importMode: PrecheckImportMode = sourceKind === 'auto' || isAqrQmjDataset ? 'AUTO_DOWNLOAD' : 'SOURCE_MANIFEST';
     const payload = {
       sourceId: activeSource?.id || model.activeSourceId,
       datasetId: activeDataset?.id || model.activeDatasetId,
@@ -874,8 +925,18 @@ export function PublicFactorImportCenterPage({
       setActionMessage('该导入作业已送检并进入 B3 检疫结果链路，无需重复提交。');
       return;
     }
+    if (manifestCanMaterializeSourceFile(manifest)) {
+      try {
+        const result = await api?.materializeSourceFile?.({ jobId: manifest.jobId });
+        applyApiResult(result);
+        setActionMessage('真实源文件已拉取并生成 manifest；确认后即可送入复核。');
+      } catch {
+        setActionMessage('源文件拉取失败，请检查外部源可访问性或改用本地文件上传。');
+      }
+      return;
+    }
     if (!manifestCanSubmitReview(manifest)) {
-      setActionMessage('请先新建预检，并确认语义映射与 manifest 状态为 READY_FOR_REVIEW。');
+      setActionMessage('请先拉取或上传真实源文件，并确认语义映射与 manifest 已就绪。');
       return;
     }
     try {
@@ -908,6 +969,10 @@ export function PublicFactorImportCenterPage({
       return;
     }
     if (action.kind === 'submit-review') {
+      void submitReviewForManifest(manifest);
+      return;
+    }
+    if (action.kind === 'materialize-source') {
       void submitReviewForManifest(manifest);
       return;
     }
@@ -1232,6 +1297,30 @@ export function PublicFactorImportCenterPage({
               </div>
             </dl>
           </section>
+          {(activeManifest.catalogFormulaCount || activeManifest.rawF2FormulaCount) ? (
+            <section className="pfic-manifest-card">
+              <h3>Vibe Alpha Zoo</h3>
+              <dl>
+                <div>
+                  <dt>catalog formulas</dt>
+                  <dd>{formatCount(activeManifest.catalogFormulaCount || activeManifest.rowCount)}</dd>
+                </div>
+                <div>
+                  <dt>AST pass / block</dt>
+                  <dd>{formatCount(activeManifest.astPassedCount)} / {formatCount(activeManifest.astBlockedCount)}</dd>
+                </div>
+                <div>
+                  <dt>IC bench</dt>
+                  <dd>{formatCount(activeManifest.benchAliveCount)} alive · {formatCount(activeManifest.benchReversedCount)} reversed · {formatCount(activeManifest.benchDeadCount)} dead</dd>
+                </div>
+                <div>
+                  <dt>Raw_F2 batch</dt>
+                  <dd>{safeText(activeManifest.rawF2BatchId || activeManifest.rawF2MiningJobId, 'waiting WNZT')}</dd>
+                </div>
+              </dl>
+              <p className="pfic-review-note">{safeText(activeManifest.flowNote, 'Catalog -> Raw_F2 -> WNZT -> Refined_F2 -> D2')}</p>
+            </section>
+          ) : null}
           <p className="pfic-review-note">{safeText(activeManifest.reviewNote)}</p>
           {manifestIsSubmitted(activeManifest) ? (
             <section className="pfic-manifest-card pfic-manifest-card-audit">
@@ -1259,7 +1348,7 @@ export function PublicFactorImportCenterPage({
           <button
             type="button"
             className="pfic-button pfic-button-primary"
-            disabled={!canSubmitReview}
+            disabled={!canSubmitReview && !canMaterializeSourceFile}
             onClick={() => void submitReview()}
           >
             {submitReviewButtonLabel(activeManifest)}

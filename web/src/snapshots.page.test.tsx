@@ -224,8 +224,9 @@ function overviewFixture(): ApiSnapshotOverview {
           { label: '价格行数', value: 6485875 },
         ],
         pit_metrics: [
-          { label: 'PIT目标', value: '1154/1224' },
-          { label: '基准ETF', value: '3/3' },
+          { metric_id: 'pit_admission_target', label: 'PIT目标', value: '1154/1224' },
+          { metric_id: 'full_ready_target', label: 'Full Ready归档', value: '1266/1482' },
+          { metric_id: 'benchmark_etf', label: '基准ETF', value: '3/3' },
         ],
       },
       {

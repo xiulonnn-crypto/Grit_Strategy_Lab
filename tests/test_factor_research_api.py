@@ -705,6 +705,10 @@ def test_pit_factor_admission_allows_archival_full_ready_gap_without_blocking_10
     assert payload["status_reasons"]["factor_admission"]["cause"] == "FACTOR_ADMISSION_10Y_READY"
     l1_layer = next(item for item in payload["pit_layer_readiness"] if item["layer_id"] == "l1_market_data")
     assert l1_layer["status"] != "BLOCKED"
+    l1_metrics = {item.get("metric_id"): item for item in l1_layer["metrics"]}
+    assert l1_metrics["pit_admission_target"]["value"] == "4/4"
+    assert l1_metrics["full_ready_target"]["value"] == "4/5"
+    assert l1_metrics["full_ready_target"]["missing_count"] == 1
     price_replay = next(item for item in l1_layer["submodules"] if item["id"] == "price_replay")
     assert price_replay["status"] == "READY"
     price_group = next(item for item in payload["factor_diagnostic_readiness"] if item["group_id"] == "price")
@@ -1882,6 +1886,45 @@ def test_factor_library_projects_standard_factor_categories(tmp_path):
     assert by_id["s_liq_turnover_20d_rank"]["descriptor"]["category"] == "liq"
     assert by_id["s_liq_turnover_20d_rank"]["factor_family"] == "情绪"
     assert by_id["s_alpha_ffblend_resid_mkt_rank"]["factor_family"] == "其他"
+
+
+def test_factor_library_uses_structured_style_family_for_special_f2(tmp_path):
+    client, db_path = create_test_client(tmp_path)
+    factor_id = "s_f2_mom_raw_cur_f1_financial_release_timing"
+    expression = (
+        'TS_Rank(ZScore(Neutralize(Winsorize(Abs(TS_Min(f1_financial_release_timing, 3)), '
+        'method="MAD"), by="industry,market_cap")), 3)'
+    )
+    now = "2026-05-29T09:00:00Z"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO factor_definitions (
+                id, name, market, universe, source, lifecycle_status, diagnostic_status,
+                direction, frequency, expression, tags_json, data_requirements_json,
+                institutional_note, created_by, created_at, updated_at
+            )
+            VALUES (?, 'Legacy Timing Factor', 'US', 'SP500', 'AUTO_MINED', 'VERIFIED',
+                    'COMPLETED', 'HIGH_IS_BETTER', 'DAILY', ?, '[]', ?,
+                    'Financial release timing factor.', 'unit_test', ?, ?)
+            """,
+            (factor_id, expression, dumps(["f1_financial_release_timing"]), now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO factor_versions (id, factor_id, version, expression, status, metadata_json, created_at)
+            VALUES (?, ?, 1, ?, 'ACTIVE', '{}', ?)
+            """,
+            (f"{factor_id}-v1", factor_id, expression, now),
+        )
+
+    payload = assert_ok(client.get("/factors?lifecycle=all"))
+    factor = next(item for item in payload["items"] if item["id"] == factor_id)
+
+    assert factor["descriptor"]["category"] == "mom"
+    assert factor["display_name_cn"] == "[情绪] - 财报发布时效滞后得分 (3d) [Refined]"
+    assert factor["factor_family"] == "情绪"
+    assert factor["name_audit"]["structured_components"]["style_family"] == "情绪"
 
 
 def test_factor_library_migrates_system_seed_expression_versions(tmp_path):

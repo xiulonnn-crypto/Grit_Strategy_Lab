@@ -94,6 +94,34 @@ JPM_LONG_LABEL_424B2_HTML = """
 """
 
 
+JPM_PRICING_SUPPLEMENT_INITIAL_VALUES_HTML = """
+<html>
+  <body>
+    <h1>Callable Contingent Interest Notes Linked to the Least Performing of Three Underlyings</h1>
+    <p>CUSIP: 48133CCC3.</p>
+    <table>
+      <tr>
+        <td>Terms</td>
+        <td>
+          Contingent Interest Payments: 9.80% per annum, payable monthly.
+          Interest Barrier: With respect to each underlying, 70.00% of its Initial Value.
+          Trigger Value: With respect to each underlying, 60.00% of its Initial Value.
+        </td>
+      </tr>
+    </table>
+    <p>The Index is the Russell 2000 Index. Bloomberg ticker: RTY.</p>
+    <p>The Index is the S&amp;P 500 Index. Bloomberg ticker: SPX.</p>
+    <p>The Fund is the SPDR S&amp;P Regional Banking ETF. Bloomberg ticker: KRE.</p>
+    <table>
+      <tr><th colspan="4">Pricing Supplement</th></tr>
+      <tr><td>Bloomberg Ticker Symbol</td><td>RTY</td><td>SPX</td><td>KRE</td></tr>
+      <tr><td>Initial Value</td><td>2,050.25</td><td>5,600.75</td><td>$52.40</td></tr>
+    </table>
+  </body>
+</html>
+"""
+
+
 def test_sec_424b2_parser_extracts_jpm_fcn_terms_without_llm() -> None:
     result = parse_sec_424b2_structured_note(
         JPM_424B2_HTML,
@@ -155,6 +183,27 @@ def test_sec_424b2_parser_prefers_strict_labeled_barrier_in_long_prose() -> None
         "SPX": 0.6,
         "KRE": 0.6,
     }
+
+
+def test_sec_424b2_parser_resolves_initial_values_from_pricing_supplement_matrix() -> None:
+    result = parse_sec_424b2_structured_note(
+        JPM_PRICING_SUPPLEMENT_INITIAL_VALUES_HTML,
+        issuer_cik="0001665650",
+        accession_number="0001918704-26-014078",
+    )
+
+    assert result["status"] == "PARSED"
+    assert result["warnings"] == []
+    assert result["note"]["underlying_tickers"] == ["RTY", "SPX", "KRE"]
+    assert {item["ticker"]: item["initial_value"] for item in result["underlyings"]} == {
+        "RTY": 2050.25,
+        "SPX": 5600.75,
+        "KRE": 52.4,
+    }
+    rty = next(item for item in result["underlyings"] if item["ticker"] == "RTY")
+    assert rty["evidence"]["initial_value"]["resolver"] == "secondary_initial_value_matrix_table"
+    assert rty["evidence"]["initial_value"]["field_path"] == "underlyings.RTY.initial_value"
+    assert rty["evidence"]["initial_value"]["table_index"] == 1
 
 
 def test_fcn_note_date_signal_contract_evaluates_worst_coupon_autocall_and_barrier_distance() -> None:

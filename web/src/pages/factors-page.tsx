@@ -211,6 +211,18 @@ const FACTOR_LIBRARY_CATEGORY_LABELS: Record<string, string> = {
   sentiment: '情绪',
   other: '综合',
 };
+const FACTOR_LIBRARY_CATEGORY_BY_FAMILY_LABEL: Record<string, string> = {
+  动量: 'mom',
+  价格: 'price',
+  规模: 'size',
+  估值: 'val',
+  质量: 'qlty',
+  风险: 'risk',
+  情绪: 'sentiment',
+  综合: 'other',
+  其他: 'other',
+  '[外部]': 'other',
+};
 const FACTOR_LIBRARY_CATEGORY_BY_DESCRIPTOR: Record<string, string> = {
   alpha: 'other',
   beta: 'risk',
@@ -783,6 +795,8 @@ function descriptorCategory(factor: ApiFactorListItem): string {
 }
 
 function factorLibraryCategory(factor: ApiFactorListItem): string {
+  const family = String(factor.factor_family ?? '').trim();
+  if (family) return FACTOR_LIBRARY_CATEGORY_BY_FAMILY_LABEL[family] ?? 'other';
   if (isCompositeFactor(factor)) {
     const parentText = [
       factor.id,
@@ -1921,6 +1935,7 @@ function isFactorModelStrategySuggestionCandidate(
 }
 
 function isCompositeFactorStrategyCandidate(factor: ApiFactorListItem): boolean {
+  if (!isCompositeFactorStrategyActionVisible(factor)) return false;
   if (isFactorOffline(factor)) return false;
   const market = String(factor.market ?? '').toUpperCase();
   const tier = String(factor.tier_level ?? factor.tier_projection?.key ?? '').toUpperCase();
@@ -1930,6 +1945,12 @@ function isCompositeFactorStrategyCandidate(factor: ApiFactorListItem): boolean 
 
 function isCompositeFactor(factor: ApiFactorListItem): boolean {
   return String(factor.tier_level ?? factor.tier_projection?.key ?? '').toUpperCase() === 'F3';
+}
+
+function isCompositeFactorStrategyActionVisible(factor: ApiFactorListItem): boolean {
+  if (!isCompositeFactor(factor)) return false;
+  const level = factorLevel(factor)?.key;
+  return level === 'S' || level === 'A' || level === 'B';
 }
 
 function compositeFactorActionBlocker(factor: ApiFactorListItem): string {
@@ -5684,7 +5705,7 @@ export function FactorLibraryPage({
                   </td>
                   <td>
                     <div className="factor-row-actions">
-                      {isCompositeFactor(factor) ? (
+                      {isCompositeFactorStrategyActionVisible(factor) ? (
                         <button
                           className="factor-link"
                           disabled={!isCompositeFactorStrategyCandidate(factor)}

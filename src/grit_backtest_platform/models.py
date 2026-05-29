@@ -83,7 +83,7 @@ FactorDiagnosticMode = Literal['VERIFIED', 'SANDBOX']
 FactorDirection = Literal['HIGH_IS_BETTER', 'LOW_IS_BETTER', 'NEUTRAL']
 FactorFrequency = Literal['DAILY', 'WEEKLY', 'MONTHLY']
 FactorMiningJobStatus = Literal['QUEUED', 'RUNNING', 'CANCEL_REQUESTED', 'CANCELLED', 'COMPLETED', 'PARTIALLY_FAILED', 'FAILED']
-FactorMiningGenerationMode = Literal['PRICE_OPERATOR', 'HYBRID_COMPOSITION']
+FactorMiningGenerationMode = Literal['PRICE_OPERATOR', 'HYBRID_COMPOSITION', 'EXTERNAL_ALPHA_ZOO']
 FactorQuarantineStatus = Literal['PENDING', 'RUNNING', 'PASSED', 'REJECTED', 'NEEDS_REVIEW', 'PUBLISHED', 'SUPERSEDED']
 FactorPublishStatus = Literal['ELIGIBLE', 'BLOCKED', 'MANUAL_REVIEW_REQUIRED', 'PUBLISHED']
 FactorGovernanceStatus = Literal['WATCH', 'REVIEW', 'DECAYED', 'CROWDED', 'SUSPENDED']
@@ -99,6 +99,7 @@ Sec424B2ReparseReason = Literal[
     'LOW_CONFIDENCE',
     'UNSUPPORTED_PAYOFF',
     'DATA_SOURCE_BLOCKED',
+    'INITIAL_VALUE_MISSING',
 ]
 StructuredNoteReplayStatus = Literal['OK', 'PARTIAL', 'DATA_SOURCE_BLOCKED', 'FAILED']
 StructuredNoteReplayPreflightStatus = Literal[
@@ -108,6 +109,7 @@ StructuredNoteReplayPreflightStatus = Literal[
     'MEMORY_GUARDRAIL_BLOCKED',
     'RUNTIME_NOT_READY',
 ]
+StructuredNoteInitialValueProxyMode = Literal['none', 'SANDBOX_ONLY_FIRST_PRICE']
 StructuredNoteAttributionStatus = Literal[
     'CARRY_BUFFERING',
     'COUPON_OFFSET_EXHAUSTED',
@@ -115,8 +117,17 @@ StructuredNoteAttributionStatus = Literal[
     'DATA_SOURCE_BLOCKED',
 ]
 StructuredNotePressureRiskState = Literal['NORMAL', 'WATCH', 'REDUCE_BETA', 'DATA_SOURCE_BLOCKED']
-Sec424B2ReparseJobStatus = Literal['DISABLED', 'DRY_RUN_READY', 'DRY_RUN_ONLY', 'NOT_FOUND']
-Sec424B2ReparseJobMode = Literal['dry_run']
+Sec424B2ReparseJobStatus = Literal[
+    'DISABLED',
+    'DRY_RUN_READY',
+    'DRY_RUN_ONLY',
+    'APPLIED',
+    'PARTIAL',
+    'NOT_FOUND',
+]
+Sec424B2ReparseJobMode = Literal['dry_run', 'apply_append_only']
+Sec424B2IngestionJobStatus = Literal['DRY_RUN_READY', 'COMPLETED', 'PARTIAL', 'DATA_SOURCE_BLOCKED', 'FAILED']
+Sec424B2IngestionJobMode = Literal['dry_run', 'apply_append_only']
 F1AdmissionState = Literal['READY', 'READY_WITH_WARNING', 'OBSERVE', 'DATA_SOURCE_BLOCKED', 'MISSING_TIMING']
 PitPreprocessingMode = Literal['DAILY', 'MANUAL', 'SNAPSHOT_REFRESH']
 CompositionMethodType = Literal[
@@ -220,6 +231,9 @@ class ExternalFactorImportManifestModel(BaseModel):
     template_key: str = ''
     parsing_status: str = 'READY'
     warnings: list[str] = Field(default_factory=list)
+    catalog_manifest: dict[str, Any] = Field(default_factory=dict)
+    bench_summary: dict[str, Any] = Field(default_factory=dict)
+    raw_f2_batch: dict[str, Any] = Field(default_factory=dict)
 
 
 class ExternalFactorArtifactPathsModel(BaseModel):
@@ -227,6 +241,7 @@ class ExternalFactorArtifactPathsModel(BaseModel):
     raw_file_ref: str | None = None
     manifest_ref: str | None = None
     template_ref: str | None = None
+    download_url: str | None = None
 
 
 class ExternalFactorImportJobModel(BaseModel):
@@ -250,6 +265,7 @@ class ExternalFactorImportJobModel(BaseModel):
     risk_flags: list[str] = Field(default_factory=list)
     next_actions: list[str] = Field(default_factory=list)
     governance_gate: str = 'REVIEW_BEFORE_QUARANTINE'
+    raw_f2_batch: dict[str, Any] = Field(default_factory=dict)
 
 
 class ExternalFactorLocalFileUploadRequest(BaseModel):
@@ -597,6 +613,17 @@ class StructuredNoteFactorDefinitionResponse(BaseModel):
     summary: dict[str, Any] = Field(default_factory=dict)
 
 
+class StructuredNoteFactorFactoryMountContractResponse(BaseModel):
+    definition_version: str
+    registration_status: Literal['CONTRACT_READY', 'REVIEW_REQUIRED'] = 'CONTRACT_READY'
+    f2_definition_ids: list[str] = Field(default_factory=list)
+    dimension_schema: dict[str, Any] = Field(default_factory=dict)
+    display_name_cn: str = '[外部] - FCN增强收益归因 [精炼]'
+    publish_boundary: str = 'sandbox -> quarantine -> publish'
+    factor_library_write: Literal['BLOCKED_UNTIL_QUARANTINE_PUBLISH'] = 'BLOCKED_UNTIL_QUARANTINE_PUBLISH'
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
 class StructuredNoteDefinitionBindingResponse(BaseModel):
     note_id: str
     definition_version: str = ''
@@ -641,6 +668,7 @@ class StructuredNoteFcnReplayPreflightRequest(BaseModel):
     end_date: str | None = None
     replay_mode: Literal['sandbox'] = 'sandbox'
     price_proxies: dict[str, Any] = Field(default_factory=dict)
+    initial_value_proxy_mode: StructuredNoteInitialValueProxyMode = 'none'
 
 
 class StructuredNoteFcnReplayPreflightNoteResultModel(BaseModel):
@@ -653,7 +681,12 @@ class StructuredNoteFcnReplayPreflightNoteResultModel(BaseModel):
     blocked_point_count: int = 0
     elapsed_ms: float = 0.0
     missing_symbols: list[str] = Field(default_factory=list)
+    missing_initial_value_symbols: list[str] = Field(default_factory=list)
     blocker_code: str | None = None
+    initial_value_proxy_mode: StructuredNoteInitialValueProxyMode | None = None
+    initial_value_proxy_count: int = 0
+    initial_value_proxy_symbols: list[str] = Field(default_factory=list)
+    initial_value_proxy_evidence: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class StructuredNoteFcnReplayPreflightResponse(BaseModel):
@@ -773,6 +806,7 @@ class Sec424B2PilotIngestResponse(BaseModel):
 
 class Sec424B2ReparseCandidateModel(BaseModel):
     run_id: str
+    note_id: str = ''
     accession_number: str = ''
     issuer_cik: str = ''
     source_url: str = ''
@@ -783,6 +817,7 @@ class Sec424B2ReparseCandidateModel(BaseModel):
     status: Sec424B2ParseStatus = 'REVIEW_REQUIRED'
     reasons: list[Sec424B2ReparseReason] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    missing_initial_value_count: int = 0
 
 
 class Sec424B2ReparseCandidateResponse(BaseModel):
@@ -818,6 +853,32 @@ class Sec424B2ReparseJobResponse(BaseModel):
     updated_at: str | None = None
 
 
+class Sec424B2IngestionJobRequest(BaseModel):
+    issuer_cik: str = '0001665650'
+    manifest_path: str | None = None
+    scan_limit: int = Field(default=200, ge=1, le=10_000)
+    max_filings: int = Field(default=100, ge=1, le=10_000)
+    mode: Sec424B2IngestionJobMode = 'dry_run'
+    dry_run: bool = True
+    rate_limit_rps: float | None = Field(default=None, gt=0.0, le=10.0)
+    accessions: list[Any] = Field(default_factory=list)
+    parser_options: dict[str, Any] = Field(default_factory=dict)
+
+
+class Sec424B2IngestionJobResponse(BaseModel):
+    job_id: str
+    status: Sec424B2IngestionJobStatus = 'DRY_RUN_READY'
+    mode: Sec424B2IngestionJobMode = 'dry_run'
+    dry_run: bool = True
+    issuer_cik: str = '0001665650'
+    selected_count: int = 0
+    accessions: list[dict[str, Any]] = Field(default_factory=list)
+    actions: list[dict[str, Any]] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
 class StructuredNoteFcnReplayRequest(BaseModel):
     note_id: str | None = None
     parse_run_id: str | None = None
@@ -827,6 +888,60 @@ class StructuredNoteFcnReplayRequest(BaseModel):
     end_date: str | None = None
     observation_frequency: str | None = None
     price_proxies: dict[str, Any] = Field(default_factory=dict)
+
+
+class StructuredNoteFcnReplayBatchRequest(BaseModel):
+    manifest_id: str | None = None
+    manifest_path: str | None = None
+    note_ids: list[str] = Field(default_factory=list)
+    sample_limit: int = Field(default=10, ge=1, le=10_000)
+    max_notes: int = Field(default=100, ge=1, le=10_000)
+    dataset_snapshot_id: str = 'ds-price'
+    replay_mode: Literal['sandbox'] = 'sandbox'
+    start_date: str | None = None
+    end_date: str | None = None
+    observation_frequency: str | None = None
+    price_proxies: dict[str, Any] = Field(default_factory=dict)
+
+
+class StructuredNoteFcnReplayBatchNoteResultModel(BaseModel):
+    note_id: str = ''
+    parse_run_id: str | None = None
+    replay_run_id: str | None = None
+    status: StructuredNoteReplayStatus = 'DATA_SOURCE_BLOCKED'
+    point_count: int = 0
+    blocked_count: int = 0
+    missing_symbols: list[str] = Field(default_factory=list)
+    error_message: str | None = None
+
+
+class StructuredNoteFcnReplayBatchResponse(BaseModel):
+    batch_id: str
+    status: StructuredNoteReplayStatus = 'DATA_SOURCE_BLOCKED'
+    note_count: int = 0
+    replay_run_count: int = 0
+    replay_point_count: int = 0
+    data_source_blocked_count: int = 0
+    run_ids: list[str] = Field(default_factory=list)
+    note_results: list[StructuredNoteFcnReplayBatchNoteResultModel] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class StructuredNoteFcnReplayBatchAttributionSummaryResponse(BaseModel):
+    batch_id: str
+    status: StructuredNoteReplayStatus = 'DATA_SOURCE_BLOCKED'
+    note_count: int = 0
+    replay_run_count: int = 0
+    latest_net_benefit_sum: float | None = None
+    latest_net_benefit_avg: float | None = None
+    negative_convexity_note_count: int = 0
+    data_source_blocked_count: int = 0
+    note_results: list[dict[str, Any]] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
 class StructuredNoteFcnReplayPointModel(BaseModel):

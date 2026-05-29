@@ -20,7 +20,7 @@ from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
-from time import monotonic
+from time import monotonic, sleep
 from uuid import uuid4
 
 from .backtest_engine import (
@@ -1082,6 +1082,9 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
     def update_external_factor_import_mapping(self, job_id: str, request: Any) -> dict[str, Any]:
         return self._factor_research_service().update_external_factor_import_mapping(job_id, request)
+
+    def materialize_external_factor_import_source_file(self, job_id: str) -> dict[str, Any]:
+        return self._factor_research_service().materialize_external_factor_import_source_file(job_id)
 
     def submit_external_factor_import_review(self, job_id: str) -> dict[str, Any]:
         return self._factor_research_service().submit_external_factor_import_review(job_id)
@@ -4128,6 +4131,42 @@ class RealBacktestPlatformService(BacktestPlatformService):
             },
         }
 
+    def get_structured_note_fcn_factor_factory_mount_contract(self) -> dict[str, Any]:
+        definitions = structured_note_factor_definitions()
+        f2_definitions = [dict(item) for item in definitions if str(item.get("layer") or "") == "F2"]
+        f2_definition_ids = [str(item.get("definition_id") or "") for item in f2_definitions if item.get("definition_id")]
+        note_instance_count = self.storage.fetch_one("SELECT COUNT(*) AS count FROM structured_note_terms")
+        replay_series_count = self.storage.fetch_one(
+            "SELECT COUNT(DISTINCT note_id || ':' || run_id) AS count FROM structured_note_replay_runs"
+        )
+        return {
+            "definition_version": STRUCTURED_NOTE_DEFINITION_VERSION,
+            "registration_status": "CONTRACT_READY",
+            "f2_definition_ids": f2_definition_ids,
+            "dimension_schema": {
+                "primary_dimensions": ["note_id", "note_date"],
+                "instance_binding": "note_id",
+                "time_dimension": "note_date",
+                "series_shape": "note_id x f2_definition_id x note_date",
+                "definition_count_policy": "stable_templates_not_per_note_ids",
+            },
+            "display_name_cn": "[外部] - FCN增强收益归因 [精炼]",
+            "publish_boundary": "sandbox -> quarantine -> publish",
+            "factor_library_write": "BLOCKED_UNTIL_QUARANTINE_PUBLISH",
+            "summary": {
+                "note_instance_count": int((note_instance_count or {}).get("count") or 0),
+                "f2_series_count": int((replay_series_count or {}).get("count") or 0),
+                "f2_definition_count": len(f2_definition_ids),
+                "quarantine_required": True,
+                "refined_status_requires": [
+                    "clean_preflight_without_initial_value_proxy",
+                    "shadow_replay_points_persisted",
+                    "attribution_evidence_available",
+                    "factor_factory_quarantine_publish_approval",
+                ],
+            },
+        }
+
     def get_structured_note_f1_static_bundle(self, note_id: str) -> dict[str, Any]:
         normalized_note_id = str(note_id or "").strip()
         if not normalized_note_id:
@@ -4307,6 +4346,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
         dataset_snapshot_id = str(payload.get("dataset_snapshot_id") or DATASET_PRICE_SNAPSHOT_ID)
         replay_mode = str(payload.get("replay_mode") or "sandbox").lower()
         price_proxies = dict(payload.get("price_proxies") or {}) if isinstance(payload.get("price_proxies"), Mapping) else {}
+        raw_initial_value_proxy_mode = str(payload.get("initial_value_proxy_mode") or "none").strip()
+        initial_value_proxy_mode = (
+            "SANDBOX_ONLY_FIRST_PRICE"
+            if raw_initial_value_proxy_mode.upper() == "SANDBOX_ONLY_FIRST_PRICE"
+            else "none"
+        )
         run_id = "fcn_preflight_" + hashlib.sha256(
             f"{','.join(note_ids)}|{dataset_snapshot_id}|{replay_mode}|{now}|{uuid4().hex}".encode("utf-8")
         ).hexdigest()[:16]
@@ -4316,6 +4361,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
         replay_point_count = 0
         blocked_point_count = 0
         data_source_blocked_count = 0
+        initial_value_proxy_count = 0
+        initial_value_proxy_note_count = 0
         warnings = list(selection_warnings)
         started = monotonic()
         status = "OK"
@@ -4331,6 +4378,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     dataset_snapshot_id=dataset_snapshot_id,
                     replay_mode=replay_mode,
                     price_proxies=price_proxies,
+                    initial_value_proxy_mode=initial_value_proxy_mode,
                     start_date=payload.get("start_date"),
                     end_date=payload.get("end_date"),
                 )
@@ -4344,7 +4392,12 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "ok_point_count": 0,
                     "blocked_point_count": 0,
                     "missing_symbols": [],
+                    "missing_initial_value_symbols": [],
                     "blocker_code": f"preflight_exception: {exc}",
+                    "initial_value_proxy_mode": initial_value_proxy_mode,
+                    "initial_value_proxy_count": 0,
+                    "initial_value_proxy_symbols": [],
+                    "initial_value_proxy_evidence": [],
                 }
             elapsed_ms = (monotonic() - note_started) * 1000
             result["elapsed_ms"] = elapsed_ms
@@ -4354,6 +4407,10 @@ class RealBacktestPlatformService(BacktestPlatformService):
             slot_count_histogram[underlying_count] = slot_count_histogram.get(underlying_count, 0) + 1
             replay_point_count += int(result.get("replay_point_count") or 0)
             blocked_point_count += int(result.get("blocked_point_count") or 0)
+            note_proxy_count = int(result.get("initial_value_proxy_count") or 0)
+            initial_value_proxy_count += note_proxy_count
+            if note_proxy_count:
+                initial_value_proxy_note_count += 1
             if result.get("status") == "DATA_SOURCE_BLOCKED":
                 data_source_blocked_count += 1
             current_cache_stats = self.get_structured_note_f1_cache_stats()
@@ -4373,10 +4430,18 @@ class RealBacktestPlatformService(BacktestPlatformService):
         price_missing_ratio = (blocked_point_count / replay_point_count) if replay_point_count else (
             1.0 if data_source_blocked_count else 0.0
         )
+        if initial_value_proxy_count and "SANDBOX_ONLY_INITIAL_VALUE_PROXY_USED" not in warnings:
+            warnings.append("SANDBOX_ONLY_INITIAL_VALUE_PROXY_USED")
+            if status == "OK":
+                status = "WARN"
         summary = {
             "warnings": warnings,
             "dataset_snapshot_id": dataset_snapshot_id,
             "replay_mode": replay_mode,
+            "initial_value_proxy_mode": initial_value_proxy_mode,
+            "initial_value_proxy_count": initial_value_proxy_count,
+            "initial_value_proxy_note_count": initial_value_proxy_note_count,
+            "sandbox_initial_value_proxy_used": bool(initial_value_proxy_count),
             "sample_limit": int(payload.get("sample_limit") or 10),
             "max_notes": int(payload.get("max_notes") or 100),
             "publish_boundary": "sandbox -> quarantine -> publish",
@@ -4518,6 +4583,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
         dataset_snapshot_id: str,
         replay_mode: str,
         price_proxies: Mapping[str, Any],
+        initial_value_proxy_mode: str,
         start_date: Any,
         end_date: Any,
     ) -> dict[str, Any]:
@@ -4536,6 +4602,27 @@ class RealBacktestPlatformService(BacktestPlatformService):
             for logical, actual in symbol_map.items()
         }
         missing_symbols = [ticker for ticker, rows in logical_rows.items() if not rows]
+        underlyings, initial_value_proxy_evidence = self._apply_structured_note_initial_value_proxy(
+            underlyings,
+            logical_rows,
+            symbol_map,
+            initial_value_proxy_mode=initial_value_proxy_mode,
+            replay_mode=replay_mode,
+        )
+        initial_value_proxy_symbols = [
+            str(item.get("ticker") or "")
+            for item in initial_value_proxy_evidence
+            if str(item.get("ticker") or "")
+        ]
+        missing_initial_value_symbols = [
+            str(item.get("ticker") or "").upper()
+            for item in underlyings
+            if str(item.get("ticker") or "").strip()
+            and (
+                (initial := _coerce_float(item.get("initial_value") or item.get("strike_value"), None)) is None
+                or initial <= 0
+            )
+        ]
         observation_dates = self._structured_note_observation_dates(
             logical_rows,
             str(note.get("observation_frequency") or note.get("coupon_frequency") or "Monthly"),
@@ -4568,6 +4655,14 @@ class RealBacktestPlatformService(BacktestPlatformService):
         if not observation_dates:
             blocked_count = 1
         status = "OK" if observation_dates and ok_count == len(observation_dates) and not missing_symbols else "DATA_SOURCE_BLOCKED"
+        if status == "OK":
+            blocker_code = None
+        elif missing_symbols:
+            blocker_code = "missing_price_history"
+        elif missing_initial_value_symbols:
+            blocker_code = "missing_initial_value"
+        else:
+            blocker_code = "missing_observation_dates"
         return {
             "note_id": str(bundle.get("note_id") or note.get("note_id") or ""),
             "parse_run_id": bundle.get("parse_run_id"),
@@ -4577,23 +4672,74 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "ok_point_count": ok_count,
             "blocked_point_count": blocked_count,
             "missing_symbols": missing_symbols,
-            "blocker_code": None if status == "OK" else ("missing_price_history" if missing_symbols else "missing_observation_dates"),
+            "missing_initial_value_symbols": missing_initial_value_symbols,
+            "blocker_code": blocker_code,
+            "initial_value_proxy_mode": initial_value_proxy_mode,
+            "initial_value_proxy_count": len(initial_value_proxy_evidence),
+            "initial_value_proxy_symbols": initial_value_proxy_symbols,
+            "initial_value_proxy_evidence": initial_value_proxy_evidence,
         }
+
+    @staticmethod
+    def _apply_structured_note_initial_value_proxy(
+        underlyings: Sequence[Mapping[str, Any]],
+        logical_rows: Mapping[str, Sequence[Mapping[str, Any]]],
+        symbol_map: Mapping[str, str],
+        *,
+        initial_value_proxy_mode: str,
+        replay_mode: str,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        copied = [dict(item) for item in underlyings]
+        if replay_mode != "sandbox" or initial_value_proxy_mode != "SANDBOX_ONLY_FIRST_PRICE":
+            return copied, []
+
+        evidence: list[dict[str, Any]] = []
+        for underlying in copied:
+            ticker = str(underlying.get("ticker") or "").upper()
+            if not ticker:
+                continue
+            current_initial = _coerce_float(underlying.get("initial_value") or underlying.get("strike_value"), None)
+            if current_initial is not None and current_initial > 0:
+                continue
+            for row in logical_rows.get(ticker) or []:
+                first_price = _coerce_float(row.get("adj_close") or row.get("close"), None)
+                if first_price is None or first_price <= 0:
+                    continue
+                underlying["initial_value"] = first_price
+                evidence.append(
+                    {
+                        "ticker": ticker,
+                        "price_proxy_symbol": str(symbol_map.get(ticker) or ticker).upper(),
+                        "initial_value": first_price,
+                        "date": str(row.get("date") or ""),
+                        "mode": "SANDBOX_ONLY_FIRST_PRICE",
+                        "source": "dataset_price_bars.adj_close",
+                    }
+                )
+                break
+        return copied, evidence
 
     @staticmethod
     def _sec_424b2_evidence_anchors(note: Mapping[str, Any], underlyings: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         anchors: list[dict[str, Any]] = []
+        def collect_anchor(raw_anchor: Mapping[str, Any], *, default_field_path: str) -> None:
+            if raw_anchor.get("field_path") or raw_anchor.get("text"):
+                anchors.append({"field_path": default_field_path, **dict(raw_anchor)})
+            for key, value in raw_anchor.items():
+                if isinstance(value, Mapping) and (value.get("field_path") or value.get("text")):
+                    anchors.append({"field_path": f"{default_field_path}.{key}", **dict(value)})
+
         note_evidence = note.get("evidence") if isinstance(note.get("evidence"), Mapping) else {}
         for field_path, raw_anchor in note_evidence.items():
             if not isinstance(raw_anchor, Mapping):
                 continue
-            anchors.append({"field_path": str(field_path), **dict(raw_anchor)})
+            collect_anchor(raw_anchor, default_field_path=str(field_path))
         for index, underlying in enumerate(underlyings):
             raw_anchor = underlying.get("evidence") if isinstance(underlying.get("evidence"), Mapping) else {}
             if not raw_anchor:
                 continue
             ticker = str(underlying.get("ticker") or index)
-            anchors.append({"field_path": f"underlyings.{ticker}", **dict(raw_anchor)})
+            collect_anchor(raw_anchor, default_field_path=f"underlyings.{ticker}")
         return anchors
 
     def get_sec_424b2_parse_run(self, run_id: str) -> dict[str, Any]:
@@ -4916,6 +5062,25 @@ class RealBacktestPlatformService(BacktestPlatformService):
             warnings = loads(row.get("warnings_json"), [])
             warning_items = [str(item) for item in warnings] if isinstance(warnings, list) else []
             reasons: list[str] = []
+            run_id = str(row.get("run_id") or "")
+            note_row = self.storage.fetch_one(
+                "SELECT note_id FROM structured_note_terms WHERE parse_run_id = ?",
+                (run_id,),
+            )
+            note_id = str((note_row or {}).get("note_id") or "")
+            missing_initial_value_count = 0
+            if note_id:
+                missing_row = self.storage.fetch_one(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM structured_note_underlyings
+                    WHERE note_id = ?
+                      AND initial_value IS NULL
+                      AND strike_value IS NULL
+                    """,
+                    (note_id,),
+                )
+                missing_initial_value_count = int((missing_row or {}).get("count") or 0)
             if str(row.get("parser_version") or "") != parser_version:
                 reasons.append("PARSER_CHANGED")
             if str(row.get("parser_rule_hash") or "") != rule_hash:
@@ -4929,11 +5094,15 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 reasons.append("UNSUPPORTED_PAYOFF")
             if any("DATA_SOURCE_BLOCKED" in item or "price" in item.lower() for item in warning_items):
                 reasons.append("DATA_SOURCE_BLOCKED")
+            if missing_initial_value_count:
+                reasons.append("INITIAL_VALUE_MISSING")
+                warning_items.append(f"initial_value_missing:{missing_initial_value_count}")
             if not reasons:
                 continue
             candidates.append(
                 {
-                    "run_id": str(row.get("run_id") or ""),
+                    "run_id": run_id,
+                    "note_id": note_id,
                     "accession_number": str(row.get("accession_number") or ""),
                     "issuer_cik": str(row.get("issuer_cik") or ""),
                     "source_url": str(row.get("source_url") or ""),
@@ -4944,6 +5113,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "status": str(row.get("status") or "REVIEW_REQUIRED"),
                     "reasons": sorted(set(reasons)),
                     "warnings": warning_items,
+                    "missing_initial_value_count": missing_initial_value_count,
                 }
             )
         reason_counts: dict[str, int] = {}
@@ -5010,39 +5180,70 @@ class RealBacktestPlatformService(BacktestPlatformService):
         ][:max_filings]
         status = "DRY_RUN_READY"
         blocked_reason = ""
-        if mode != "dry_run" or not dry_run_enabled:
+        apply_requested = persist and mode == "apply_append_only" and not dry_run_enabled
+        if mode not in {"dry_run", "apply_append_only"}:
             status = "DRY_RUN_ONLY"
-            blocked_reason = "non_dry_run_reparse_jobs_are_not_enabled"
+            blocked_reason = "unsupported_reparse_job_mode"
             eligible = []
         elif not auto_repair_enabled:
             status = "DISABLED"
             blocked_reason = "auto_repair_disabled"
             eligible = []
-        actions = [
-            {
-                "action": "REPARSE_DRY_RUN",
-                "run_id": str(candidate.get("run_id") or ""),
-                "accession_number": str(candidate.get("accession_number") or ""),
-                "source_url": str(candidate.get("source_url") or ""),
-                "matched_reasons": [
-                    str(reason) for reason in candidate.get("reasons") or [] if str(reason) in allowlist
-                ],
-                "would_fetch_source_url": bool(candidate.get("source_url")),
-                "would_write_parse_run": False,
-            }
-            for candidate in eligible
-        ]
+        elif mode == "apply_append_only" and not apply_requested:
+            status = "DRY_RUN_ONLY"
+            blocked_reason = "apply_append_only_requires_create_endpoint_and_dry_run_false"
+            eligible = []
+        elif apply_requested and (set(allowlist) != {"INITIAL_VALUE_MISSING"} or max_filings > 10):
+            status = "DRY_RUN_ONLY"
+            blocked_reason = "apply_append_only_requires_initial_value_missing_allowlist_and_max_10"
+            eligible = []
+        if apply_requested and not blocked_reason:
+            actions = [self._apply_sec_424b2_reparse_candidate(candidate, allowlist) for candidate in eligible]
+            status = "APPLIED" if actions and all(action.get("status") == "APPLIED" for action in actions) else "PARTIAL"
+            if not actions:
+                status = "DRY_RUN_READY"
+        else:
+            actions = [
+                {
+                    "action": "REPARSE_DRY_RUN",
+                    "run_id": str(candidate.get("run_id") or ""),
+                    "note_id": str(candidate.get("note_id") or ""),
+                    "accession_number": str(candidate.get("accession_number") or ""),
+                    "source_url": str(candidate.get("source_url") or ""),
+                    "matched_reasons": [
+                        str(reason) for reason in candidate.get("reasons") or [] if str(reason) in allowlist
+                    ],
+                    "would_fetch_source_url": bool(candidate.get("source_url")),
+                    "would_write_parse_run": bool(apply_requested),
+                }
+                for candidate in eligible
+            ]
         now = iso_now()
         job_id = "sec424b2_reparse_job_" + hashlib.sha256(
             f"{now}|{uuid4().hex}|{allowlist}|{max_filings}".encode("utf-8")
         ).hexdigest()[:16]
+        initial_value_missing_count = sum(int(candidate.get("missing_initial_value_count") or 0) for candidate in eligible)
+        initial_value_resolved_count = sum(int(action.get("initial_value_resolved_count") or 0) for action in actions)
+        review_required_count = sum(1 for action in actions if action.get("status") in {"REVIEW_REQUIRED", "DATA_SOURCE_BLOCKED", "FAILED"})
+        cache_invalidated_note_ids = sorted(
+            {
+                str(action.get("note_id") or "")
+                for action in actions
+                if action.get("cache_invalidated") and str(action.get("note_id") or "")
+            }
+        )
         summary = {
             "candidate_count": len(candidates),
             "eligible_count": len(eligible),
             "selected_count": len(actions),
             "max_filings": max_filings,
             "blocked_reason": blocked_reason,
-            "dry_run_only": True,
+            "dry_run_only": not apply_requested,
+            "initial_value_missing_count": initial_value_missing_count,
+            "initial_value_resolved_count": initial_value_resolved_count,
+            "review_required_count": review_required_count,
+            "append_only_parse_run_count": sum(1 for action in actions if action.get("wrote_parse_run")),
+            "cache_invalidated_note_ids": cache_invalidated_note_ids,
             "source": "reparse-candidates",
             "current_parser_version": (candidate_response.get("summary") or {}).get("current_parser_version"),
             "current_rule_hash": (candidate_response.get("summary") or {}).get("current_rule_hash"),
@@ -5050,8 +5251,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
         response = {
             "job_id": job_id,
             "status": status,
-            "mode": "dry_run",
-            "dry_run": True,
+            "mode": mode if mode in {"dry_run", "apply_append_only"} else "dry_run",
+            "dry_run": not apply_requested,
             "auto_repair_enabled": auto_repair_enabled,
             "reasons_allowlist": allowlist,
             "candidate_count": len(candidates),
@@ -5069,8 +5270,8 @@ class RealBacktestPlatformService(BacktestPlatformService):
                     "id": job_id,
                     "job_id": job_id,
                     "status": status,
-                    "mode": "dry_run",
-                    "dry_run": 1,
+                    "mode": mode if mode in {"dry_run", "apply_append_only"} else "dry_run",
+                    "dry_run": 0 if apply_requested else 1,
                     "auto_repair_enabled": 1 if auto_repair_enabled else 0,
                     "reasons_allowlist_json": dumps(allowlist),
                     "candidates_json": dumps(eligible),
@@ -5081,6 +5282,81 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 },
             )
         return response
+
+    def _apply_sec_424b2_reparse_candidate(
+        self,
+        candidate: Mapping[str, Any],
+        allowlist: Sequence[str],
+    ) -> dict[str, Any]:
+        run_id = str(candidate.get("run_id") or "")
+        note_id = str(candidate.get("note_id") or "")
+        source_url = str(candidate.get("source_url") or "")
+        accession_number = str(candidate.get("accession_number") or "")
+        issuer_cik = str(candidate.get("issuer_cik") or "")
+        matched_reasons = [str(reason) for reason in candidate.get("reasons") or [] if str(reason) in allowlist]
+        action: dict[str, Any] = {
+            "action": "REPARSE_APPLY_APPEND_ONLY",
+            "run_id": run_id,
+            "note_id": note_id,
+            "accession_number": accession_number,
+            "source_url": source_url,
+            "matched_reasons": matched_reasons,
+            "would_fetch_source_url": bool(source_url),
+            "would_write_parse_run": True,
+            "wrote_parse_run": False,
+            "cache_invalidated": False,
+            "initial_value_resolved_count": 0,
+        }
+        if not source_url:
+            return {**action, "status": "DATA_SOURCE_BLOCKED", "blocked_reason": "missing_source_url"}
+        try:
+            html_text = SecEdgarProvider().fetch_archive_document(source_url)
+            parsed = parse_sec_424b2_structured_note(
+                html_text,
+                source_url=source_url,
+                issuer_cik=issuer_cik,
+                accession_number=accession_number,
+            )
+            parsed_note = dict(parsed.get("note") or {})
+            parsed_note_id = str(parsed_note.get("note_id") or note_id)
+            before_count_row = self.storage.fetch_one("SELECT COUNT(*) AS count FROM sec_424b2_parse_runs")
+            before_count = int((before_count_row or {}).get("count") or 0)
+            self._persist_sec_424b2_parse_result(parsed)
+            after_count_row = self.storage.fetch_one("SELECT COUNT(*) AS count FROM sec_424b2_parse_runs")
+            after_count = int((after_count_row or {}).get("count") or 0)
+            self._invalidate_structured_note_f1_static_cache(parsed_note_id)
+            missing_initial = [
+                item
+                for item in parsed.get("underlyings") or []
+                if isinstance(item, Mapping)
+                and item.get("initial_value") is None
+                and item.get("strike_value") is None
+            ]
+            resolved_count = sum(
+                1
+                for item in parsed.get("underlyings") or []
+                if isinstance(item, Mapping)
+                and (item.get("initial_value") is not None or item.get("strike_value") is not None)
+            )
+            status = "APPLIED" if str(parsed.get("status") or "") == "PARSED" and not missing_initial else "REVIEW_REQUIRED"
+            return {
+                **action,
+                "status": status,
+                "note_id": parsed_note_id,
+                "new_parse_run_id": str((parsed.get("parse_run") or {}).get("run_id") or ""),
+                "new_parse_run_inserted": after_count > before_count,
+                "wrote_parse_run": True,
+                "cache_invalidated": True,
+                "initial_value_resolved_count": resolved_count,
+                "missing_initial_value_count_after": len(missing_initial),
+                "warnings": [str(item) for item in parsed.get("warnings") or []],
+            }
+        except Exception as exc:
+            return {
+                **action,
+                "status": "DATA_SOURCE_BLOCKED",
+                "blocked_reason": f"reparse_apply_failed: {exc}",
+            }
 
     @staticmethod
     def _sec_424b2_auto_repair_enabled(payload: Mapping[str, Any]) -> bool:
@@ -5109,9 +5385,287 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "LOW_CONFIDENCE",
             "UNSUPPORTED_PAYOFF",
             "DATA_SOURCE_BLOCKED",
+            "INITIAL_VALUE_MISSING",
         }
         allowlist = [str(item).strip().upper() for item in raw if str(item).strip().upper() in allowed_reasons]
         return allowlist or ["PARSER_CHANGED", "RULEPACK_CHANGED"]
+
+    def preview_sec_424b2_ingestion_job(self, request: Any | None = None) -> dict[str, Any]:
+        return self._build_sec_424b2_ingestion_job(request, persist=False)
+
+    def create_sec_424b2_ingestion_job(self, request: Any | None = None) -> dict[str, Any]:
+        return self._build_sec_424b2_ingestion_job(request, persist=True)
+
+    def get_sec_424b2_ingestion_job(self, job_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one("SELECT * FROM sec_424b2_ingestion_jobs WHERE job_id = ?", (job_id,))
+        if not row:
+            raise ValueError(f"SEC 424B2 ingestion job not found: {job_id}")
+        accessions = loads(row.get("accessions_json"), [])
+        actions = loads(row.get("actions_json"), [])
+        summary = loads(row.get("summary_json"), {})
+        if not isinstance(summary, Mapping):
+            summary = {}
+        return {
+            "job_id": str(row.get("job_id") or ""),
+            "status": str(row.get("status") or "DATA_SOURCE_BLOCKED"),
+            "mode": str(row.get("mode") or "dry_run"),
+            "dry_run": bool(row.get("dry_run")),
+            "issuer_cik": str(summary.get("issuer_cik") or ""),
+            "selected_count": int(summary.get("selected_count") or 0),
+            "accessions": accessions if isinstance(accessions, list) else [],
+            "actions": actions if isinstance(actions, list) else [],
+            "summary": dict(summary),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+        }
+
+    def _build_sec_424b2_ingestion_job(self, request: Any | None, *, persist: bool) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        now = iso_now()
+        issuer_cik = str(payload.get("issuer_cik") or "0001665650").strip()
+        mode = str(payload.get("mode") or "dry_run").lower()
+        dry_run = bool(payload.get("dry_run", True))
+        max_filings = max(1, min(10_000, int(payload.get("max_filings") or 100)))
+        scan_limit = max(1, min(10_000, int(payload.get("scan_limit") or max_filings)))
+        rate_limit_rps = _coerce_float(payload.get("rate_limit_rps"), None)
+        if rate_limit_rps is None:
+            rate_limit_rps = _coerce_float(os.getenv("GRIT_SEC_424B2_RATE_LIMIT_RPS"), 5.0) or 5.0
+        rate_limit_rps = max(0.1, min(float(rate_limit_rps), 10.0))
+        entries, source_warnings = self._sec_424b2_ingestion_entries(payload, issuer_cik=issuer_cik, scan_limit=scan_limit)
+        selected = entries[:max_filings]
+        job_id = "sec424b2_ingest_" + hashlib.sha256(
+            f"{issuer_cik}|{mode}|{dry_run}|{','.join(str(item.get('accession_number') or item.get('source_url') or '') for item in selected)}|{now}|{uuid4().hex}".encode("utf-8")
+        ).hexdigest()[:16]
+        actions: list[dict[str, Any]] = []
+        status_counts: dict[str, int] = {}
+        parsed_count = 0
+        skipped_existing_count = 0
+        blocked_count = 0
+        apply_requested = persist and mode == "apply_append_only" and not dry_run
+        unsupported_mode = mode not in {"dry_run", "apply_append_only"}
+        for index, entry in enumerate(selected):
+            accession = str(entry.get("accession_number") or "")
+            source_url = str(entry.get("source_url") or entry.get("primary_document_url") or "")
+            existing = self._sec_424b2_existing_current_parse(accession, source_url)
+            action = {
+                "accession_number": accession,
+                "source_url": source_url,
+                "primary_document": str(entry.get("primary_document") or ""),
+                "issuer_cik": str(entry.get("issuer_cik") or issuer_cik),
+                "existing_parse_run_id": str((existing or {}).get("run_id") or ""),
+                "would_fetch_source_url": bool(source_url),
+                "would_write_parse_run": False,
+                "wrote_parse_run": False,
+                "status": "WOULD_FETCH_AND_PARSE",
+            }
+            if unsupported_mode:
+                action["status"] = "DATA_SOURCE_BLOCKED"
+                action["blocked_reason"] = "unsupported_ingestion_job_mode"
+                blocked_count += 1
+            elif existing:
+                action["status"] = "SKIPPED_EXISTING"
+                skipped_existing_count += 1
+            elif not source_url:
+                action["status"] = "DATA_SOURCE_BLOCKED"
+                action["blocked_reason"] = "missing_source_url"
+                blocked_count += 1
+            elif apply_requested:
+                action["would_write_parse_run"] = True
+                try:
+                    html_text = SecEdgarProvider().fetch_archive_document(source_url)
+                    parsed = parse_sec_424b2_structured_note(
+                        html_text,
+                        source_url=source_url,
+                        issuer_cik=str(entry.get("issuer_cik") or issuer_cik),
+                        accession_number=accession,
+                        primary_document=str(entry.get("primary_document") or ""),
+                        parser_options=payload.get("parser_options") if isinstance(payload.get("parser_options"), Mapping) else {},
+                    )
+                    self._persist_sec_424b2_parse_result(parsed)
+                    parsed_count += 1
+                    action.update(
+                        {
+                            "status": str(parsed.get("status") or "REVIEW_REQUIRED"),
+                            "wrote_parse_run": True,
+                            "new_parse_run_id": str((parsed.get("parse_run") or {}).get("run_id") or ""),
+                            "note_id": str((parsed.get("note") or {}).get("note_id") or ""),
+                            "warnings": list(parsed.get("warnings") or []),
+                        }
+                    )
+                    if index < len(selected) - 1:
+                        sleep(1.0 / rate_limit_rps)
+                except Exception as exc:
+                    blocked_count += 1
+                    action.update(
+                        {
+                            "status": "DATA_SOURCE_BLOCKED",
+                            "blocked_reason": f"fetch_or_parse_failed: {exc}",
+                        }
+                    )
+            else:
+                action["would_write_parse_run"] = True
+            actions.append(action)
+            action_status = str(action.get("status") or "")
+            status_counts[action_status] = status_counts.get(action_status, 0) + 1
+        if unsupported_mode:
+            status = "FAILED"
+        elif not selected or blocked_count == len(selected):
+            status = "DATA_SOURCE_BLOCKED"
+        elif apply_requested and blocked_count:
+            status = "PARTIAL"
+        elif apply_requested:
+            status = "COMPLETED"
+        else:
+            status = "DRY_RUN_READY"
+        summary = {
+            "issuer_cik": str(issuer_cik).zfill(10) if str(issuer_cik).isdigit() else issuer_cik,
+            "scan_limit": scan_limit,
+            "max_filings": max_filings,
+            "selected_count": len(selected),
+            "discovered_count": len(entries),
+            "parsed_count": parsed_count,
+            "skipped_existing_count": skipped_existing_count,
+            "data_source_blocked_count": blocked_count,
+            "status_counts": status_counts,
+            "rate_limit_rps": rate_limit_rps,
+            "rate_limit_sleep_seconds_per_request": 1.0 / rate_limit_rps,
+            "warnings": source_warnings,
+            "append_only": True,
+            "publish_boundary": "sandbox -> quarantine -> publish",
+            "formal_replay_runs": 0,
+            "factor_factory_write": False,
+        }
+        response = {
+            "job_id": job_id,
+            "status": status,
+            "mode": mode if mode in {"dry_run", "apply_append_only"} else "dry_run",
+            "dry_run": not apply_requested,
+            "issuer_cik": str(summary.get("issuer_cik") or ""),
+            "selected_count": len(selected),
+            "accessions": selected,
+            "actions": actions,
+            "summary": summary,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if persist:
+            self.storage.insert_json_row(
+                "sec_424b2_ingestion_jobs",
+                {
+                    "id": job_id,
+                    "job_id": job_id,
+                    "status": status,
+                    "mode": response["mode"],
+                    "dry_run": 1 if response["dry_run"] else 0,
+                    "request_json": dumps(dict(payload)),
+                    "accessions_json": dumps(selected),
+                    "actions_json": dumps(actions),
+                    "summary_json": dumps(summary),
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+        return response
+
+    def _sec_424b2_ingestion_entries(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        issuer_cik: str,
+        scan_limit: int,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        warnings: list[str] = []
+        entries: list[dict[str, Any]] = []
+        manifest_path = str(payload.get("manifest_path") or "").strip()
+        raw_accessions = payload.get("accessions") if isinstance(payload.get("accessions"), list) else []
+        if raw_accessions:
+            for item in raw_accessions:
+                if isinstance(item, Mapping):
+                    accession = str(item.get("accession_number") or item.get("accession") or "")
+                    entries.append(
+                        {
+                            "accession_number": accession,
+                            "source_url": str(item.get("source_url") or item.get("primary_document_url") or ""),
+                            "primary_document": str(item.get("primary_document") or ""),
+                            "issuer_cik": str(item.get("issuer_cik") or issuer_cik),
+                        }
+                    )
+                else:
+                    entries.append(
+                        {
+                            "accession_number": str(item),
+                            "source_url": "",
+                            "primary_document": "",
+                            "issuer_cik": issuer_cik,
+                        }
+                    )
+            return entries, warnings
+        if manifest_path:
+            try:
+                manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+                raw_entries = manifest.get("entries") if isinstance(manifest, Mapping) else []
+                for entry in raw_entries or []:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    entries.append(
+                        {
+                            "accession_number": str(entry.get("accession_number") or ""),
+                            "source_url": str(entry.get("source_url") or entry.get("primary_document_url") or ""),
+                            "primary_document": str(entry.get("primary_document") or ""),
+                            "issuer_cik": str(entry.get("issuer_cik") or issuer_cik),
+                        }
+                    )
+                return entries, warnings
+            except Exception as exc:
+                warnings.append(f"manifest_load_failed:{exc}")
+                return [], warnings
+        provider = SecEdgarProvider()
+        filings = provider.fetch_424b2_filings_by_cik(issuer_cik, limit=scan_limit)
+        for filing in filings:
+            entries.append(
+                {
+                    "accession_number": str(filing.get("accession_number") or ""),
+                    "source_url": str(filing.get("primary_document_url") or ""),
+                    "primary_document": str(filing.get("primary_document") or ""),
+                    "issuer_cik": str(filing.get("cik") or issuer_cik),
+                    "filing_date": filing.get("date"),
+                    "form": filing.get("form"),
+                }
+            )
+        return entries, warnings
+
+    def _sec_424b2_existing_current_parse(self, accession: str, source_url: str) -> dict[str, Any] | None:
+        if accession:
+            row = self.storage.fetch_one(
+                """
+                SELECT *
+                FROM sec_424b2_parse_runs
+                WHERE accession_number = ?
+                  AND parser_version = ?
+                  AND parser_rule_hash = ?
+                  AND status = 'PARSED'
+                ORDER BY updated_at DESC, run_id DESC
+                LIMIT 1
+                """,
+                (accession, SEC_424B2_PARSER_VERSION, SEC_424B2_PARSER_RULE_HASH),
+            )
+            if row:
+                return row
+        if source_url:
+            return self.storage.fetch_one(
+                """
+                SELECT *
+                FROM sec_424b2_parse_runs
+                WHERE source_url = ?
+                  AND parser_version = ?
+                  AND parser_rule_hash = ?
+                  AND status = 'PARSED'
+                ORDER BY updated_at DESC, run_id DESC
+                LIMIT 1
+                """,
+                (source_url, SEC_424B2_PARSER_VERSION, SEC_424B2_PARSER_RULE_HASH),
+            )
+        return None
 
     def replay_structured_note_fcn(self, request: Any | None = None) -> dict[str, Any]:
         payload = _as_mapping(request)
@@ -5252,6 +5806,218 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "price_proxies": price_proxies,
             "created_at": now,
             "updated_at": now,
+        }
+
+    def replay_structured_note_fcn_batch(self, request: Any | None = None) -> dict[str, Any]:
+        payload = _as_mapping(request)
+        now = iso_now()
+        note_ids, selection_warnings = self._structured_note_preflight_note_ids(payload)
+        batch_id = "fcn_replay_batch_" + hashlib.sha256(
+            f"{','.join(note_ids)}|{payload.get('dataset_snapshot_id') or DATASET_PRICE_SNAPSHOT_ID}|{now}|{uuid4().hex}".encode("utf-8")
+        ).hexdigest()[:16]
+        run_ids: list[str] = []
+        note_results: list[dict[str, Any]] = []
+        replay_point_count = 0
+        data_source_blocked_count = 0
+        for note_id in note_ids:
+            try:
+                replay_payload = {
+                    "note_id": note_id,
+                    "dataset_snapshot_id": payload.get("dataset_snapshot_id") or DATASET_PRICE_SNAPSHOT_ID,
+                    "replay_mode": payload.get("replay_mode") or "sandbox",
+                    "start_date": payload.get("start_date"),
+                    "end_date": payload.get("end_date"),
+                    "observation_frequency": payload.get("observation_frequency"),
+                    "price_proxies": payload.get("price_proxies") if isinstance(payload.get("price_proxies"), Mapping) else {},
+                }
+                replay = self.replay_structured_note_fcn(replay_payload)
+                run_id = str(replay.get("run_id") or "")
+                if run_id:
+                    run_ids.append(run_id)
+                summary = replay.get("summary") if isinstance(replay.get("summary"), Mapping) else {}
+                points = replay.get("points") if isinstance(replay.get("points"), list) else []
+                replay_point_count += len(points)
+                if str(replay.get("status") or "") == "DATA_SOURCE_BLOCKED":
+                    data_source_blocked_count += 1
+                note_results.append(
+                    {
+                        "note_id": str(replay.get("note_id") or note_id),
+                        "parse_run_id": replay.get("parse_run_id"),
+                        "replay_run_id": run_id or None,
+                        "status": str(replay.get("status") or "DATA_SOURCE_BLOCKED"),
+                        "point_count": len(points),
+                        "blocked_count": int(summary.get("blocked_count") or 0),
+                        "missing_symbols": list(summary.get("missing_symbols") or []),
+                        "error_message": None,
+                    }
+                )
+            except Exception as exc:
+                data_source_blocked_count += 1
+                note_results.append(
+                    {
+                        "note_id": note_id,
+                        "parse_run_id": None,
+                        "replay_run_id": None,
+                        "status": "DATA_SOURCE_BLOCKED",
+                        "point_count": 0,
+                        "blocked_count": 0,
+                        "missing_symbols": [],
+                        "error_message": str(exc),
+                    }
+                )
+        ok_count = sum(1 for item in note_results if item.get("status") == "OK")
+        if note_results and ok_count == len(note_results):
+            status = "OK"
+        elif ok_count:
+            status = "PARTIAL"
+        else:
+            status = "DATA_SOURCE_BLOCKED"
+        summary = {
+            "warnings": selection_warnings,
+            "dataset_snapshot_id": str(payload.get("dataset_snapshot_id") or DATASET_PRICE_SNAPSHOT_ID),
+            "replay_mode": str(payload.get("replay_mode") or "sandbox"),
+            "sample_limit": int(payload.get("sample_limit") or 10),
+            "max_notes": int(payload.get("max_notes") or 100),
+            "manifest_id": payload.get("manifest_id"),
+            "manifest_path": payload.get("manifest_path"),
+            "run_ids": run_ids,
+            "shadow_replay": True,
+            "preflight_only": False,
+            "publish_boundary": "sandbox -> quarantine -> publish",
+            "formal_factor_factory_write": False,
+        }
+        response = {
+            "batch_id": batch_id,
+            "status": status,
+            "note_count": len(note_results),
+            "replay_run_count": len(run_ids),
+            "replay_point_count": replay_point_count,
+            "data_source_blocked_count": data_source_blocked_count,
+            "run_ids": run_ids,
+            "note_results": note_results,
+            "summary": summary,
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.storage.insert_json_row(
+            "structured_note_replay_batches",
+            {
+                "id": batch_id,
+                "batch_id": batch_id,
+                "status": status,
+                "request_json": dumps(dict(payload)),
+                "run_ids_json": dumps(run_ids),
+                "note_results_json": dumps(note_results),
+                "summary_json": dumps(
+                    {
+                        **summary,
+                        "note_count": response["note_count"],
+                        "replay_run_count": response["replay_run_count"],
+                        "replay_point_count": replay_point_count,
+                        "data_source_blocked_count": data_source_blocked_count,
+                    }
+                ),
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        return response
+
+    def get_structured_note_fcn_replay_batch(self, batch_id: str) -> dict[str, Any]:
+        row = self.storage.fetch_one("SELECT * FROM structured_note_replay_batches WHERE batch_id = ?", (batch_id,))
+        if not row:
+            raise ValueError(f"Structured note replay batch not found: {batch_id}")
+        return self._decode_structured_note_replay_batch(row)
+
+    def _decode_structured_note_replay_batch(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        summary = loads(row.get("summary_json"), {})
+        if not isinstance(summary, Mapping):
+            summary = {}
+        run_ids = loads(row.get("run_ids_json"), [])
+        note_results = loads(row.get("note_results_json"), [])
+        return {
+            "batch_id": str(row.get("batch_id") or ""),
+            "status": str(row.get("status") or "DATA_SOURCE_BLOCKED"),
+            "note_count": int(summary.get("note_count") or 0),
+            "replay_run_count": int(summary.get("replay_run_count") or 0),
+            "replay_point_count": int(summary.get("replay_point_count") or 0),
+            "data_source_blocked_count": int(summary.get("data_source_blocked_count") or 0),
+            "run_ids": run_ids if isinstance(run_ids, list) else [],
+            "note_results": note_results if isinstance(note_results, list) else [],
+            "summary": dict(summary),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+        }
+
+    def get_structured_note_fcn_replay_batch_attribution_summary(self, batch_id: str) -> dict[str, Any]:
+        batch = self.get_structured_note_fcn_replay_batch(batch_id)
+        note_results: list[dict[str, Any]] = []
+        latest_net_benefits: list[float] = []
+        negative_convexity_count = 0
+        blocked_count = 0
+        status_counts: dict[str, int] = {}
+        for run_id in batch.get("run_ids") or []:
+            try:
+                attribution = self.get_structured_note_fcn_attribution(str(run_id))
+                summary = attribution.get("summary") if isinstance(attribution.get("summary"), Mapping) else {}
+                latest_net_benefit = _coerce_float(summary.get("latest_net_benefit"), None)
+                if latest_net_benefit is not None:
+                    latest_net_benefits.append(latest_net_benefit)
+                counts = summary.get("status_counts") if isinstance(summary.get("status_counts"), Mapping) else {}
+                negative_convexity_count += 1 if int(counts.get("NEGATIVE_CONVEXITY_ACTIVE") or 0) > 0 else 0
+                if str(attribution.get("status") or "") == "DATA_SOURCE_BLOCKED":
+                    blocked_count += 1
+                status = str(attribution.get("status") or "DATA_SOURCE_BLOCKED")
+                status_counts[status] = status_counts.get(status, 0) + 1
+                note_results.append(
+                    {
+                        "run_id": str(run_id),
+                        "note_id": str(attribution.get("note_id") or ""),
+                        "status": status,
+                        "latest_net_benefit": latest_net_benefit,
+                        "point_count": int(summary.get("point_count") or 0),
+                        "blocked_count": int(summary.get("blocked_count") or 0),
+                        "status_counts": dict(counts),
+                    }
+                )
+            except Exception as exc:
+                blocked_count += 1
+                status_counts["DATA_SOURCE_BLOCKED"] = status_counts.get("DATA_SOURCE_BLOCKED", 0) + 1
+                note_results.append(
+                    {
+                        "run_id": str(run_id),
+                        "note_id": "",
+                        "status": "DATA_SOURCE_BLOCKED",
+                        "latest_net_benefit": None,
+                        "point_count": 0,
+                        "blocked_count": 0,
+                        "status_counts": {},
+                        "error_message": str(exc),
+                    }
+                )
+        status = "OK" if note_results and blocked_count == 0 else "PARTIAL" if note_results else "DATA_SOURCE_BLOCKED"
+        if blocked_count == len(note_results) and note_results:
+            status = "DATA_SOURCE_BLOCKED"
+        latest_sum = sum(latest_net_benefits) if latest_net_benefits else None
+        latest_avg = (latest_sum / len(latest_net_benefits)) if latest_sum is not None and latest_net_benefits else None
+        return {
+            "batch_id": str(batch.get("batch_id") or batch_id),
+            "status": status,
+            "note_count": len(note_results),
+            "replay_run_count": len(batch.get("run_ids") or []),
+            "latest_net_benefit_sum": latest_sum,
+            "latest_net_benefit_avg": latest_avg,
+            "negative_convexity_note_count": negative_convexity_count,
+            "data_source_blocked_count": blocked_count,
+            "note_results": note_results,
+            "summary": {
+                "source_batch_status": batch.get("status"),
+                "status_counts": status_counts,
+                "publish_boundary": "sandbox -> quarantine -> publish",
+                "advisory_only": True,
+            },
+            "created_at": batch.get("created_at"),
+            "updated_at": iso_now(),
         }
 
     def get_structured_note_replay_run(self, run_id: str) -> dict[str, Any]:

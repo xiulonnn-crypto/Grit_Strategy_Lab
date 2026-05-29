@@ -1910,6 +1910,107 @@ describe('FactorModelBuilderPage', () => {
     expect(window.location.hash).toContain('directions=HIGH_IS_BETTER');
   });
 
+  it('shows generate composite strategy only for S/A/B F3 rows', async () => {
+    window.location.hash = '#/factors?layer=F3';
+    const makeF3Factor = (
+      id: string,
+      name: string,
+      level: 'S' | 'A' | 'B' | 'C' | 'D',
+      risk: ApiFactorListItem['strategy_creation_risk'] = {
+        can_create: true,
+        warning_count: 0,
+        blocked_count: 0,
+        warnings: [],
+        hard_blockers: [],
+      },
+    ) => makeFactor({
+      id,
+      name,
+      tier_level: 'F3',
+      tier_label: 'F3 组合',
+      tier_projection: { key: 'F3', label: 'F3 组合', description: 'L3 publishable factor' },
+      diagnostic_status: 'READY_TO_DIAGNOSE',
+      latest_diagnostic_summary: {
+        run_id: `diag_${id}`,
+        status: 'COMPLETED',
+        rank_ic: level === 'D' ? 0.002 : level === 'C' ? 0.008 : level === 'B' ? 0.015 : level === 'A' ? 0.025 : 0.052,
+        ir: level === 'D' ? 0.1 : level === 'C' ? 0.3 : level === 'B' ? 0.7 : level === 'A' ? 1.2 : 2.2,
+        coverage: 92.4,
+      },
+      factor_level: level,
+      factor_level_label: `${level}级别`,
+      factor_level_projection: { key: level, label: `${level}级别`, description: 'test factor level' },
+      op_status: {
+        completed: ['W', 'N', 'Z', 'T'],
+        missing: [],
+        lights: [
+          { code: 'W', key: 'winsorize', label: 'W', active: true, status: 'done' },
+          { code: 'N', key: 'neutralize', label: 'N', active: true, status: 'done' },
+          { code: 'Z', key: 'zscore', label: 'Z', active: true, status: 'done' },
+          { code: 'T', key: 'tsrank', label: 'T', active: true, status: 'done' },
+        ],
+      },
+      strategy_creation_risk: risk,
+    });
+    fakeFactorApi.listFactors.mockResolvedValue({
+      items: [
+        makeF3Factor('s_f3_alpha_s', 'F3 S Alpha', 'S'),
+        makeF3Factor('s_f3_alpha_b_blocked', 'F3 B Blocked Alpha', 'B', {
+          can_create: false,
+          warning_count: 0,
+          blocked_count: 1,
+          warnings: [],
+          hard_blockers: [{ code: 'TEST_BLOCKER', severity: 'blocker', label: '策略门禁阻断', message: '策略门禁阻断' }],
+          summary: '策略门禁阻断',
+        }),
+        makeF3Factor('s_f3_alpha_c', 'F3 C Alpha', 'C'),
+        makeF3Factor('s_f3_alpha_d', 'F3 D Alpha', 'D'),
+        makeFactor({
+          id: 's_val_ep_ltm_raw',
+          name: 'F2 Atomic Value',
+          tier_level: 'F2',
+          tier_projection: { key: 'F2', label: 'F2 信号', description: 'Not L3' },
+        }),
+      ],
+      summary: {
+        system_seed_count: 5,
+        pit_status: 'READY',
+        governance_queue_count: 0,
+        online_count: 5,
+        offline_count: 0,
+        f2_count: 1,
+        f3_count: 4,
+      },
+    });
+
+    render(<FactorLibraryPage />);
+
+    const table = await screen.findByRole('table');
+    const allLevelButton = document.querySelector('.factor-level-filter__all') as HTMLButtonElement | null;
+    expect(allLevelButton).not.toBeNull();
+    fireEvent.click(allLevelButton as HTMLButtonElement);
+
+    const sRow = within(table).getByRole('button', { name: 'F3 S Alpha' }).closest('tr') as HTMLElement;
+    const blockedBRow = within(table).getByRole('button', { name: 'F3 B Blocked Alpha' }).closest('tr') as HTMLElement;
+    const cRow = within(table).getByRole('button', { name: 'F3 C Alpha' }).closest('tr') as HTMLElement;
+    const dRow = within(table).getByRole('button', { name: 'F3 D Alpha' }).closest('tr') as HTMLElement;
+
+    const sAction = within(sRow).getByRole('button', { name: '生成策略' });
+    const blockedBAction = within(blockedBRow).getByRole('button', { name: '生成策略' });
+    expect(sAction).toBeEnabled();
+    expect(blockedBAction).toBeDisabled();
+    expect(within(cRow).queryByRole('button', { name: '生成策略' })).not.toBeInTheDocument();
+    expect(within(dRow).queryByRole('button', { name: '生成策略' })).not.toBeInTheDocument();
+
+    fireEvent.click(sAction);
+
+    expect(window.location.hash).toContain('#/factor-models/new?');
+    expect(window.location.hash).toContain('strategy_type=COMPOSITE_FACTOR');
+    expect(window.location.hash).toContain('factor_id=s_f3_alpha_s');
+    expect(window.location.hash).toContain('weights=100');
+    expect(window.location.hash).toContain('directions=HIGH_IS_BETTER');
+  });
+
   it('keeps 10Y admission repair as a warning instead of a hard blocker', async () => {
     const repairMessage = '10 active-in-window symbols still need price evidence or identity repair; factor admission remains allowed with repair disclosure.';
     const repairWarning = {
@@ -2145,6 +2246,7 @@ describe('FactorModelBuilderPage', () => {
   it('shows standard category tags beside factor names and filters by the new taxonomy', async () => {
     fakeFactorApi.listFactors.mockResolvedValue({
       items: [
+        makeFactor(),
         makeFactor({
           id: 's_beta_resid_252d_z',
           name: '残差贝塔代理（252日 Z分）',
@@ -2202,6 +2304,36 @@ describe('FactorModelBuilderPage', () => {
           tags: ['liquidity'],
         }),
         makeFactor({
+          id: 's_f2_mom_raw_cur_f1_financial_release_timing',
+          name: '[情绪] - 财报发布时效滞后得分 (3d) [Refined]',
+          factor_family: '情绪',
+          descriptor: {
+            canonical_id: 's_f2_mom_raw_cur_f1_financial_release_timing',
+            source_prefix: 's',
+            category: 'mom',
+            metric: 'financial_release_timing',
+            window: '3d',
+            operator: 'rank',
+            schema_version: '1',
+          },
+          tags: ['timing'],
+        }),
+        makeFactor({
+          id: 's_f2_mom_raw_cur_external_aqr_public_style_factors',
+          name: '[外部] - AQR 学术风格与替代因子 (日频) [精炼]',
+          factor_family: '其他',
+          descriptor: {
+            canonical_id: 's_f2_mom_raw_cur_external_aqr_public_style_factors',
+            source_prefix: 's',
+            category: 'mom',
+            metric: 'external_aqr_public_style_factors',
+            window: 'cur',
+            operator: 'raw',
+            schema_version: '1',
+          },
+          tags: ['external'],
+        }),
+        makeFactor({
           id: 's_alpha_ffblend_cur_rank',
           name: '[综合] - FF3 风格复合基石 (等权) [Beta-Free]',
           descriptor: {
@@ -2216,7 +2348,7 @@ describe('FactorModelBuilderPage', () => {
           tags: ['alpha_blend'],
         }),
       ],
-      summary: { system_seed_count: 5, pit_status: 'READY', governance_queue_count: 0, online_count: 5, offline_count: 0 },
+      summary: { system_seed_count: 8, pit_status: 'READY', governance_queue_count: 0, online_count: 8, offline_count: 0 },
     });
 
     renderLegacyFactorLibraryPage();
@@ -2234,6 +2366,10 @@ describe('FactorModelBuilderPage', () => {
     expect(within(capexCell).getByText('质量')).toHaveClass('factor-category-tag');
     const turnoverCell = await factorCell('换手率代理（20日）');
     expect(within(turnoverCell).getByText('情绪')).toHaveClass('factor-category-tag');
+    const timingCell = await factorCell('[情绪] - 财报发布时效滞后得分 (3d) [Refined]');
+    expect(within(timingCell).getByText('情绪')).toHaveClass('factor-category-tag');
+    const aqrCell = await factorCell('[外部] - AQR 学术风格与替代因子 (日频) [精炼]');
+    expect(within(aqrCell).getByText('综合')).toHaveClass('factor-category-tag');
     const alphaCell = await factorCell('[综合] - FF3 风格复合基石 (等权) [Beta-Free]');
     expect(within(alphaCell).getByText('综合')).toHaveClass('factor-category-tag');
 
@@ -2247,10 +2383,19 @@ describe('FactorModelBuilderPage', () => {
 
     fireEvent.click(within(familyFilter).getByRole('button', { name: '情绪' }));
     expect(screen.getByRole('button', { name: '换手率代理（20日）' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '[情绪] - 财报发布时效滞后得分 (3d) [Refined]' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '资产增长代理（1年）' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '[外部] - AQR 学术风格与替代因子 (日频) [精炼]' })).not.toBeInTheDocument();
+
+    fireEvent.click(within(familyFilter).getByRole('button', { name: '全部因子族' }));
+    fireEvent.click(within(familyFilter).getByRole('button', { name: '动量' }));
+    expect(screen.getByRole('button', { name: '截面动量排名 (12-1m) [Rank]' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '[情绪] - 财报发布时效滞后得分 (3d) [Refined]' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '[外部] - AQR 学术风格与替代因子 (日频) [精炼]' })).not.toBeInTheDocument();
 
     fireEvent.click(within(familyFilter).getByRole('button', { name: '全部因子族' }));
     fireEvent.click(within(familyFilter).getByRole('button', { name: '综合' }));
+    expect(screen.getByRole('button', { name: '[外部] - AQR 学术风格与替代因子 (日频) [精炼]' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '[综合] - FF3 风格复合基石 (等权) [Beta-Free]' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '换手率代理（20日）' })).not.toBeInTheDocument();
   });

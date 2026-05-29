@@ -64,6 +64,9 @@ function normalizePublicFactorSourceId(value: string): string {
   const aliases: Record<string, string> = {
     french: 'fama_french',
     'fama-french': 'fama_french',
+    vibe: 'vibe_alpha_zoo',
+    'vibe-trading': 'vibe_alpha_zoo',
+    'vibe-alpha-zoo': 'vibe_alpha_zoo',
     msci: 'msci_facs',
     pv: 'portfolio_visualizer',
   };
@@ -77,6 +80,10 @@ function normalizePublicFactorDatasetKey(value: string): string {
     'mom-daily': 'fama_french_us_research_factors_daily',
     'aqr-qmj': 'aqr_public_style_factors',
     'aqr-tsmom': 'aqr_public_style_factors',
+    'vibe-qlib158': 'vibe_qlib158',
+    'vibe-alpha101': 'vibe_alpha101',
+    'vibe-gtja191': 'vibe_gtja191',
+    'vibe-academic': 'vibe_academic',
   };
   return aliases[normalized] ?? normalized;
 }
@@ -152,6 +159,11 @@ function runtimeString(value: unknown): string {
   return typeof value === 'string' && value.trim() ? value.trim() : '';
 }
 
+function runtimeNumber(value: unknown, fallback = 0): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function runtimeTime(...values: unknown[]): number {
   return values.reduce<number>((latest, value) => {
     const parsed = Date.parse(runtimeString(value));
@@ -216,6 +228,7 @@ function mapExternalFactorRegistry(
 ): Partial<PublicFactorImportViewModel> {
   const frenchSource = findPublicFactorSource(registry, 'fama', 'french');
   const aqrSource = findPublicFactorSource(registry, 'aqr');
+  const vibeSource = findPublicFactorSource(registry, 'vibe', 'alpha', 'zoo');
   const msciSource = findPublicFactorSource(registry, 'msci');
   const portfolioSource = findPublicFactorSource(registry, 'portfolio', 'visualizer');
   const sources: PublicFactorImportViewModel['sources'] = [
@@ -236,8 +249,18 @@ function mapExternalFactorRegistry(
       kind: publicFactorSourceKind(aqrSource?.access_policy || 'LICENSE_REQUIRED'),
       tone: publicFactorSourceTone(aqrSource?.access_policy || 'LICENSE_REQUIRED'),
       frequency: '日频 / 月频',
-      badges: ['手动上传'],
+      badges: aqrSource?.supported_import_modes?.includes('AUTO_DOWNLOAD') ? ['可拉取源文件', '日频 / 月频'] : ['手动上传'],
       description: 'QMJ 与 TSMOM 先作为风险调整与动量参数模板。',
+    },
+    {
+      id: vibeSource?.id || 'vibe_alpha_zoo',
+      name: 'Vibe Alpha Zoo',
+      category: '公式目录',
+      kind: publicFactorSourceKind(vibeSource?.access_policy || 'PUBLIC_DOWNLOAD'),
+      tone: publicFactorSourceTone(vibeSource?.access_policy || 'PUBLIC_DOWNLOAD'),
+      frequency: '452 alpha catalog',
+      badges: ['Raw_F2 only', 'AST scan', 'IC bench'],
+      description: 'HKUDS/Vibe-Trading 公式目录只暂存为 Raw_F2，后续必须经过 WNZT 与 D2 检疫。',
     },
     {
       id: msciSource?.id || 'msci',
@@ -309,6 +332,54 @@ function mapExternalFactorRegistry(
       statusLabel: '手动上传',
       actionLabel: '重新解析',
     },
+    {
+      id: publicFactorDatasetId(vibeSource, 0, 'vibe-qlib158'),
+      name: 'Vibe Qlib158 Alpha Zoo',
+      key: 'vibe_qlib158',
+      sourceName: 'Vibe',
+      frequency: '公式目录',
+      coverage: '158 formulas',
+      status: 'review',
+      fieldCount: 158,
+      statusLabel: 'Raw_F2 候选',
+      actionLabel: '解析目录',
+    },
+    {
+      id: publicFactorDatasetId(vibeSource, 1, 'vibe-alpha101'),
+      name: 'Vibe Alpha101',
+      key: 'vibe_alpha101',
+      sourceName: 'Vibe',
+      frequency: '公式目录',
+      coverage: '101 formulas',
+      status: 'review',
+      fieldCount: 101,
+      statusLabel: 'Raw_F2 候选',
+      actionLabel: '解析目录',
+    },
+    {
+      id: publicFactorDatasetId(vibeSource, 2, 'vibe-gtja191'),
+      name: 'Vibe GTJA191',
+      key: 'vibe_gtja191',
+      sourceName: 'Vibe',
+      frequency: '公式目录',
+      coverage: '191 formulas',
+      status: 'review',
+      fieldCount: 191,
+      statusLabel: 'Raw_F2 候选',
+      actionLabel: '解析目录',
+    },
+    {
+      id: publicFactorDatasetId(vibeSource, 3, 'vibe-academic'),
+      name: 'Vibe Academic Zoo',
+      key: 'vibe_academic',
+      sourceName: 'Vibe',
+      frequency: '公式目录',
+      coverage: '2 formula families',
+      status: 'review',
+      fieldCount: 2,
+      statusLabel: 'Raw_F2 候选',
+      actionLabel: '解析目录',
+    },
   ];
   return {
     sources,
@@ -339,6 +410,11 @@ function mapExternalFactorJob(job: ApiExternalFactorImportJob): Partial<PublicFa
   const nextActions = Array.isArray(job.next_actions) ? job.next_actions : [];
   const reviewStatus = String(job.review_status || '');
   const rowCount = Number(job.manifest?.row_count ?? 0);
+  const catalogManifest = runtimeRecord(job.manifest?.catalog_manifest);
+  const astScan = runtimeRecord(catalogManifest.ast_scan);
+  const benchSummary = runtimeRecord(job.manifest?.bench_summary);
+  const rawF2Batch = runtimeRecord(job.raw_f2_batch || job.manifest?.raw_f2_batch);
+  const rawF2FormulaCount = runtimeNumber(rawF2Batch.raw_f2_count, runtimeNumber(rawF2Batch.candidate_count, 0));
   const hasMaterializedFile = rowCount > 0 && Boolean(
     job.artifact_paths?.uploaded_file_id ||
     job.artifact_paths?.raw_file_ref ||
@@ -363,10 +439,25 @@ function mapExternalFactorJob(job: ApiExternalFactorImportJob): Partial<PublicFa
     rawFileHash: hash,
     rowCount,
     artifactPath: job.artifact_paths?.manifest_ref || job.artifact_paths?.raw_file_ref || '等待 manifest',
-    reviewNote: `${reviewStatus} · ${job.governance_gate} · ${nextActions.join(' / ')}`,
+    reviewNote: externalImportReviewNoteLabel(reviewStatus, job.governance_gate, nextActions),
     reviewStatus,
     nextActions,
-    submitReady: reviewStatus === 'READY_FOR_REVIEW' && nextActions.includes('submit_review') && hasMaterializedFile,
+    submitReady: reviewStatus === 'READY_FOR_REVIEW' && nextActions.includes('submit_review') && (
+      hasMaterializedFile || runtimeNumber(catalogManifest.supported_formula_count, 0) > 0
+    ),
+    catalogFormulaCount: runtimeNumber(catalogManifest.formula_count, rowCount),
+    astPassedCount: runtimeNumber(astScan.passed_count, runtimeNumber(catalogManifest.supported_formula_count, 0)),
+    astBlockedCount: runtimeNumber(astScan.blocked_count, runtimeNumber(catalogManifest.blocked_formula_count, 0)),
+    benchAliveCount: runtimeNumber(benchSummary.alive_count, 0),
+    benchReversedCount: runtimeNumber(benchSummary.reversed_count, 0),
+    benchDeadCount: runtimeNumber(benchSummary.dead_count, 0),
+    rawF2BatchId: runtimeString(rawF2Batch.batch_id || rawF2Batch.run_id),
+    rawF2MiningJobId: runtimeString(rawF2Batch.mining_job_id || rawF2Batch.job_id),
+    rawF2FormulaCount,
+    flowNote: (job.source_id === 'vibe_alpha_zoo' || rawF2FormulaCount > 0)
+      ? 'Catalog -> AST -> IC bench -> Raw_F2 -> WNZT -> Refined_F2 -> D2'
+      : undefined,
+    factorStatus: rawF2FormulaCount > 0 ? 'Raw_F2 staged; WNZT required before D2 quarantine' : undefined,
   };
   return {
     activeSourceId: job.source_id,
@@ -376,6 +467,47 @@ function mapExternalFactorJob(job: ApiExternalFactorImportJob): Partial<PublicFa
     manifest,
     manifestsByDataset: { [job.dataset_key]: manifest },
   };
+}
+
+function externalImportReviewStatusLabel(status: string): string {
+  const normalized = String(status || '').toUpperCase();
+  if (normalized === 'PENDING_REVIEW') return '待复核';
+  if (normalized === 'NEEDS_MAPPING') return '需补齐语义映射';
+  if (normalized === 'READY_FOR_REVIEW') return '可送复核';
+  if (normalized === 'SUBMITTED') return '已送检';
+  if (normalized === 'BLOCKED') return '已阻断';
+  if (normalized === 'NOT_STARTED') return '未开始';
+  return status || '待确认';
+}
+
+function externalImportGovernanceGateLabel(gate: string): string {
+  const normalized = String(gate || '').toUpperCase();
+  if (normalized === 'REVIEW_BEFORE_QUARANTINE') return '送检前复核';
+  if (normalized === 'D2_QUARANTINE_REVIEW') return 'D2 检疫复核';
+  if (normalized === 'RAW_F2_BEFORE_D2_QUARANTINE') return 'Raw_F2 先过 WNZT';
+  return gate || '复核链路';
+}
+
+function externalImportNextActionLabel(action: string): string {
+  const normalized = String(action || '').toLowerCase();
+  if (normalized === 'upload_source_file') return '拉取或上传源文件';
+  if (normalized === 'inspect_manifest') return '查看 manifest';
+  if (normalized === 'submit_review') return '送入复核';
+  if (normalized === 'complete_semantic_mapping') return '补齐语义映射';
+  if (normalized === 'b3_quarantine_intake') return '进入 B3 检疫';
+  if (normalized === 'b3_quarantine_run') return '运行 B3 检疫';
+  if (normalized === 'b3_quarantine_completed') return 'B3 检疫完成';
+  if (normalized === 'stage_raw_f2') return '暂存 Raw_F2';
+  if (normalized === 'raw_f2_batch_created') return 'Raw_F2 批次已创建';
+  if (normalized === 'wnzt_refinement_required') return '等待 WNZT 精炼';
+  return action || '待处理';
+}
+
+function externalImportReviewNoteLabel(status: string, gate: string, actions: string[]): string {
+  const actionLabel = actions.length
+    ? actions.map(externalImportNextActionLabel).join(' / ')
+    : '等待下一步';
+  return `${externalImportReviewStatusLabel(status)} · ${externalImportGovernanceGateLabel(gate)} · ${actionLabel}`;
 }
 
 function externalImportPublishStatusLabel(status: string): string {
@@ -1082,10 +1214,11 @@ function PublicFactorImportRoutePage(): JSX.Element {
         return null;
       }
       const sourceId = normalizePublicFactorSourceId(payload.sourceId);
+      const datasetKey = normalizePublicFactorDatasetKey(payload.datasetId);
       const job = await api.createExternalFactorImportJob({
         source_id: sourceId,
-        dataset_key: normalizePublicFactorDatasetKey(payload.datasetId),
-        import_mode: sourceId === 'fama_french' && payload.importMode === 'AUTO_DOWNLOAD'
+        dataset_key: datasetKey,
+        import_mode: (sourceId === 'fama_french' || datasetKey === 'aqr_public_style_factors') && payload.importMode === 'AUTO_DOWNLOAD'
           ? 'AUTO_DOWNLOAD'
           : 'SOURCE_MANIFEST',
         frequency: normalizePublicFactorFrequency(payload.frequency),
@@ -1118,6 +1251,12 @@ function PublicFactorImportRoutePage(): JSX.Element {
         precheck_notes: 'Created from local file import modal.',
       });
       return mapExternalFactorJob(job);
+    },
+    materializeSourceFile: async ({ jobId }) => {
+      if (!api.materializeExternalFactorImportSourceFile) {
+        return null;
+      }
+      return mapExternalFactorJob(await api.materializeExternalFactorImportSourceFile(jobId));
     },
     submitReview: async ({ jobId }) => {
       if (!api.submitExternalFactorImportReview) {
