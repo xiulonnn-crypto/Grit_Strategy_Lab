@@ -416,6 +416,8 @@ def test_publish_impact_wrapper_codifies_single_working_tree_gate_flow() -> None
     assert "latest-push-attestation.md" in script
     assert "Invoke-GitCapture -Arguments @('status', '--porcelain')" in script
     assert "Get-GitLines -Arguments @('status', '--porcelain')" not in script
+    assert "Refreshing committed impact evidence after metadata snapshot." in script
+    assert "Invoke-ImpactGate -Scope 'Committed'" in script
 
 
 def test_publish_impact_wrapper_guards_trace_assets_and_external_push() -> None:
@@ -456,6 +458,7 @@ def test_publish_full_wrapper_codifies_release_publish_flow() -> None:
     assert "HEAD:$TargetBranch" in script
     assert "Invoke-PushWithMetadataLoop" in script
     assert "Invoke-FullGate" in script
+    assert "Refreshing full evidence after metadata snapshot." in script
     assert "'-Target', $Target" in script
     assert "IncludeLiveAcceptance" in script
     assert "StrictGlobalTypes" in script

@@ -387,6 +387,8 @@ function Invoke-PushWithMetadataLoop {
         $message = Get-SuggestedMetadataCommitMessage -Output $pushResult.Output
         Write-Host "Committing generated push metadata: $message" -ForegroundColor Yellow
         Invoke-MetadataSnapshotCommit -Message $message
+        Write-Host 'Refreshing full evidence after metadata snapshot.' -ForegroundColor Cyan
+        Invoke-FullGate
     }
 }
 
