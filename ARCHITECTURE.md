@@ -166,6 +166,19 @@
 - 偏离阈值只作为额外漂移触发，不取消固定频率触发。
 - 显式资产篮子是硬契约：`allocation_assets` 或 `allocation_weight__*_pct` 声明的每个标的都必须在价格快照中具备可用历史。缺任一标的时，preview 与 submit 都必须通过 `REQUEST_SYMBOLS_MISSING_PRICE_HISTORY` 阻断；引擎直调只能返回空结果和缺价 warning，不能把缺价资产静默剔除后重配剩余权重。
 
+### 5.2 通用策略隔夜执行语义
+
+通用策略通过参数快照中的 `execution_profile=overnight_close_to_next_open` 启用隔夜执行，不新增顶层策略类型。该 profile 的固定合同是：
+
+- `execution_symbol` 指定唯一成交标的；`entry_weight_pct` 指定收盘建仓比例，`exit_weight_pct` 必须为 100。
+- run request 的 `D_CLOSE_BUY_D1_OPEN_SELL` 执行策略必须从用户实际选择的参数版本快照推导，并且只允许顶层 `GENERAL` 策略启用；不能用当前版本或其他策略类型的残留 profile 误标运行。
+- 每个可执行回合在 D 日真实 `close` 建仓，并在下一交易日 D+1 的真实 `open` 全部平仓；单回合毛收益严格为 `entry_weight * (open[D+1] / close[D] - 1)`。
+- 交易成本按买入和卖出两条腿扣除，因此满仓回合的换手为 2.0。最后一个没有次日开盘的交易日不得生成孤儿买单。
+- 缺失或非正的收盘价/次日开盘价会跳过整个回合并降低覆盖率，不能用复权收盘、当日收盘或其他 fallback 冒充指定成交价。
+- 成交流水使用 `overnight_close_to_next_open:entry_close` 与 `overnight_close_to_next_open:exit_open` 原因码。隔夜 episode 的 MFE/MAE 只比较入场收盘与离场开盘，不把收盘前或开盘后的日内 high/low 计入持仓路径。
+- 交易审计保留毛价格收益与成本字段，但盈亏解说使用扣除双边费用和滑点后的净收益，避免小幅正跳空在净亏损时仍被描述为盈利。
+- 每个 checkpoint 都落在完成平仓后的空仓边界，因此恢复只继续未处理的下一组交易日，不会重放已完成回合或恢复半条腿。
+
 ## 6. 指标基线
 
 恢复后的数学层刻意保持保守。

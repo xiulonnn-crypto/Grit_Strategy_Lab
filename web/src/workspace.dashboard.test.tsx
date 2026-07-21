@@ -2,6 +2,7 @@ import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WorkspacePage } from './pages/workspace-page-lane-b';
 import { ShellFrameCn } from './shell-frame-cn';
+import { buildWorkspaceStrategyCards, formatParameterLabel, formatParameterValue } from './lib/workspace-adapters';
 import type { ApiOptimizationJobListItem, ApiStrategyDetail, ApiStrategyListItem, ApiWorkspaceOverview } from './types';
 
 type FakeApi = {
@@ -277,6 +278,53 @@ afterEach(() => {
 });
 
 describe('workspace dashboard', () => {
+  it('localizes overnight execution metadata and shared parameter labels', () => {
+    const overnightStrategy: ApiStrategyListItem = {
+      ...strategies[0],
+      id: 'str-overnight',
+      name: '隔夜QQQ',
+      strategy_type: 'GENERAL',
+      parameters: {
+        strategy_type: 'GENERAL',
+        execution_profile: 'overnight_close_to_next_open',
+        execution_symbol: 'QQQ',
+        entry_price_field: 'close',
+        exit_price_field: 'next_open',
+        entry_weight_pct: 100,
+        exit_weight_pct: 100,
+      },
+      latest_completed_run_summary: {
+        ...strategies[0].latest_completed_run_summary!,
+        run_id: 'run-overnight',
+        execution_policy: 'D_CLOSE_BUY_D1_OPEN_SELL',
+      },
+    };
+
+    const [card] = buildWorkspaceStrategyCards([overnightStrategy], {}, {});
+
+    expect(card.metaPrimary).toBe('执行策略 当日收盘买入，下一交易日开盘卖出');
+    expect([
+      'execution_profile',
+      'execution_symbol',
+      'entry_price_field',
+      'exit_price_field',
+      'entry_weight_pct',
+      'exit_weight_pct',
+    ].map(formatParameterLabel)).toEqual([
+      '执行方式',
+      '成交标的',
+      '买入价格',
+      '卖出价格',
+      '买入仓位(%)',
+      '卖出仓位(%)',
+    ]);
+    expect(formatParameterValue('overnight_close_to_next_open', 'execution_profile')).toBe(
+      '当日收盘买入，下一交易日开盘卖出',
+    );
+    expect(formatParameterValue('close', 'entry_price_field')).toBe('收盘价');
+    expect(formatParameterValue('next_open', 'exit_price_field')).toBe('下一交易日开盘价');
+  });
+
   it('renders workspace cards from strategy summaries without detail fan-out', async () => {
     let container: HTMLElement | null = null;
     await act(async () => {

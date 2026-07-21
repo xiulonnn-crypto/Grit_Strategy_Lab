@@ -1579,6 +1579,228 @@ def _run_asset_allocation_backtest(
     )
 
 
+OVERNIGHT_CLOSE_TO_NEXT_OPEN_PROFILE = "overnight_close_to_next_open"
+
+
+def _run_overnight_close_to_next_open_backtest(
+    symbol_series: Mapping[str, list[MarketBar]],
+    *,
+    config: BacktestConfig,
+    parameters: Mapping[str, Any],
+    benchmark_series: list[MarketBar],
+    master_dates: list[str],
+    resume_state: Mapping[str, Any] | None = None,
+    resume_daily_performance: Sequence[DailyPerformancePoint | Mapping[str, Any]] | None = None,
+    resume_trades: Sequence[TradeRecord | Mapping[str, Any]] | None = None,
+    checkpoint_callback: BacktestCheckpointCallback | None = None,
+    checkpoint_interval_steps: int = 40,
+) -> BacktestResult:
+    empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    execution_symbol = str(parameters.get("execution_symbol") or "").strip().upper()
+    primary_series = symbol_series.get(execution_symbol, [])
+    if not execution_symbol or not primary_series:
+        return BacktestResult(
+            metrics=empty_metrics,
+            warnings=[f"Overnight execution symbol has no market bars: {execution_symbol or 'missing'}"],
+        )
+
+    master_dates = _window_master_dates([bar.date for bar in primary_series], config)
+    if len(master_dates) < 2:
+        return BacktestResult(metrics=empty_metrics, warnings=["Not enough dates for an overnight round trip"])
+
+    entry_price_field = str(parameters.get("entry_price_field") or "close").strip().lower()
+    exit_price_field = str(parameters.get("exit_price_field") or "next_open").strip().lower()
+    if entry_price_field != "close" or exit_price_field != "next_open":
+        return BacktestResult(
+            metrics=empty_metrics,
+            warnings=["Overnight execution profile requires entry_price_field=close and exit_price_field=next_open"],
+        )
+
+    try:
+        entry_weight_pct = float(parameters.get("entry_weight_pct", 100.0))
+        exit_weight_pct = float(parameters.get("exit_weight_pct", 100.0))
+    except (TypeError, ValueError):
+        return BacktestResult(metrics=empty_metrics, warnings=["Overnight entry and exit weights must be numeric percentages"])
+    if not math.isfinite(entry_weight_pct) or not 0.0 < entry_weight_pct <= 100.0:
+        return BacktestResult(metrics=empty_metrics, warnings=["Overnight entry weight must be greater than 0% and at most 100%"])
+    if not math.isfinite(exit_weight_pct):
+        return BacktestResult(metrics=empty_metrics, warnings=["Overnight exit weight must be a finite percentage"])
+    if abs(exit_weight_pct - 100.0) > 1e-9:
+        return BacktestResult(
+            metrics=empty_metrics,
+            warnings=["Overnight close-to-next-open profile requires a 100% exit at the next open"],
+        )
+    entry_weight = entry_weight_pct / 100.0
+
+    primary_index = {bar.date: idx for idx, bar in enumerate(primary_series)}
+    benchmark_index = {bar.date: idx for idx, bar in enumerate(benchmark_series)}
+    resume_payload = dict(resume_state or {})
+    daily_points = _hydrate_daily_performance_points(resume_daily_performance)
+    trades = _hydrate_trade_records(resume_trades)
+    returns = [point.strategy_return for point in daily_points]
+    equity = _to_float(
+        resume_payload.get("equity"),
+        daily_points[-1].equity if daily_points else config.initial_equity,
+    )
+    equity_curve = [config.initial_equity, *[point.equity for point in daily_points]]
+    total_turnover = _to_float(resume_payload.get("total_turnover"))
+    if total_turnover <= 0 and trades:
+        total_turnover = sum(abs(trade.weight_after - trade.weight_before) for trade in trades)
+    coverage_days = int(resume_payload.get("coverage_days") or 0)
+    if coverage_days <= 0 and daily_points:
+        coverage_days = sum(1 for point in daily_points if point.universe_size > 0)
+    warnings = [str(item) for item in list(resume_payload.get("warnings") or []) if str(item).strip()]
+    effective_date = str(resume_payload.get("effective_date") or "").strip() or None
+    start_index = max(int(resume_payload.get("next_index") or 1), 1)
+    total_steps = max(len(master_dates) - 1, 1)
+    oos_cut = max(int(total_steps * (1.0 - config.oos_fraction)), 1)
+
+    for index in range(start_index, len(master_dates)):
+        if equity <= 0:
+            warnings.append("Stopped overnight simulation after equity reached zero")
+            break
+        entry_date = master_dates[index - 1]
+        exit_date = master_dates[index]
+        entry_index = primary_index.get(entry_date)
+        exit_index = primary_index.get(exit_date)
+        entry_close = primary_series[entry_index].close if entry_index is not None else 0.0
+        exit_open = primary_series[exit_index].open if exit_index is not None else 0.0
+        has_round_trip = entry_close > 0 and exit_open > 0
+        strategy_return = 0.0
+
+        if has_round_trip:
+            equity_before = equity
+            trade_notional = equity_before * entry_weight
+            quantity = trade_notional / entry_close
+            gross_return = entry_weight * (exit_open / entry_close - 1.0)
+            round_trip_turnover = 2.0 * entry_weight
+            raw_strategy_return = gross_return - (config.transaction_cost_bps / 10000.0) * round_trip_turnover
+            strategy_return = max(raw_strategy_return, -1.0)
+            if raw_strategy_return < -1.0:
+                warnings.append(f"Capped overnight loss at -100% on {exit_date} after transaction costs")
+            equity *= 1.0 + strategy_return
+            total_turnover += round_trip_turnover
+            coverage_days += 1
+            if effective_date is None:
+                effective_date = entry_date
+            trades.extend(
+                [
+                    TradeRecord(
+                        date=entry_date,
+                        symbol=execution_symbol,
+                        action="buy",
+                        price=entry_close,
+                        weight_before=0.0,
+                        weight_after=entry_weight,
+                        reason="overnight_close_to_next_open:entry_close",
+                        quantity=quantity,
+                        net_amount=trade_notional,
+                    ),
+                    TradeRecord(
+                        date=exit_date,
+                        symbol=execution_symbol,
+                        action="sell",
+                        price=exit_open,
+                        weight_before=entry_weight,
+                        weight_after=0.0,
+                        reason="overnight_close_to_next_open:exit_open",
+                        quantity=quantity,
+                        net_amount=quantity * exit_open,
+                    ),
+                ]
+            )
+        else:
+            missing_fields: list[str] = []
+            if entry_close <= 0:
+                missing_fields.append(f"close on {entry_date}")
+            if exit_open <= 0:
+                missing_fields.append(f"open on {exit_date}")
+            warnings.append(
+                f"Skipped overnight round trip for {execution_symbol}: missing or non-positive {' and '.join(missing_fields)}."
+            )
+
+        benchmark_return = 0.0
+        benchmark_position = benchmark_index.get(exit_date)
+        if benchmark_position is not None and benchmark_position > 0:
+            current_bar = benchmark_series[benchmark_position]
+            previous_bar = benchmark_series[benchmark_position - 1]
+            current_close = current_bar.adj_close if current_bar.adj_close > 0 else current_bar.close
+            previous_close = previous_bar.adj_close if previous_bar.adj_close > 0 else previous_bar.close
+            if current_close > 0 and previous_close > 0:
+                benchmark_return = current_close / previous_close - 1.0
+
+        returns.append(strategy_return)
+        equity_curve.append(equity)
+        peak = max(equity_curve)
+        drawdown = equity / peak - 1.0 if peak else 0.0
+        daily_points.append(
+            DailyPerformancePoint(
+                date=exit_date,
+                equity=equity,
+                strategy_return=strategy_return,
+                benchmark_return=benchmark_return,
+                drawdown=drawdown,
+                exposure=entry_weight if has_round_trip else 0.0,
+                universe_size=1 if has_round_trip else 0,
+                in_sample=(index - 1) < oos_cut,
+            )
+        )
+        if (
+            checkpoint_callback is not None
+            and (
+                len(daily_points) % max(int(checkpoint_interval_steps), 1) == 0
+                or index >= len(master_dates) - 1
+            )
+        ):
+            _emit_backtest_checkpoint(
+                checkpoint_callback,
+                state={
+                    "checkpoint_kind": OVERNIGHT_CLOSE_TO_NEXT_OPEN_PROFILE,
+                    "next_index": index + 1,
+                    "equity": equity,
+                    "total_turnover": total_turnover,
+                    "coverage_days": coverage_days,
+                    "warnings": list(warnings),
+                    "effective_date": effective_date,
+                    "current_stage": f"Simulating overnight backtest ({len(daily_points)}/{total_steps})",
+                    "latest_update": f"Processed {len(daily_points)}/{total_steps} overnight round trips.",
+                },
+                completed_steps=len(daily_points),
+                total_steps=total_steps,
+                daily_points=daily_points,
+                trades=trades,
+            )
+
+    total_return, cagr, volatility, sharpe, max_drawdown = _curve_metrics(equity_curve, returns)
+    winning_days = sum(1 for value in returns if value > 0)
+    oos_returns = [point.strategy_return for point in daily_points if not point.in_sample]
+    oos_curve = [1.0]
+    for value in oos_returns:
+        oos_curve.append(oos_curve[-1] * (1.0 + value))
+    _, oos_cagr, _, oos_sharpe, _ = _curve_metrics(oos_curve, oos_returns)
+    metrics = BacktestMetrics(
+        total_return=total_return,
+        cagr=cagr,
+        annualized_volatility=volatility,
+        sharpe=sharpe,
+        max_drawdown=max_drawdown,
+        turnover=total_turnover / max(len(daily_points), 1),
+        win_rate=winning_days / max(len(returns), 1),
+        oos_cagr=oos_cagr,
+        oos_sharpe=oos_sharpe,
+    )
+    return BacktestResult(
+        metrics=metrics,
+        daily_performance=daily_points,
+        trades=trades,
+        warnings=warnings,
+        effective_date=effective_date,
+        oos_start_date=daily_points[oos_cut].date if len(daily_points) > oos_cut else None,
+        coverage_ratio=coverage_days / len(daily_points) if daily_points else 0.0,
+        coverage_days=coverage_days,
+    )
+
+
 def run_backtest(
     bars_by_symbol: Mapping[str, Iterable[Mapping[str, Any]]],
     *,
@@ -1660,6 +1882,21 @@ def run_backtest_prepared(
         empty_metrics = BacktestMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         return BacktestResult(metrics=empty_metrics, warnings=["No market bars available"])
     requested_window_dates = _window_master_dates(master_dates, config)
+    execution_profile = str(parameters.get("execution_profile") or "").strip().lower()
+    strategy_type = str(parameters.get("strategy_type") or template_key).strip().upper()
+    if strategy_type == "GENERAL" and execution_profile == OVERNIGHT_CLOSE_TO_NEXT_OPEN_PROFILE:
+        return _run_overnight_close_to_next_open_backtest(
+            symbol_series,
+            config=config,
+            parameters=parameters,
+            benchmark_series=benchmark_series,
+            master_dates=requested_window_dates,
+            resume_state=resume_state,
+            resume_daily_performance=resume_daily_performance,
+            resume_trades=resume_trades,
+            checkpoint_callback=checkpoint_callback,
+            checkpoint_interval_steps=checkpoint_interval_steps,
+        )
     if str(template_key).lower() == "grid":
         return _run_grid_backtest(
             symbol_series,

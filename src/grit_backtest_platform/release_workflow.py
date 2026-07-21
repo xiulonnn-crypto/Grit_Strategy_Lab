@@ -437,21 +437,41 @@ def prepare_push(
     )
 
 
+def validate_push_changelog(repo_root: Path) -> None:
+    changelog_path = repo_root / "CHANGELOG.md"
+    if not changelog_path.exists():
+        raise FileNotFoundError(f"CHANGELOG not found: {changelog_path}")
+
+    changelog_text = changelog_path.read_text(encoding="utf-8")
+    _preamble, sections = _parse_sections(changelog_text)
+    _validate_unreleased_subheadings(sections)
+    unreleased_body = _merge_unreleased_sections(sections)
+    if _body_has_meaningful_content(unreleased_body):
+        _build_snapshot_section("__push_check__", date.today().isoformat(), unreleased_body)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Prepare CHANGELOG/version metadata before git push.")
     parser.add_argument("--repo-root", default=".", help="Repository root that contains CHANGELOG.md")
     parser.add_argument("--release", action="store_true", help="Cut a formal release instead of a push revision snapshot.")
     parser.add_argument("--release-version", help="Explicit stable semantic version to use for the release.")
     parser.add_argument("--date", dest="release_date", help="Override the effective date (YYYY-MM-DD).")
+    parser.add_argument("--check-only", action="store_true", help="Validate public CHANGELOG hygiene without writing metadata.")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    repo_root = Path(args.repo_root).resolve()
+    if args.check_only:
+        validate_push_changelog(repo_root)
+        print(json.dumps({"status": "ok", "mode": "check-only"}, ensure_ascii=False))
+        return 0
+
     effective_date = date.fromisoformat(args.release_date) if args.release_date else None
     result = prepare_push(
-        Path(args.repo_root).resolve(),
+        repo_root,
         release=args.release,
         release_version=args.release_version,
         effective_date=effective_date,

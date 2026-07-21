@@ -1047,9 +1047,9 @@ try {
     Invoke-TrackedProcessSmoke
     Invoke-PythonCompile
     Invoke-FrontendTypes
+    Invoke-FrontendTests
     Invoke-BackendTests
     Invoke-AsyncLifecycleRepeat
-    Invoke-FrontendTests
 
     Assert-FastBudget -Step 'summary'
     Write-Summary -Status 'ok'

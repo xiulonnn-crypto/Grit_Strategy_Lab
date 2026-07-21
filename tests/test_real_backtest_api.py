@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import time
 
@@ -984,6 +985,188 @@ def test_buy_and_hold_dca_preview_submit_generates_recurring_monthly_trades(tmp_
     assert total_return_card["primary_text"] != total_return_card["compare_text"].split(" | ")[0].replace("基准: ", "")
     assert "| 差值: -0.0%" not in total_return_card["compare_text"]
     assert "| 差值: +0.00" not in sharpe_card["compare_text"]
+
+
+def test_general_overnight_profile_materializes_and_reaches_real_engine(tmp_path):
+    client, _ = create_test_client(tmp_path)
+
+    session = draft_strategy_session(
+        client,
+        strategy_type="GENERAL",
+        message="QQQ overnight strategy from the close to the next open",
+        confirmation_payload={
+            "revision": 1,
+            "strategy_type": "GENERAL",
+            "core": {
+                "universe_name": "QQQ",
+                "rebalance_frequency": "daily",
+            },
+            "logic": {},
+            "parameters": {
+                "strategy_name": "Overnight QQQ",
+                "strategy_description": "Buy QQQ at each close and sell the full position at the next open.",
+                "benchmark_symbol": "QQQ",
+                "capital": 100000,
+                "execution_profile": "overnight_close_to_next_open",
+                "execution_symbol": "QQQ",
+                "entry_price_field": "close",
+                "exit_price_field": "next_open",
+                "entry_weight_pct": 100,
+                "exit_weight_pct": 100,
+            },
+        },
+    )
+    strategy = assert_ok(
+        materialize_session(
+            client,
+            session["session_id"],
+            idempotency_key="materialize-general-overnight-qqq",
+        )
+    )
+    service = client.app.state.service
+    selected_version_strategy = deepcopy(strategy)
+    selected_version_strategy["parameters"]["execution_profile"] = ""
+    selected_version_request = service._normalize_run_request(
+        selected_version_strategy,
+        {"parameter_version_id": strategy["current_parameter_version_id"]},
+    )
+    assert selected_version_request["execution_policy"] == "D_CLOSE_BUY_D1_OPEN_SELL"
+
+    non_general_strategy = deepcopy(strategy)
+    non_general_strategy["strategy_type"] = "GRID"
+    non_general_strategy["parameters"]["strategy_type"] = "GRID"
+    for entry in non_general_strategy["parameter_history"]:
+        entry["parameters"]["strategy_type"] = "GRID"
+    non_general_request = service._normalize_run_request(
+        non_general_strategy,
+        {"parameter_version_id": strategy["current_parameter_version_id"]},
+    )
+    assert non_general_request["execution_policy"] == "T_CLOSE_TO_T1_OPEN"
+
+    refresh_snapshots(client)
+
+    preview = preview_backtest(
+        client,
+        strategy["id"],
+        start_date="2024-03-01",
+        end_date="2024-04-12",
+        fee_bps=0,
+        slippage_bps=0,
+    )
+    submitted = submit_backtest(
+        client,
+        strategy["id"],
+        start_date="2024-03-01",
+        end_date="2024-04-12",
+        idempotency_key="run-general-overnight-qqq",
+        fee_bps=0,
+        slippage_bps=0,
+    )
+    detail = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/detail"))
+    trades = assert_ok(client.get(f"/backtest-runs/{submitted['id']}/trades?page=1&page_size=100"))
+    last_audit = assert_ok(
+        client.get(
+            f"/backtest-runs/{submitted['id']}/trades/{detail['trade_audit_items'][-1]['trade_id']}/audit"
+        )
+    )
+
+    assert strategy["strategy_type"] == "GENERAL"
+    assert strategy["universe_name"] == "QQQ"
+    assert strategy["benchmark_symbol"] == "QQQ"
+    assert preview["parameter_snapshot"]["execution_profile"] == "overnight_close_to_next_open"
+    assert preview["parameter_snapshot"]["entry_price_field"] == "close"
+    assert preview["parameter_snapshot"]["exit_price_field"] == "next_open"
+    assert preview["execution_policy"] == "D_CLOSE_BUY_D1_OPEN_SELL"
+    assert preview["effective_date"] == "2024-03-01"
+    assert preview["coverage_ratio"] == 1.0
+    assert len(preview["trade_details"]) == 60
+    assert [item["reason"] for item in preview["trade_details"][:2]] == [
+        "overnight_close_to_next_open:entry_close",
+        "overnight_close_to_next_open:exit_open",
+    ]
+    assert preview["trade_details"][-1]["action"] == "sell"
+    assert preview["trade_details"][-1]["trade_date"] == "2024-04-12"
+    assert all(
+        float(preview["trade_details"][index]["price"])
+        == float(preview["trade_details"][index + 1]["price"])
+        for index in range(0, len(preview["trade_details"]), 2)
+    )
+    assert detail["preview"]["execution_policy"] == "D_CLOSE_BUY_D1_OPEN_SELL"
+    assert detail["trades_count"] == 60
+    assert trades["total"] == 60
+    assert all(
+        item["reason"]
+        in {
+            "overnight_close_to_next_open:entry_close",
+            "overnight_close_to_next_open:exit_open",
+        }
+        for item in trades["items"]
+    )
+    assert len(detail["trade_audit_items"]) == 30
+    assert all(abs(float(item["pnl_pct"])) < 1e-9 for item in detail["trade_audit_items"])
+    assert all(abs(float(item["max_favorable_excursion_pct"])) < 1e-9 for item in detail["trade_audit_items"])
+    assert all(abs(float(item["max_adverse_excursion_pct"])) < 1e-9 for item in detail["trade_audit_items"])
+    assert last_audit["trigger_snapshot"]["signal_score"] is None
+
+
+def test_overnight_trade_audit_commentary_uses_net_pnl_after_costs(tmp_path):
+    client, _ = create_test_client(tmp_path)
+    service = client.app.state.service
+    entry_event = {
+        "trade_date": "2024-03-01",
+        "price": 100.0,
+        "weight_before": 0.0,
+        "weight_after": 1.0,
+        "reason": "overnight_close_to_next_open:entry_close",
+    }
+    exit_event = {
+        "trade_date": "2024-03-04",
+        "price": 100.05,
+        "weight_before": 1.0,
+        "weight_after": 0.0,
+        "reason": "overnight_close_to_next_open:exit_open",
+    }
+    audit = service._build_trade_audit_record(
+        run_id="run_overnight_net_commentary",
+        strategy={
+            "strategy_type": "GENERAL",
+            "parameters": {
+                "strategy_type": "GENERAL",
+                "execution_profile": "overnight_close_to_next_open",
+            },
+        },
+        request_payload={"fee_bps": 2.0, "slippage_bps": 2.0},
+        symbol="QQQ",
+        episode_index=0,
+        entry_event=entry_event,
+        exit_event=exit_event,
+        events=[entry_event, exit_event],
+        raw_bars=[
+            {
+                "date": "2024-03-01",
+                "open": 99.8,
+                "high": 100.2,
+                "low": 99.7,
+                "close": 100.0,
+                "adj_close": 100.0,
+                "volume": 1_000_000,
+            },
+            {
+                "date": "2024-03-04",
+                "open": 100.05,
+                "high": 100.4,
+                "low": 99.9,
+                "close": 100.2,
+                "adj_close": 100.2,
+                "volume": 1_100_000,
+            },
+        ],
+        oos_start_date=None,
+    )
+
+    assert abs(float(audit["pnl_pct"]) - 0.05) < 1e-9
+    assert abs(float(audit["slippage_cost_pct"]) - 0.08) < 1e-9
+    assert audit["commentary"] == "Trade was marginal and execution costs consumed a visible share of the edge."
 
 
 def test_dynamic_buy_and_hold_preview_and_detail_use_valuation_snapshot_context(tmp_path):

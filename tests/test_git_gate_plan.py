@@ -127,6 +127,20 @@ def test_fast_uses_single_backend_owner() -> None:
     assert plan.frontend_tests == []
 
 
+def test_backtest_engine_owner_runs_direct_unit_before_real_api_integration() -> None:
+    path = "src/grit_backtest_platform/_backtest_engine_restored.py"
+
+    fast_plan = planner.build_plan("fast", "Committed", [path])
+    impact_plan = planner.build_plan("impact", "Committed", [path])
+
+    assert fast_plan.eligible is True
+    assert fast_plan.backend_tests == ["tests/test_backtest_engine_rebalance.py"]
+    assert impact_plan.backend_tests == [
+        "tests/test_backtest_engine_rebalance.py",
+        "tests/test_real_backtest_api.py",
+    ]
+
+
 def test_fast_changed_backend_test_runs_only_itself() -> None:
     plan = planner.build_plan("fast", "Committed", ["tests/test_factor_research_api.py"])
 
@@ -187,6 +201,67 @@ def test_validation_tooling_change_moves_from_fast_to_impact_release_workflow() 
     assert impact_plan.validation_self_test_required is True
 
 
+def test_validation_planner_and_backend_entry_select_their_direct_owner_tests() -> None:
+    planner_plan = planner.build_plan("impact", "Committed", ["scripts/git_gate_plan.py"])
+    backend_entry_plan = planner.build_plan(
+        "impact",
+        "Committed",
+        ["scripts/codex-test-backend.ps1"],
+    )
+
+    assert planner_plan.backend_tests == [
+        "tests/test_git_gate_plan.py",
+        "tests/test_release_workflow.py",
+    ]
+    assert backend_entry_plan.backend_tests == [
+        "tests/test_codex_test_backend_script.py",
+        "tests/test_release_workflow.py",
+    ]
+    assert planner_plan.validation_self_test_required is True
+    assert backend_entry_plan.validation_self_test_required is True
+
+
+def test_workspace_shared_formatter_fans_out_without_cross_domain_backend_tests() -> None:
+    plan = planner.build_plan("impact", "Committed", ["web/src/lib/workspace-adapters.ts"])
+
+    assert plan.backend_tests == []
+    assert plan.frontend_tests == [
+        "workspace.dashboard.test.tsx",
+        "strategy.detail.page.test.tsx",
+        "run-detail-kv-format.test.ts",
+        "run-detail.page.test.tsx",
+        "app.routes.foundation.test.tsx",
+    ]
+
+
+def test_run_detail_formatter_uses_its_unit_and_page_owners_not_runs_index() -> None:
+    plan = planner.build_plan("impact", "Committed", ["web/src/lib/run-detail-kv-format.ts"])
+
+    assert plan.backend_tests == []
+    assert plan.frontend_tests == ["run-detail-kv-format.test.ts", "run-detail.page.test.tsx"]
+
+
+def test_runs_strategy_library_view_model_uses_its_unit_and_page_owners() -> None:
+    plan = planner.build_plan(
+        "impact",
+        "Committed",
+        ["web/src/lib/runs-strategy-library-view-model.ts"],
+    )
+
+    assert plan.backend_tests == []
+    assert plan.frontend_tests == [
+        "runs-strategy-library-view-model.test.ts",
+        "runs.index.page.test.tsx",
+    ]
+
+
+def test_frontend_strategy_page_never_triggers_backend_strategy_smoke() -> None:
+    plan = planner.build_plan("impact", "Committed", ["web/src/pages/strategy-detail-page.tsx"])
+
+    assert plan.backend_tests == []
+    assert plan.frontend_tests == ["strategy.detail.page.test.tsx"]
+
+
 def test_unmapped_source_is_not_fast_but_impact_has_backend_fallback() -> None:
     fast_plan = planner.build_plan("fast", "Committed", ["src/grit_backtest_platform/_service_rebuilt.py"])
     impact_plan = planner.build_plan("impact", "Committed", ["src/grit_backtest_platform/_service_rebuilt.py"])
@@ -194,6 +269,25 @@ def test_unmapped_source_is_not_fast_but_impact_has_backend_fallback() -> None:
     assert fast_plan.eligible is False
     assert any("unmapped engineering file" in reason for reason in fast_plan.ineligible_reasons)
     assert impact_plan.backend_tests == ["tests/test_backend_api.py"]
+
+
+def test_impact_keeps_per_path_fallback_when_another_backend_file_has_an_owner() -> None:
+    impact_plan = planner.build_plan(
+        "impact",
+        "Committed",
+        [
+            "src/grit_backtest_platform/factor_research.py",
+            "src/grit_backtest_platform/_service_rebuilt.py",
+        ],
+    )
+
+    assert impact_plan.backend_tests == [
+        "tests/test_factor_research_api.py",
+        "tests/test_backend_api.py",
+    ]
+    assert impact_plan.selection_reasons["tests/test_backend_api.py"] == [
+        "backend fallback: src/grit_backtest_platform/_service_rebuilt.py"
+    ]
 
 
 def test_impact_factor_frontend_runs_f1_f2_owner_slice() -> None:
@@ -207,10 +301,17 @@ def test_impact_factor_frontend_runs_f1_f2_owner_slice() -> None:
     }
 
 
-def test_impact_async_backend_selects_repeat_lifecycle_test() -> None:
+def test_real_service_requires_impact_and_selects_api_plus_async_owners() -> None:
+    fast_plan = planner.build_plan("fast", "Committed", ["src/grit_backtest_platform/_real_service_rebuilt.py"])
     impact_plan = planner.build_plan("impact", "Committed", ["src/grit_backtest_platform/_real_service_rebuilt.py"])
 
-    assert "tests/test_factor_mining_api.py" in impact_plan.backend_tests
+    assert fast_plan.eligible is False
+    assert any("unmapped engineering file" in reason for reason in fast_plan.ineligible_reasons)
+    assert impact_plan.backend_tests == [
+        "tests/test_real_backtest_api.py",
+        "tests/test_backend_api.py",
+        "tests/test_factor_mining_api.py",
+    ]
     assert impact_plan.async_lifecycle_repeat_tests == [
         "tests/test_factor_mining_api.py::test_factor_mining_api_runs_one_thousand_candidates_without_factor_library_write"
     ]

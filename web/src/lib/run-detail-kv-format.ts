@@ -95,6 +95,7 @@ const RUN_DETAIL_VALUE_LABELS: Record<string, string> = {
   READY: '已就绪',
   RUNNING: '运行中',
   STALE: '过期',
+  D_CLOSE_BUY_D1_OPEN_SELL: '当日收盘买入，下一交易日开盘卖出',
   T_CLOSE_TO_T1_OPEN: 'T日收盘信号，T+1开盘成交',
   all_in: '一次性建仓',
   asset_allocation: '资产配置',

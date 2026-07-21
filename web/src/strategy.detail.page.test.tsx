@@ -172,6 +172,50 @@ afterEach(() => {
 });
 
 describe('StrategyDetailPage', () => {
+  it('localizes the overnight execution parameter cards without raw profile strings', async () => {
+    fakeApi.getStrategyDetail.mockResolvedValue({
+      ...strategy,
+      id: 'strat-overnight',
+      name: '隔夜QQQ',
+      description: '每日收盘买入，下一交易日开盘卖出。',
+      strategy_type: 'GENERAL',
+      latest_successful_run_id: null,
+      latest_run_id: null,
+      latest_optimization_job_id: null,
+      current_parameter_version: 1,
+      current_parameter_version_id: 'strat-overnight-v1',
+      parameters: {
+        strategy_type: 'GENERAL',
+        execution_profile: 'overnight_close_to_next_open',
+        execution_symbol: 'QQQ',
+        entry_price_field: 'close',
+        exit_price_field: 'next_open',
+        entry_weight_pct: 100,
+        exit_weight_pct: 100,
+      },
+      parameter_history: [],
+    } satisfies ApiStrategyDetail);
+    fakeApi.listBacktestRuns.mockResolvedValue([]);
+    ({ StrategyDetailPage } = await import('./pages/strategy-detail-page'));
+
+    render(<StrategyDetailPage strategyId="strat-overnight" />);
+
+    expect(await screen.findByText('隔夜QQQ')).toBeInTheDocument();
+    expect(screen.getByText('执行方式')).toBeInTheDocument();
+    expect(screen.getByText('成交标的')).toBeInTheDocument();
+    expect(screen.getByText('买入价格')).toBeInTheDocument();
+    expect(screen.getByText('卖出价格')).toBeInTheDocument();
+    expect(screen.getByText('买入仓位(%)')).toBeInTheDocument();
+    expect(screen.getByText('卖出仓位(%)')).toBeInTheDocument();
+    expect(screen.getByText('当日收盘买入，下一交易日开盘卖出')).toBeInTheDocument();
+    expect(screen.getByText('收盘价')).toBeInTheDocument();
+    expect(screen.getByText('下一交易日开盘价')).toBeInTheDocument();
+    expect(screen.getAllByText('100%')).toHaveLength(2);
+    expect(document.body.textContent).not.toContain('overnight_close_to_next_open');
+    expect(document.body.textContent).not.toContain('entry_price_field');
+    expect(document.body.textContent).not.toContain('next_open');
+  });
+
   it('renders multi-factor current parameters with canonical Chinese factor names', async () => {
     fakeApi.getStrategyDetail.mockResolvedValue({
       ...strategy,

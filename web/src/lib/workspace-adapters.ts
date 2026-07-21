@@ -64,6 +64,12 @@ const PARAMETER_LABELS: Record<string, string> = {
   benchmark_symbol: '基准',
   buy_step_pct: '买入步长(%)',
   capital: '初始资金(USD)',
+  entry_price_field: '买入价格',
+  entry_weight_pct: '买入仓位(%)',
+  execution_profile: '执行方式',
+  execution_symbol: '成交标的',
+  exit_price_field: '卖出价格',
+  exit_weight_pct: '卖出仓位(%)',
   contribution_amount: '定投金额(USD)',
   contribution_anchor: '定投执行锚点',
   dynamic_investment_logic: '动态定投逻辑',
@@ -96,6 +102,8 @@ const PARAMETER_LABELS: Record<string, string> = {
 };
 
 const PARAMETER_VALUE_LABELS: Record<string, string> = {
+  D_CLOSE_BUY_D1_OPEN_SELL: '当日收盘买入，下一交易日开盘卖出',
+  T_CLOSE_TO_T1_OPEN: 'T日收盘信号，T+1开盘成交',
   BUY_AND_HOLD: '买入持有',
   GENERAL: '通用',
   GRID: '网格',
@@ -106,6 +114,7 @@ const PARAMETER_VALUE_LABELS: Record<string, string> = {
   LOW_IS_BETTER: '数值越低越好',
   NEUTRAL: '中性',
   buy_and_hold: '买入持有',
+  close: '收盘价',
   daily: '每天',
   equal_weight: '等权',
   false: '否',
@@ -113,6 +122,8 @@ const PARAMETER_VALUE_LABELS: Record<string, string> = {
   mean_reversion: '均值回归',
   monthly: '每月',
   never: '从不',
+  next_open: '下一交易日开盘价',
+  overnight_close_to_next_open: '当日收盘买入，下一交易日开盘卖出',
   quarterly: '每季度',
   quality_momentum: '质量动量',
   rank_weighted: 'Rank 加权',
@@ -177,7 +188,7 @@ function buildMetaPrimary(
     readString(latestRunDetail?.request as UnknownRecord | undefined, ['execution_policy', 'executionPolicy']);
 
   if (executionPolicy) {
-    return `执行策略 ${executionPolicy}`;
+    return `执行策略 ${formatParameterValue(executionPolicy, 'execution_policy')}`;
   }
 
   const universeName = detail?.universe_name ?? strategy.universe_name;

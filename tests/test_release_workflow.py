@@ -7,17 +7,19 @@ from datetime import date
 from pathlib import Path
 
 
-def _load_prepare_push():
+def _load_release_workflow_module():
     module_path = Path(__file__).resolve().parents[1] / "src" / "grit_backtest_platform" / "release_workflow.py"
     spec = importlib.util.spec_from_file_location("grit_release_workflow", module_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    return module.prepare_push
+    return module
 
 
-prepare_push = _load_prepare_push()
+release_workflow = _load_release_workflow_module()
+prepare_push = release_workflow.prepare_push
+validate_push_changelog = release_workflow.validate_push_changelog
 
 
 def _load_pre_push_hook_module():
@@ -398,17 +400,18 @@ def test_gate_self_test_plan_only_writes_non_latest_summary() -> None:
     assert "$parameters.SummaryPath = $SummaryPath" in impact_script
 
 
-def test_impact_gate_runs_frontend_types_before_backend_targeted_tests() -> None:
+def test_impact_gate_runs_frontend_targeted_tests_before_backend_targeted_tests() -> None:
     script = (REPO_ROOT / "scripts" / "codex-validate-fast.ps1").read_text(encoding="utf-8")
 
-    assert script.index("    Invoke-FrontendTypes") < script.index("    Invoke-BackendTests")
+    assert script.index("    Invoke-FrontendTypes") < script.index("    Invoke-FrontendTests")
+    assert script.index("    Invoke-FrontendTests") < script.index("    Invoke-BackendTests")
+    assert script.index("    Invoke-BackendTests") < script.index("    Invoke-AsyncLifecycleRepeat")
 
 
-def test_publish_impact_wrapper_codifies_single_working_tree_gate_flow() -> None:
+def test_publish_impact_wrapper_codifies_single_committed_gate_flow() -> None:
     script = (REPO_ROOT / "scripts" / "codex-publish-impact.ps1").read_text(encoding="utf-8")
 
     assert "codex-validate-impact.ps1" in script
-    assert "'WorkingTree'" in script
     assert "'Committed'" in script
     assert "git $($Arguments -join ' ')" in script
     assert "@('diff', '--cached', '--check', '--')" in script
@@ -418,6 +421,13 @@ def test_publish_impact_wrapper_codifies_single_working_tree_gate_flow() -> None
     assert "Get-GitLines -Arguments @('status', '--porcelain')" not in script
     assert "Refreshing committed impact evidence after metadata snapshot." in script
     assert "Invoke-ImpactGate -Scope 'Committed'" in script
+    assert "Invoke-ImpactGate -Scope 'WorkingTree'" not in script
+    assert "$impactScope =" not in script
+    assert script.index("Invoke-GitStrict -Arguments @('commit', '-m', $CommitMessage)") < script.rindex("Invoke-ImpactGate -Scope 'Committed'")
+    assert "prepare_push_changelog.py" in script
+    assert "--check-only" in script
+    assert "CHANGELOG hygiene check passed before impact validation." in script
+    assert script.rindex("Invoke-ChangelogHygieneCheck") < script.index("Invoke-GitStrict -Arguments @('commit', '-m', $CommitMessage)")
 
 
 def test_publish_impact_wrapper_guards_trace_assets_and_external_push() -> None:
@@ -465,6 +475,10 @@ def test_publish_full_wrapper_codifies_release_publish_flow() -> None:
     assert "CHANGELOG.md" in script
     assert "src/grit_backtest_platform/_version.py" in script
     assert "codex-publish-full only pushes after -Target all" in script
+    assert "prepare_push_changelog.py" in script
+    assert "--check-only" in script
+    assert "CHANGELOG hygiene check passed before full validation." in script
+    assert script.rindex("Invoke-ChangelogHygieneCheck") < script.rindex("Invoke-FullGate")
 
 
 def test_pre_push_detects_single_generated_metadata_child(tmp_path: Path) -> None:
@@ -870,6 +884,62 @@ def test_prepare_push_rejects_sensitive_internal_bullet(tmp_path: Path) -> None:
         assert "本机绝对路径" in str(exc)
     else:
         raise AssertionError("prepare_push should reject sensitive changelog bullets")
+
+
+def test_validate_push_changelog_accepts_clean_entries_without_mutating_files(tmp_path: Path) -> None:
+    _write_repo_files(
+        tmp_path,
+        """# Changelog
+
+## [Unreleased]
+
+### Fixed
+
+- **导入提示**: 修复导入页面的提示文案。
+
+## [0.1.1] - 2026-03-31
+
+### Added
+
+- **初始版本**: 提供策略研究工作台的基础能力。
+""",
+    )
+    changelog_path = tmp_path / "CHANGELOG.md"
+    version_path = tmp_path / "src" / "grit_backtest_platform" / "_version.py"
+    original_changelog = changelog_path.read_text(encoding="utf-8")
+    original_version = version_path.read_text(encoding="utf-8")
+
+    validate_push_changelog(tmp_path)
+
+    assert changelog_path.read_text(encoding="utf-8") == original_changelog
+    assert version_path.read_text(encoding="utf-8") == original_version
+
+
+def test_validate_push_changelog_rejects_internal_hash_routes(tmp_path: Path) -> None:
+    _write_repo_files(
+        tmp_path,
+        """# Changelog
+
+## [Unreleased]
+
+### Fixed
+
+- **导入提示**: 修复 #/factors/imports 页面提交后的刷新提示。
+
+## [0.1.1] - 2026-03-31
+
+### Added
+
+- **初始版本**: 提供策略研究工作台的基础能力。
+""",
+    )
+
+    try:
+        validate_push_changelog(tmp_path)
+    except ValueError as exc:
+        assert "#/factors/imports" in str(exc)
+    else:
+        raise AssertionError("validate_push_changelog should reject internal hash routes")
 
 
 def test_prepare_push_honors_minimum_revision_for_backfilled_post_push_snapshot(

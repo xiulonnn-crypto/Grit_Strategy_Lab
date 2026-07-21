@@ -92,6 +92,7 @@ F1_F2_FRONTEND_PATTERNS = (
 )
 VALIDATION_TOOLING_PATTERNS = (
     "scripts/codex-validate-*.ps1",
+    "scripts/codex-test-*.ps1",
     "scripts/git_gate_plan.py",
     "scripts/pre_push_hook.py",
     ".githooks/**",
@@ -100,7 +101,16 @@ VALIDATION_TOOLING_PATTERNS = (
     "web/package-lock.json",
 )
 
-FAST_BACKEND_OWNER_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+VALIDATION_TOOLING_OWNER_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("scripts/git_gate_plan.py", ("tests/test_git_gate_plan.py",)),
+    ("scripts/codex-test-backend.ps1", ("tests/test_codex_test_backend_script.py",)),
+)
+
+EXACT_BACKEND_OWNER_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        r"^src/grit_backtest_platform/_backtest_engine_restored\.py$",
+        ("tests/test_backtest_engine_rebalance.py",),
+    ),
     (r"^src/grit_backtest_platform/factor_research\.py$", ("tests/test_factor_research_api.py",)),
     (
         r"^src/grit_backtest_platform/factor_expression_engine\.py$",
@@ -113,7 +123,7 @@ FAST_BACKEND_OWNER_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
 )
 
-FAST_FRONTEND_OWNER_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+EXACT_FRONTEND_OWNER_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (r"^web/src/pages/optimization-lab-page\.(tsx|css)$", ("optimization.module.test.tsx",)),
     (r"^web/src/pages/factor-factory-page\.tsx$", ("factor.factory.test.tsx",)),
     (r"^web/src/pages/factor-phase2-pages\.css$", ("factor.factory.test.tsx",)),
@@ -124,9 +134,30 @@ FAST_FRONTEND_OWNER_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (r"^web/src/pages/creation-template-page\.tsx$", ("creation-template.route.test.tsx",)),
     (r"^web/src/page-sections/snapshots-.*\.tsx$", ("snapshots.page.test.tsx",)),
     (r"^web/src/lib/factor-display\.ts$", ("factor.factory.test.tsx",)),
+    (
+        r"^web/src/lib/workspace-adapters\.ts$",
+        (
+            "workspace.dashboard.test.tsx",
+            "strategy.detail.page.test.tsx",
+            "run-detail-kv-format.test.ts",
+            "run-detail.page.test.tsx",
+        ),
+    ),
+    (
+        r"^web/src/lib/run-detail-kv-format\.ts$",
+        ("run-detail-kv-format.test.ts", "run-detail.page.test.tsx"),
+    ),
+    (
+        r"^web/src/lib/runs-strategy-library-view-model\.ts$",
+        ("runs-strategy-library-view-model.test.ts", "runs.index.page.test.tsx"),
+    ),
 )
 
 IMPACT_BACKEND_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        r"^_real_service_rebuilt\.py$",
+        ("tests/test_real_backtest_api.py", "tests/test_backend_api.py"),
+    ),
     (r"release_workflow|pre_push_hook|git_gate_plan|codex-validate", ("tests/test_release_workflow.py",)),
     (r"composition", ("tests/test_composition_api.py",)),
     (r"creation", ("tests/test_creation_session_refresh.py",)),
@@ -167,7 +198,8 @@ IMPACT_FRONTEND_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (r"optimization", ("optimization.module.test.tsx",)),
     (r"creation", ("creation-template.route.test.tsx", "creation.flow.test.tsx")),
-    (r"run-detail|runs", ("run-detail.page.test.tsx", "runs.index.page.test.tsx")),
+    (r"run-detail", ("run-detail.page.test.tsx",)),
+    (r"runs-index", ("runs.index.page.test.tsx",)),
     (
         r"shell|route|app-runtime|appRouteContext|demoStoreContext",
         ("app.routes.foundation.test.tsx", "shell-frame.page-heading.test.tsx"),
@@ -331,26 +363,47 @@ def select_owner_tests(
         elif is_frontend_test(path):
             add_selection(frontend_tests, reasons, (frontend_test_id(path),), f"changed frontend test: {path}")
             matched = True
-        elif mode == "fast":
-            for pattern, tests in FAST_BACKEND_OWNER_RULES:
-                if re.search(pattern, path):
+        else:
+            if is_backend_related(path):
+                for pattern, tests in EXACT_BACKEND_OWNER_RULES:
+                    if not re.search(pattern, path):
+                        continue
                     add_selection(backend_tests, reasons, tests, f"backend owner: {path}")
                     matched = True
-                    break
-            for pattern, tests in FAST_FRONTEND_OWNER_RULES:
-                if re.search(pattern, path):
+                    if mode == "fast":
+                        break
+            if is_frontend_related(path):
+                for pattern, tests in EXACT_FRONTEND_OWNER_RULES:
+                    if not re.search(pattern, path):
+                        continue
                     add_selection(frontend_tests, reasons, tests, f"frontend owner: {path}")
                     matched = True
-                    break
-        else:
-            match_text = impact_match_text(path)
-            for pattern, tests in IMPACT_BACKEND_RULES:
-                if re.search(pattern, match_text):
-                    add_selection(backend_tests, reasons, tests, f"backend impact: {path}")
+                    if mode == "fast":
+                        break
+
+            if mode == "impact":
+                match_text = impact_match_text(path)
+                if is_backend_related(path):
+                    for pattern, tests in IMPACT_BACKEND_RULES:
+                        if re.search(pattern, match_text):
+                            add_selection(backend_tests, reasons, tests, f"backend impact: {path}")
+                            matched = True
+                if is_frontend_related(path):
+                    for pattern, tests in IMPACT_FRONTEND_RULES:
+                        if re.search(pattern, match_text):
+                            add_selection(frontend_tests, reasons, tests, f"frontend impact: {path}")
+                            matched = True
+
+                if not matched and is_backend_related(path) and not is_contract_path(path):
+                    add_selection(backend_tests, reasons, ("tests/test_backend_api.py",), f"backend fallback: {path}")
                     matched = True
-            for pattern, tests in IMPACT_FRONTEND_RULES:
-                if re.search(pattern, match_text):
-                    add_selection(frontend_tests, reasons, tests, f"frontend impact: {path}")
+                if not matched and is_frontend_related(path) and not is_contract_path(path):
+                    add_selection(
+                        frontend_tests,
+                        reasons,
+                        ("app.routes.foundation.test.tsx",),
+                        f"frontend fallback: {path}",
+                    )
                     matched = True
 
         if not matched and mode == "fast" and not is_contract_path(path) and not is_validation_tooling(path):
@@ -364,11 +417,18 @@ def select_owner_tests(
         elif contract_changed:
             add_selection(frontend_tests, reasons, ("app.routes.foundation.test.tsx",), "frontend contract mirror change")
         if validation_tooling_changed:
+            for path_pattern, owner_tests in VALIDATION_TOOLING_OWNER_RULES:
+                matching_paths = [
+                    path for path in engineering_files if fnmatch.fnmatch(normalize_path(path), path_pattern)
+                ]
+                for matching_path in matching_paths:
+                    add_selection(
+                        backend_tests,
+                        reasons,
+                        owner_tests,
+                        f"validation owner: {matching_path}",
+                    )
             add_selection(backend_tests, reasons, ("tests/test_release_workflow.py",), "validation tooling change")
-        if not backend_tests and any(is_backend_related(path) for path in engineering_files):
-            add_selection(backend_tests, reasons, ("tests/test_backend_api.py",), "backend fallback")
-        if not frontend_tests and any(is_frontend_related(path) for path in engineering_files):
-            add_selection(frontend_tests, reasons, ("app.routes.foundation.test.tsx",), "frontend fallback")
 
     return backend_tests, frontend_tests, reasons, unmatched
 

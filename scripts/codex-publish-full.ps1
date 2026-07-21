@@ -24,6 +24,7 @@ Set-StrictMode -Version Latest
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $fullScript = Join-Path $repoRoot 'scripts\codex-validate-full.ps1'
+$changelogScript = Join-Path $repoRoot 'scripts\prepare_push_changelog.py'
 $attestationPath = Join-Path $repoRoot 'harness\reports\smoke\latest-full-push-attestation.md'
 $managedMetadataFiles = @(
     'CHANGELOG.md',
@@ -155,6 +156,29 @@ function Invoke-StagedWhitespaceCheck {
     }
     Invoke-GitStrict -Arguments (@('diff', '--cached', '--check', '--') + $Paths) | Out-Null
     Write-Host "Staged whitespace check passed for $($Paths.Count) paths." -ForegroundColor Green
+}
+
+function Get-PythonExecutable {
+    $venvPython = Join-Path $repoRoot '.venv\Scripts\python.exe'
+    if (Test-Path -LiteralPath $venvPython) {
+        return $venvPython
+    }
+    return 'python'
+}
+
+function Invoke-ChangelogHygieneCheck {
+    if (-not (Test-Path -LiteralPath $changelogScript)) {
+        throw "CHANGELOG hygiene script is missing: $changelogScript"
+    }
+
+    $pythonExe = Get-PythonExecutable
+    $output = & $pythonExe $changelogScript --repo-root $repoRoot --check-only 2>&1
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        $message = (@($output) | ForEach-Object { [string]$_ }) -join "`n"
+        throw "CHANGELOG hygiene check failed before full validation.`n$message"
+    }
+    Write-Host 'CHANGELOG hygiene check passed before full validation.' -ForegroundColor Green
 }
 
 function Get-StagedBlobText {
@@ -426,6 +450,7 @@ if ($stagedPaths.Count -gt 0) {
     Invoke-StagedWhitespaceCheck -Paths $stagedPaths
     Assert-TraceMatricesClosed -Paths $stagedPaths
 }
+Invoke-ChangelogHygieneCheck
 
 [string[]]$highSignalPaths = @(Write-ExternalPushSummary -Paths $stagedPaths -RemoteUrl $remoteUrl)
 if (-not $SkipPush -and $highSignalPaths.Count -gt 0 -and -not $ConfirmExternalPush) {

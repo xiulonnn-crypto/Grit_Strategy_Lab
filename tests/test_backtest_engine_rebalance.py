@@ -1,10 +1,266 @@
-from grit_backtest_platform.backtest_engine import BacktestConfig, _rebalance_keys, run_backtest
+from copy import deepcopy
+import math
+
+from grit_backtest_platform.backtest_engine import (
+    BacktestConfig,
+    _rebalance_keys,
+    prepare_backtest_inputs,
+    run_backtest,
+    run_backtest_prepared,
+)
 
 
 def test_rebalance_keys_never_only_keeps_first_trade_date():
     dates = ["2024-01-02", "2024-01-03", "2024-01-10", "2024-02-01"]
 
     assert _rebalance_keys(dates, "never") == [0]
+
+
+def test_general_overnight_profile_uses_close_to_next_open_round_trips_only():
+    bars = [
+        {"date": "2024-01-02", "open": 50.0, "high": 105.0, "low": 45.0, "close": 100.0, "adj_close": 10.0},
+        {"date": "2024-01-03", "open": 110.0, "high": 115.0, "low": 80.0, "close": 90.0, "adj_close": 9.0},
+        {"date": "2024-01-04", "open": 99.0, "high": 210.0, "low": 95.0, "close": 200.0, "adj_close": 20.0},
+    ]
+
+    result = run_backtest(
+        {"QQQ": bars},
+        config=BacktestConfig(
+            start_date="2024-01-02",
+            end_date="2024-01-04",
+            benchmark_symbol="QQQ",
+            initial_equity=100000.0,
+        ),
+        parameters={
+            "strategy_type": "GENERAL",
+            "template_key": "general",
+            "execution_profile": "overnight_close_to_next_open",
+            "execution_symbol": "QQQ",
+            "entry_price_field": "close",
+            "exit_price_field": "next_open",
+            "entry_weight_pct": 100,
+            "exit_weight_pct": 100,
+        },
+        benchmark_bars=bars,
+    )
+
+    assert [round(point.strategy_return, 8) for point in result.daily_performance] == [0.1, 0.1]
+    assert [round(point.benchmark_return, 8) for point in result.daily_performance] == [-0.1, round(200.0 / 90.0 - 1.0, 8)]
+    assert round(result.metrics.total_return, 8) == 0.21
+    assert result.metrics.turnover == 2.0
+    assert result.effective_date == "2024-01-02"
+    assert result.coverage_days == 2
+    assert result.coverage_ratio == 1.0
+    assert [trade.reason for trade in result.trades] == [
+        "overnight_close_to_next_open:entry_close",
+        "overnight_close_to_next_open:exit_open",
+        "overnight_close_to_next_open:entry_close",
+        "overnight_close_to_next_open:exit_open",
+    ]
+    assert [trade.date for trade in result.trades] == [
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-03",
+        "2024-01-04",
+    ]
+    assert [trade.price for trade in result.trades] == [100.0, 110.0, 90.0, 99.0]
+    assert result.trades[-1].action == "sell"
+
+
+def test_general_overnight_profile_applies_entry_weight_and_two_sided_costs():
+    bars = [
+        {"date": "2024-01-02", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-03", "open": 110.0, "high": 150.0, "low": 50.0, "close": 80.0, "adj_close": 80.0},
+    ]
+
+    result = run_backtest(
+        {"QQQ": bars},
+        config=BacktestConfig(
+            start_date="2024-01-02",
+            end_date="2024-01-03",
+            benchmark_symbol="QQQ",
+            transaction_cost_bps=10.0,
+        ),
+        parameters={
+            "strategy_type": "GENERAL",
+            "execution_profile": "overnight_close_to_next_open",
+            "execution_symbol": "QQQ",
+            "entry_weight_pct": 50,
+            "exit_weight_pct": 100,
+        },
+        benchmark_bars=bars,
+    )
+
+    assert round(result.daily_performance[0].strategy_return, 8) == 0.049
+    assert round(result.metrics.total_return, 8) == 0.049
+    assert result.metrics.turnover == 1.0
+    assert [trade.weight_after for trade in result.trades] == [0.5, 0.0]
+    assert result.trades[0].quantity == 500.0
+
+
+def test_general_overnight_profile_does_not_fallback_or_leave_an_orphan_entry():
+    bars = [
+        {"date": "2024-01-02", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-03", "open": 0.0, "high": 111.0, "low": 109.0, "close": 110.0, "adj_close": 110.0},
+    ]
+
+    result = run_backtest(
+        {"QQQ": bars},
+        config=BacktestConfig(start_date="2024-01-02", end_date="2024-01-03", benchmark_symbol="QQQ"),
+        parameters={
+            "strategy_type": "GENERAL",
+            "execution_profile": "overnight_close_to_next_open",
+            "execution_symbol": "QQQ",
+            "entry_weight_pct": 100,
+            "exit_weight_pct": 100,
+        },
+        benchmark_bars=bars,
+    )
+
+    assert result.trades == []
+    assert result.daily_performance[0].strategy_return == 0.0
+    assert result.coverage_days == 0
+    assert result.coverage_ratio == 0.0
+    assert result.warnings == [
+        "Skipped overnight round trip for QQQ: missing or non-positive open on 2024-01-03."
+    ]
+
+
+def test_general_overnight_profile_uses_execution_symbol_calendar_not_benchmark_calendar():
+    qqq_bars = [
+        {"date": "2024-01-02", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-03", "open": 110.0, "high": 111.0, "low": 89.0, "close": 90.0, "adj_close": 90.0},
+        {"date": "2024-01-04", "open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0, "adj_close": 100.0},
+    ]
+    spy_bars = [
+        {"date": "2024-01-02", "open": 200.0, "high": 201.0, "low": 199.0, "close": 200.0, "adj_close": 200.0},
+        {"date": "2024-01-04", "open": 220.0, "high": 221.0, "low": 219.0, "close": 220.0, "adj_close": 220.0},
+    ]
+
+    result = run_backtest(
+        {"QQQ": qqq_bars},
+        config=BacktestConfig(start_date="2024-01-02", end_date="2024-01-04", benchmark_symbol="SPY"),
+        parameters={
+            "strategy_type": "GENERAL",
+            "execution_profile": "overnight_close_to_next_open",
+            "execution_symbol": "QQQ",
+            "entry_weight_pct": 100,
+            "exit_weight_pct": 100,
+        },
+        benchmark_bars=spy_bars,
+    )
+
+    assert [round(point.strategy_return, 8) for point in result.daily_performance] == [0.1, 0.1]
+    assert [trade.date for trade in result.trades] == [
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-03",
+        "2024-01-04",
+    ]
+
+
+def test_overnight_profile_does_not_hijack_non_general_strategy_dispatch():
+    bars = [
+        {"date": "2024-01-02", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-03", "open": 95.0, "high": 96.0, "low": 94.0, "close": 95.0, "adj_close": 95.0},
+    ]
+
+    result = run_backtest(
+        {"QQQ": bars},
+        config=BacktestConfig(start_date="2024-01-02", end_date="2024-01-03", benchmark_symbol="QQQ"),
+        parameters={
+            "strategy_type": "GRID",
+            "template_key": "grid",
+            "execution_profile": "overnight_close_to_next_open",
+            "initial_position": 20,
+            "grid_interval": 5,
+            "buy_size_pct": 10,
+            "sell_step_pct": 10,
+            "sell_size_pct": 10,
+            "max_stop_loss_pct": -50,
+        },
+        benchmark_bars=bars,
+    )
+
+    assert result.trades[0].reason == "grid:init"
+
+
+def test_general_overnight_profile_rejects_conflicting_execution_fields():
+    bars = [
+        {"date": "2024-01-02", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "adj_close": 100.0},
+        {"date": "2024-01-03", "open": 110.0, "high": 111.0, "low": 109.0, "close": 110.0, "adj_close": 110.0},
+    ]
+
+    result = run_backtest(
+        {"QQQ": bars},
+        config=BacktestConfig(start_date="2024-01-02", end_date="2024-01-03", benchmark_symbol="QQQ"),
+        parameters={
+            "strategy_type": "GENERAL",
+            "execution_profile": "overnight_close_to_next_open",
+            "execution_symbol": "QQQ",
+            "entry_price_field": "open",
+            "exit_price_field": "close",
+            "entry_weight_pct": 100,
+            "exit_weight_pct": 100,
+        },
+        benchmark_bars=bars,
+    )
+
+    assert result.trades == []
+    assert result.warnings == [
+        "Overnight execution profile requires entry_price_field=close and exit_price_field=next_open"
+    ]
+
+
+def test_general_overnight_profile_resume_matches_uninterrupted_round_trips():
+    bars = [
+        {"date": f"2024-01-0{index}", "open": open_price, "high": open_price + 2.0, "low": close_price - 2.0, "close": close_price, "adj_close": close_price}
+        for index, (open_price, close_price) in enumerate(
+            [(100.0, 100.0), (105.0, 102.0), (107.1, 104.0), (109.2, 106.0), (111.3, 108.0)],
+            start=2,
+        )
+    ]
+    config = BacktestConfig(start_date="2024-01-02", end_date="2024-01-06", benchmark_symbol="QQQ")
+    parameters = {
+        "strategy_type": "GENERAL",
+        "execution_profile": "overnight_close_to_next_open",
+        "execution_symbol": "QQQ",
+        "entry_price_field": "close",
+        "exit_price_field": "next_open",
+        "entry_weight_pct": 100,
+        "exit_weight_pct": 100,
+    }
+    prepared = prepare_backtest_inputs({"QQQ": bars}, config=config, benchmark_bars=bars)
+    checkpoints = []
+
+    def capture_checkpoint(state, daily_points, trades):
+        if int(state["completed_steps"]) == 2 and not checkpoints:
+            checkpoints.append((dict(state), deepcopy(list(daily_points)), deepcopy(list(trades))))
+
+    uninterrupted = run_backtest_prepared(
+        prepared,
+        config=config,
+        parameters=parameters,
+        checkpoint_callback=capture_checkpoint,
+        checkpoint_interval_steps=2,
+    )
+    resume_state, resume_daily, resume_trades = checkpoints[0]
+    resumed = run_backtest_prepared(
+        prepared,
+        config=config,
+        parameters=parameters,
+        resume_state=resume_state,
+        resume_daily_performance=resume_daily,
+        resume_trades=resume_trades,
+    )
+
+    assert uninterrupted.metrics == resumed.metrics
+    assert uninterrupted.daily_performance == resumed.daily_performance
+    assert uninterrupted.trades == resumed.trades
+    assert len(resumed.trades) == 8
+    assert resumed.trades[-1].action == "sell"
+    assert len({(trade.date, trade.reason) for trade in resumed.trades}) == len(resumed.trades)
+    assert all(math.isfinite(value) for value in [resumed.metrics.total_return, resumed.metrics.cagr, resumed.metrics.oos_cagr])
 
 
 def test_grid_strategy_trades_from_start_instead_of_waiting_until_last_day():

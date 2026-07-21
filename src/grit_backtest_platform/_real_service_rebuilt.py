@@ -19705,9 +19705,16 @@ class RealBacktestPlatformService(BacktestPlatformService):
             or strategy.get("dataset_snapshot_id")
             or DATASET_PRICE_SNAPSHOT_ID
         )
-        normalized["execution_policy"] = str(
-            normalized.get("execution_policy")
-            or "T_CLOSE_TO_T1_OPEN"
+        selected_parameters = self._parameter_snapshot_for_version(
+            strategy,
+            normalized["parameter_version_id"],
+        )
+        execution_profile = str(selected_parameters.get("execution_profile") or "").strip().lower()
+        strategy_type = str(strategy.get("strategy_type") or "").strip().upper()
+        normalized["execution_policy"] = (
+            "D_CLOSE_BUY_D1_OPEN_SELL"
+            if strategy_type == "GENERAL" and execution_profile == "overnight_close_to_next_open"
+            else str(normalized.get("execution_policy") or "T_CLOSE_TO_T1_OPEN")
         )
         normalized["universe_snapshot_id"] = self._resolved_universe_snapshot_id(strategy, normalized)
         normalized["is_permanent"] = bool(normalized.get("is_permanent", False))
@@ -19801,14 +19808,29 @@ class RealBacktestPlatformService(BacktestPlatformService):
         if not episode_bars:
             episode_bars = list(window_bars)
 
-        max_favorable_excursion_pct = max(
-            (_pct_change(bar.get("high", bar.get("close")), entry_price) for bar in episode_bars),
-            default=0.0,
+        is_overnight_close_to_next_open = (
+            str(entry_event.get("reason") or "") == "overnight_close_to_next_open:entry_close"
+            and str(exit_event.get("reason") or "") == "overnight_close_to_next_open:exit_open"
         )
-        max_adverse_excursion_pct = min(
-            (_pct_change(bar.get("low", bar.get("close")), entry_price) for bar in episode_bars),
-            default=0.0,
-        )
+        if is_overnight_close_to_next_open:
+            overnight_path = [entry_price, exit_price]
+            max_favorable_excursion_pct = max(
+                (_pct_change(price, entry_price) for price in overnight_path),
+                default=0.0,
+            )
+            max_adverse_excursion_pct = min(
+                (_pct_change(price, entry_price) for price in overnight_path),
+                default=0.0,
+            )
+        else:
+            max_favorable_excursion_pct = max(
+                (_pct_change(bar.get("high", bar.get("close")), entry_price) for bar in episode_bars),
+                default=0.0,
+            )
+            max_adverse_excursion_pct = min(
+                (_pct_change(bar.get("low", bar.get("close")), entry_price) for bar in episode_bars),
+                default=0.0,
+            )
         pnl_pct = _pct_change(exit_price, entry_price)
         turnover = sum(
             abs(_coerce_float(item.get("weight_after")) - _coerce_float(item.get("weight_before")))
@@ -19819,7 +19841,11 @@ class RealBacktestPlatformService(BacktestPlatformService):
 
         engine_parameters = self._engine_parameters(strategy)
         signal_score = None
-        if normalized_bars and 0 <= entry_index < len(normalized_bars):
+        if (
+            not is_overnight_close_to_next_open
+            and normalized_bars
+            and 0 <= entry_index < len(normalized_bars)
+        ):
             signal_score = _signal_score(
                 normalized_bars,
                 entry_index,
@@ -19827,7 +19853,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
                 str(engine_parameters.get("template_key") or strategy.get("strategy_type") or "momentum"),
             )
         commentary = self._trade_audit_commentary(
-            pnl_pct=pnl_pct,
+            pnl_pct=pnl_pct - slippage_cost_pct,
             max_favorable_excursion_pct=max_favorable_excursion_pct,
             max_adverse_excursion_pct=max_adverse_excursion_pct,
             slippage_cost_pct=slippage_cost_pct,
@@ -20699,6 +20725,7 @@ class RealBacktestPlatformService(BacktestPlatformService):
             "data_segment_type": str(request_payload.get("data_segment_type") or "FULL").upper(),
             "dataset_snapshot_id": prepared_context.get("dataset_snapshot_id"),
             "universe_snapshot_id": prepared_context.get("universe_snapshot_id"),
+            "execution_policy": request_payload.get("execution_policy"),
             "warnings": warnings,
             "snapshot_summary": snapshot_summary,
             "metrics": summary,

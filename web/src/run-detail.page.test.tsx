@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunDetailPage } from './pages/run-detail-page';
+import { formatRunDetailKvValue } from './lib/run-detail-kv-format';
 import type {
   ApiBacktestRunDetail,
   ApiBacktestRunTradeAudit,
@@ -382,6 +383,12 @@ afterEach(() => {
 });
 
 describe('RunDetailPage', () => {
+  it('labels the overnight round-trip execution policy without reusing the next-open signal policy', () => {
+    expect(formatRunDetailKvValue('execution_policy', 'D_CLOSE_BUY_D1_OPEN_SELL')).toBe(
+      '当日收盘买入，下一交易日开盘卖出',
+    );
+  });
+
   it('renders diagnostics by default and switches between trades, evidence, and properties tabs', async () => {
     fakeApi.getBacktestRunDetail.mockResolvedValue(detail);
     fakeApi.getBacktestRunTrades.mockResolvedValue(trades);

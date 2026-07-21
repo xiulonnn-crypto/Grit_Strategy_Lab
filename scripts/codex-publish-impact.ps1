@@ -19,6 +19,7 @@ Set-StrictMode -Version Latest
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $impactScript = Join-Path $repoRoot 'scripts\codex-validate-impact.ps1'
+$changelogScript = Join-Path $repoRoot 'scripts\prepare_push_changelog.py'
 $attestationPath = Join-Path $repoRoot 'harness\reports\smoke\latest-push-attestation.md'
 $managedMetadataFiles = @(
     'CHANGELOG.md',
@@ -118,7 +119,7 @@ function Assert-NoUnstagedOrUntracked {
 
     $lines = [System.Collections.Generic.List[string]]::new()
     $lines.Add('codex-publish-impact requires all intended publish files to be staged before impact validation.')
-    $lines.Add('This keeps the WorkingTree impact content fingerprint reusable after commit.')
+    $lines.Add('This keeps the committed impact content fingerprint deterministic before push.')
     if ($unstaged.Count -gt 0) {
         $lines.Add('Unstaged tracked files:')
         foreach ($path in $unstaged) {
@@ -143,6 +144,29 @@ function Invoke-StagedWhitespaceCheck {
     }
     Invoke-GitStrict -Arguments (@('diff', '--cached', '--check', '--') + $Paths) | Out-Null
     Write-Host "Staged whitespace check passed for $($Paths.Count) paths." -ForegroundColor Green
+}
+
+function Get-PythonExecutable {
+    $venvPython = Join-Path $repoRoot '.venv\Scripts\python.exe'
+    if (Test-Path -LiteralPath $venvPython) {
+        return $venvPython
+    }
+    return 'python'
+}
+
+function Invoke-ChangelogHygieneCheck {
+    if (-not (Test-Path -LiteralPath $changelogScript)) {
+        throw "CHANGELOG hygiene script is missing: $changelogScript"
+    }
+
+    $pythonExe = Get-PythonExecutable
+    $output = & $pythonExe $changelogScript --repo-root $repoRoot --check-only 2>&1
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        $message = (@($output) | ForEach-Object { [string]$_ }) -join "`n"
+        throw "CHANGELOG hygiene check failed before impact validation.`n$message"
+    }
+    Write-Host 'CHANGELOG hygiene check passed before impact validation.' -ForegroundColor Green
 }
 
 function Get-StagedBlobText {
@@ -419,6 +443,7 @@ if ($stagedPaths.Count -gt 0) {
     Assert-TraceMatricesClosed -Paths $stagedPaths -AllowCandidates:($PlanOnly -and $AllowTraceCandidates)
     Assert-PublishScopeFrozen -Paths $stagedPaths
 }
+Invoke-ChangelogHygieneCheck
 
 [string[]]$highSignalPaths = @(Write-ExternalPushSummary -Paths $stagedPaths -RemoteUrl $remoteUrl)
 if (-not $SkipPush -and $highSignalPaths.Count -gt 0 -and -not $ConfirmExternalPush) {
@@ -430,13 +455,12 @@ if ($PlanOnly) {
     exit 0
 }
 
-$impactScope = if ($SkipCommit) { 'Committed' } else { 'WorkingTree' }
-Invoke-ImpactGate -Scope $impactScope
-
 if (-not $SkipCommit) {
     Assert-NoUnstagedOrUntracked
     Invoke-GitStrict -Arguments @('commit', '-m', $CommitMessage) | ForEach-Object { Write-Host $_ }
 }
+
+Invoke-ImpactGate -Scope 'Committed'
 
 if ($SkipPush) {
     Write-Host 'SkipPush supplied; commit/validation flow complete without pushing.' -ForegroundColor Cyan

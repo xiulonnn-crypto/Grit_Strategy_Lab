@@ -337,6 +337,8 @@ Phase 0 这类同时触及合同、执行、UI、测试和文档的任务，默�
 - `tests/test_runtime_supervisor.py`
 - `tests/test_strategies_smoke.py`
 
+该入口的 `latest-backend.txt` 是一次运行的生命周期报告：启动 pytest 前必须先覆盖旧报告并写入唯一的 `status = RUNNING`，随后以 UTF-8 持续写入 stdout/stderr；自然结束时先写真实起止时间、耗时、退出码和清理结果，再把同一 `status` 更新为 `PASSED`、`FAILED`、`TIMED_OUT` 或 `CANCELLED`。默认内部超时为 1200 秒，超时必须终止并确认已跟踪进程树。报告若仍是 `RUNNING`，或没有完整 `# Result`，表示进程被外部硬中断，必须视为非证据，不能回退引用旧报告。
+
 ### 3.3 frontend 固定验证切片
 
 `scripts/codex-test-frontend.ps1` 当前固定跑以下 focused Vitest 切片：
@@ -791,6 +793,25 @@ Factor routes: `#/factors/factory` is the canonical production workbench. `#/fac
 
 禁止只改 backend 或只改 frontend 一侧就宣称契约已完成。
 
+### 6.4 Execution profile 合同扩散矩阵
+
+`ARCHITECTURE.md` 负责记录某个 execution profile 的成交语义；本节只冻结新增或修改 profile 时必须同步的工程面与 owner 证据。开始编码前先逐行声明本次 `in scope / not applicable`，不能等实现完成后再反推影响面。
+
+| 合同节点 | 必须冻结的事实 | 最小 owner 证据 |
+| --- | --- | --- |
+| profile 身份与类型 guard | profile 存在参数版本快照中；允许启用的顶层 `strategy_type` 明确，其他类型不能被同名残留参数劫持 | engine 正向与非目标类型负向单测 |
+| 所选参数版本 | preview/submit 必须从请求指定的 `parameter_version_id` 取 profile，不能偷读当前版本 | real-service/API differential test |
+| run request 投影 | `execution_policy`、symbol、价格字段、权重和成本输入都由同一参数快照推导 | real-service/API focused test |
+| 成交日历与价格 | execution symbol 决定交易日历；入场/离场字段、缺价行为、覆盖率和末日孤儿单规则明确 | `tests/test_backtest_engine_rebalance.py` |
+| 资金、成本与换手 | 仓位比例、双边费用/滑点、净收益和 turnover 使用同一公式 | engine 数值回归 |
+| episode 审计 | entry/exit reason、毛/净 PnL、MFE/MAE 窗口和 commentary 口径一致 | trade-audit service/API test |
+| checkpoint/resume | checkpoint 只能落在该 profile 的合法状态边界；恢复结果与不中断运行相同 | engine resume differential test |
+| 持久化与读取 | materialize、preview、submit、run detail 与 trade detail 保留同一 profile 身份 | real-service/API 端到端 focused test |
+| 共享前端格式化 | 参数标签和值不能泄漏 raw enum；工作台、策略详情、运行详情使用同一映射 | `workspace.dashboard.test.tsx`、`strategy.detail.page.test.tsx`、`run-detail-kv-format.test.ts`、必要时 `run-detail.page.test.tsx` |
+| 门禁与用户说明 | planner 能命中上述 owner；`ARCHITECTURE.md` 与 `CHANGELOG.md` 分别记录技术真相和用户可感知结果 | `tests/test_git_gate_plan.py` + 文档 diff review |
+
+若 profile 仍挂在 `_real_service_rebuilt.py` 这类多职责单体模块中，impact planner 会保留保守 fanout；不得为缩短门禁而移除无从按路径判别的异步生命周期保护。长期提速应把 profile 合同抽到有独立 owner mapping 的模块，而不是降低验证覆盖。
+
 ## 7. 数据、fixture 与工件规范
 
 ### 7.1 runtime 数据与 fixture 数据必须分离
@@ -833,12 +854,22 @@ Factor routes: `#/factors/factory` is the canonical production workbench. `#/fac
 | 改动类型 | 当前应跑的最小验证路径 |
 | --- | --- |
 | 仅文档或 CHANGELOG 改动 | `scripts/codex-validate-fast.ps1`，只保留 git 与 diff check，不跑 backend/frontend |
-| 仅后端改动 | `scripts/codex-validate-fast.ps1`，由脚本选择受影响 pytest；必要时再手工跑 `scripts/codex-test-backend.ps1` |
-| 仅前端改动 | `scripts/codex-validate-fast.ps1`，阻塞执行 `tsc --noEmit` 与相关 Vitest；必要时再手工跑 `scripts/codex-test-frontend.ps1` |
-| API/types/shared contract 改动 | `scripts/codex-validate-fast.ps1` 同时跑 backend 与 frontend 快速校验 |
-| 跨栈且不依赖 fixture | 日常推云用 fast gate；大改、发版或合并前用 `scripts/codex-validate-full.ps1` |
+| 仅后端改动 | 先跑 `scripts/codex-validate-fast.ps1`；若 owner 未映射或超出 fast 预算，按 `not-fast` 提示转 `codex-validate-impact.ps1`，固定 backend 入口只用于 full/smoke 收口 |
+| 仅前端改动 | fast 只跑命中的 focused Vitest，不跑全局 tsc；需要 TypeScript 全局检查、owner fanout 或 fast 返回 `not-fast` 时改跑 impact |
+| API/types/shared contract 改动 | fast 必须返回 `not-fast`，随后运行 impact 的 backend/frontend contract owners 与 TypeScript |
+| 跨栈且不依赖 fixture | fast 必须返回 `not-fast`；实现阶段运行 WorkingTree impact，大版本、发版或合并前再运行 full |
 | 依赖 fixture 的验收 | `scripts/codex-test-frontend.ps1 -IncludeLiveAcceptance`，会 reset fixture、启动 `8010` backend 并运行 live real-api smoke |
 | 全量 Codex smoke | `scripts/codex-smoke.ps1`，作为 reset fixture + backend/frontend 固定入口的 orchestrator |
+| 新增或修改 execution profile | engine focused -> real-service/API owner slice -> 共享 formatter/消费面 focused -> 一次 WorkingTree impact；若改 live runtime/UI，再做 runtime preflight 与 live route 验收 |
+
+#### 8.1.1 Execution profile 唯一门禁顺序
+
+1. 先运行 `tests/test_backtest_engine_rebalance.py` 中与 profile 相关的数值、缺价、成本和 resume 用例，失败时不启动大切片。
+2. 再运行 planner 选出的 real-service/API owner file 或 owner slice，证明所选参数版本、物化、preview/submit、审计与读取投影贯通；在 profile 合同尚未抽离前，该步可能是完整 owner 文件，不能写成更窄的 focused 证据。
+3. 有前端消费面时，再运行共享 formatter 单测及工作台、策略详情、运行详情 owner tests。
+4. 若本次触及 planner 或验证脚本，先运行 `codex-validate-impact.ps1 -PlanOnly` 与 `codex-validate-fast.ps1`；之后只运行一次 `codex-validate-impact.ps1 -Scope WorkingTree` 汇总影响面，不用 backend 固定片作为第一轮试错入口。
+5. `codex-test-backend.ps1` 留给明确需要固定 backend/full smoke 的收口阶段；调用方超时不得短于脚本的内部上限。只有带本轮 `# Result` 终态的报告才能作为完成证据。
+6. 只有改动触及 live runtime 或用户可见路由时，才在最终代码后执行 runtime preflight、必要重启、cache-busting live acceptance；纯文档/验证工具优化不重启 localhost。
 
 ### 8.2 frontend 验证政策
 
