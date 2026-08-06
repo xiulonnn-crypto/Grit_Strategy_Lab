@@ -1,4 +1,10 @@
-import type { DemoApi } from '../types';
+import type {
+  ApiBacktestRunListItem,
+  ApiOptimizationJobListItem,
+  ApiStrategyListItem,
+  ApiWorkspaceOverview,
+  DemoApi,
+} from '../types';
 import {
   demoApi,
   exportDemoStoreSnapshot,
@@ -22,6 +28,18 @@ type StaticDemoCloudConnect = {
   gistId?: string | null;
 };
 
+type StaticWorkspaceSeed = {
+  overview: ApiWorkspaceOverview;
+  strategy_library: {
+    strategies: ApiStrategyListItem[];
+    runs: ApiBacktestRunListItem[];
+  };
+  optimization_jobs: ApiOptimizationJobListItem[];
+  strategy_details?: Record<string, unknown>;
+  backtest_run_details?: Record<string, unknown>;
+  optimization_job_details?: Record<string, unknown>;
+};
+
 let githubToken: string | null = null;
 let cloudStatus: StaticDemoCloudStatus = {
   connected: false,
@@ -30,9 +48,63 @@ let cloudStatus: StaticDemoCloudStatus = {
   error: null,
 };
 const cloudListeners = new Set<() => void>();
+let workspaceSeedPromise: Promise<StaticWorkspaceSeed | null> | null = null;
 
 export function isStaticDemoMode(): boolean {
   return import.meta.env.VITE_STATIC_DEMO === 'true';
+}
+
+export function isStaticDemoSyncPanelRequested(): boolean {
+  return isStaticDemoMode() && new URLSearchParams(window.location.search).has('demo-sync');
+}
+
+async function loadWorkspaceSeed(): Promise<StaticWorkspaceSeed | null> {
+  if (!isStaticDemoMode() || typeof window === 'undefined') return null;
+  if (!workspaceSeedPromise) {
+    workspaceSeedPromise = fetch(`${import.meta.env.BASE_URL}workspace-seed.json`)
+      .then(async (response) => (response.ok ? ((await response.json()) as StaticWorkspaceSeed) : null))
+      .catch(() => null);
+  }
+  return workspaceSeedPromise;
+}
+
+async function getSeededWorkspaceResult(property: PropertyKey, args: unknown[]): Promise<{ matched: boolean; value?: unknown }> {
+  const seed = await loadWorkspaceSeed();
+  if (!seed) return { matched: false };
+  switch (property) {
+    case 'getWorkspaceOverview':
+      return { matched: true, value: structuredClone(seed.overview) };
+    case 'getStrategyLibrary':
+      return { matched: true, value: structuredClone(seed.strategy_library) };
+    case 'listStrategies':
+      return { matched: true, value: structuredClone(seed.strategy_library.strategies) };
+    case 'listBacktestRuns': {
+      const [query] = args as [{ limit?: number; status?: string } | undefined];
+      const rows = query?.status
+        ? seed.strategy_library.runs.filter((row) => row.status === query.status)
+        : seed.strategy_library.runs;
+      return { matched: true, value: structuredClone(query?.limit ? rows.slice(0, query.limit) : rows) };
+    }
+    case 'listOptimizationJobs':
+      return { matched: true, value: structuredClone(seed.optimization_jobs) };
+    case 'getStrategyDetail': {
+      const [id] = args as [string];
+      const value = seed.strategy_details?.[id];
+      return value === undefined ? { matched: false } : { matched: true, value: structuredClone(value) };
+    }
+    case 'getBacktestRunDetail': {
+      const [id] = args as [string];
+      const value = seed.backtest_run_details?.[id];
+      return value === undefined ? { matched: false } : { matched: true, value: structuredClone(value) };
+    }
+    case 'getOptimizationJobDetail': {
+      const [id] = args as [string];
+      const value = seed.optimization_job_details?.[id];
+      return value === undefined ? { matched: false } : { matched: true, value: structuredClone(value) };
+    }
+    default:
+      return { matched: false };
+  }
 }
 
 function loadSnapshot(): void {
@@ -172,11 +244,22 @@ export function createStaticDemoApi(): DemoApi {
     get(target, property, receiver) {
       const value = Reflect.get(target, property, receiver);
       if (typeof value !== 'function') return value;
-      return (...args: unknown[]) =>
-        Promise.resolve(value.apply(target, args)).then((result) => {
-          saveSnapshot();
-          return result;
-        });
+      return async (...args: unknown[]) => {
+        const seeded = await getSeededWorkspaceResult(property, args);
+        let result = seeded.matched ? seeded.value : undefined;
+        if (!seeded.matched) {
+          try {
+            result = await value.apply(target, args);
+          } catch (error) {
+            const fallbackId =
+              property === 'getStrategyDetail' ? 'strat-001' : property === 'getBacktestRunDetail' ? 'bt-001' : property === 'getOptimizationJobDetail' ? 'opt-001' : null;
+            if (!fallbackId) throw error;
+            result = await value.apply(target, [fallbackId, ...args.slice(1)]);
+          }
+        }
+        saveSnapshot();
+        return result;
+      };
     },
   }) as DemoApi;
 }
