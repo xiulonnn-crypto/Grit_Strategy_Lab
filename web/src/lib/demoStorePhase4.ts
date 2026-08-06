@@ -69,7 +69,7 @@ import {
   type PromoteMode,
 } from '../types';
 import { createInitialState } from './demoStoreSeed';
-import { clone, createCandidate, createStrategy, nextId, nowIso } from './demoStoreShared';
+import { clone, createCandidate, createStrategy, nextId, nowIso, type DemoState } from './demoStoreShared';
 import {
   applyOptimizationJobConstraintUpdate,
   buildOptimizationJobListItem,
@@ -80,6 +80,51 @@ let state = createInitialState();
 let demoPitWaiver:
   | NonNullable<ApiPitDataOverview['research_waiver']>
   | null = null;
+
+export type DemoStoreSnapshot = Omit<DemoState, 'promoteConflicts'> & {
+  promoteConflicts: string[];
+  pitWaiver: NonNullable<ApiPitDataOverview['research_waiver']> | null;
+};
+
+export function exportDemoStoreSnapshot(): DemoStoreSnapshot {
+  return clone({
+    ...state,
+    promoteConflicts: [...state.promoteConflicts],
+    pitWaiver: demoPitWaiver,
+  });
+}
+
+export function restoreDemoStoreSnapshot(snapshot: DemoStoreSnapshot): void {
+  if (
+    !snapshot ||
+    !Array.isArray(snapshot.strategies) ||
+    !Array.isArray(snapshot.assetLegs) ||
+    !Array.isArray(snapshot.cashLegs) ||
+    !Array.isArray(snapshot.compositions) ||
+    !Array.isArray(snapshot.factors) ||
+    !Array.isArray(snapshot.optimizationJobs) ||
+    !Array.isArray(snapshot.sessions) ||
+    !Array.isArray(snapshot.runs) ||
+    !Array.isArray(snapshot.promoteConflicts) ||
+    !snapshot.tradeAudits ||
+    typeof snapshot.tradeAudits !== 'object'
+  ) {
+    throw new Error('Invalid static demo snapshot.');
+  }
+  state = {
+    strategies: clone(snapshot.strategies),
+    assetLegs: clone(snapshot.assetLegs),
+    cashLegs: clone(snapshot.cashLegs),
+    compositions: clone(snapshot.compositions),
+    factors: clone(snapshot.factors),
+    optimizationJobs: clone(snapshot.optimizationJobs),
+    sessions: clone(snapshot.sessions),
+    runs: clone(snapshot.runs),
+    tradeAudits: clone(snapshot.tradeAudits),
+    promoteConflicts: new Set(snapshot.promoteConflicts),
+  };
+  demoPitWaiver = snapshot.pitWaiver ? clone(snapshot.pitWaiver) : null;
+}
 
 function findStrategy(id: string): ApiStrategyDetail {
   const strategy = state.strategies.find((item) => item.id === id);

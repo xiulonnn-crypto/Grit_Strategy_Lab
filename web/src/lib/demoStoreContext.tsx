@@ -1,5 +1,6 @@
 ﻿import React, { createContext, useContext, useMemo } from 'react';
 import { ApiError } from '../types';
+import { createStaticDemoApi, isStaticDemoMode } from './staticDemoApi';
 import {
   buildCompositionStressScenarios,
   selectWorstCompositionStressScenario,
@@ -979,7 +980,7 @@ function createHttpApiClient(): DemoApi {
 }
 
 export function ApiClientProvider({ children }: { children: React.ReactNode }): React.ReactElement {
-  const api = useMemo(() => createHttpApiClient(), []);
+  const api = useMemo(() => (isStaticDemoMode() ? createStaticDemoApi() : createHttpApiClient()), []);
   return <ApiClientContext.Provider value={api}>{children}</ApiClientContext.Provider>;
 }
 

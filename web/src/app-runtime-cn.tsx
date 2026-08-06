@@ -21,6 +21,8 @@ import type {
   FactorModelStrategyCreationRisk,
 } from './pages/factor-model-builder-page';
 import { ShellFrameCn } from './shell-frame-cn';
+import { StaticDemoCloudSync } from './components/static-demo-cloud-sync';
+import { isStaticDemoMode } from './lib/staticDemoApi';
 import { formatFactorDisplayName } from './lib/factor-display';
 import type {
   ApiExternalFactorImportJob,
@@ -1435,6 +1437,7 @@ function AppShell(): JSX.Element {
           </Suspense>
         </RouteErrorBoundary>
       </ShellFrameCn>
+      {isStaticDemoMode() ? <StaticDemoCloudSync /> : null}
     </AppRouteProvider>
   );
 }
